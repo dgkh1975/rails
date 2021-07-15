@@ -107,12 +107,22 @@ class AppGeneratorTest < Rails::Generators::TestCase
   end
 
   def test_skip_bundle
-    generator([destination_root], skip_bundle: true, skip_webpack_install: true)
-    run_generator_instance
+    generator([destination_root], skip_bundle: true)
+    output = run_generator_instance
 
     assert_empty @bundle_commands
     # skip_bundle is only about running bundle install so ensure the Gemfile is still generated
     assert_file "Gemfile"
+    assert_webpack_installation_skipped(output)
+  end
+
+  def test_skip_gemfile
+    generator([destination_root], skip_gemfile: true)
+    output = run_generator_instance
+
+    assert_empty @bundle_commands
+    assert_no_file "Gemfile"
+    assert_webpack_installation_skipped(output)
   end
 
   def test_assets
@@ -294,7 +304,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
 
     assert_file "bin/setup" do |content|
       # Does not comment yarn install
-      assert_match(/(?=[^#]*?) system! 'bin\/yarn'/, content)
+      assert_match(/(?=[^#]*?) system! "bin\/yarn"/, content)
     end
   end
 
@@ -310,7 +320,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
       assert_no_file "#{app_root}/bin/yarn"
 
       assert_file "#{app_root}/bin/setup" do |content|
-        assert_no_match(/system! 'bin\/yarn'/, content)
+        assert_no_match(/system! "bin\/yarn"/, content)
       end
     end
   end
@@ -377,7 +387,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
 
   def test_gem_for_active_storage
     run_generator
-    assert_file "Gemfile", /^# gem 'image_processing'/
+    assert_file "Gemfile", /^# gem "image_processing"/
   end
 
   def test_gem_for_active_storage_when_skip_active_storage_is_given
@@ -521,13 +531,61 @@ class AppGeneratorTest < Rails::Generators::TestCase
     end
   end
 
+  def test_package_json_uses_current_versions_and_set_version_of_turbolinks
+    run_generator
+    generator = Rails::Generators::AppBase.new ["rails"]
+    version = generator.send(:npm_version)
+
+    assert_file "package.json" do |content|
+      assert_match(/"@rails\/ujs": "#{version}"/, content)
+      assert_match(/"@rails\/activestorage": "#{version}"/, content)
+      assert_match(/"@rails\/actioncable": "#{version}"/, content)
+      assert_match(/"turbolinks": "\^5.2.0"/, content)
+    end
+  end
+
+  def test_package_json_uses_edge_versions
+    run_generator [destination_root, "--main"]
+
+    assert_file "package.json" do |content|
+      assert_match(/"@rails\/ujs": "latest"/, content)
+      assert_match(/"@rails\/activestorage": "latest"/, content)
+      assert_match(/"@rails\/actioncable": "latest"/, content)
+      assert_match(/"turbolinks": "turbolinks\/turbolinks#master"/, content)
+    end
+  end
+
+  def test_package_json_excludes_activestorage_if_skipped
+    run_generator [destination_root, "--skip-active-storage"]
+
+    assert_file "package.json" do |content|
+      assert_not content.include?("activestorage")
+    end
+  end
+
+  def test_package_json_excludes_actioncable_if_skipped
+    run_generator [destination_root, "--skip-action-cable"]
+
+    assert_file "package.json" do |content|
+      assert_not content.include?("actioncable")
+    end
+  end
+
+  def test_package_json_excludes_turbolinks_if_skipped
+    run_generator [destination_root, "--skip-turbolinks"]
+
+    assert_file "package.json" do |content|
+      assert_not content.include?("turbolinks")
+    end
+  end
+
   def test_config_database_is_added_by_default
     run_generator
     assert_file "config/database.yml", /sqlite3/
     if defined?(JRUBY_VERSION)
       assert_gem "activerecord-jdbcsqlite3-adapter"
     else
-      assert_gem "sqlite3", "'~> 1.4'"
+      assert_gem "sqlite3", '"~> 1.4"'
     end
   end
 
@@ -537,7 +595,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
     if defined?(JRUBY_VERSION)
       assert_gem "activerecord-jdbcmysql-adapter"
     else
-      assert_gem "mysql2", "'~> 0.5'"
+      assert_gem "mysql2", '"~> 0.5"'
     end
   end
 
@@ -552,7 +610,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
     if defined?(JRUBY_VERSION)
       assert_gem "activerecord-jdbcpostgresql-adapter"
     else
-      assert_gem "pg", "'~> 1.1'"
+      assert_gem "pg", '"~> 1.1"'
     end
   end
 
@@ -591,7 +649,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
 
   def test_generator_defaults_to_puma_version
     run_generator [destination_root]
-    assert_gem "puma", "'~> 5.0'"
+    assert_gem "puma", '"~> 5.0"'
   end
 
   def test_generator_if_skip_puma_is_given
@@ -608,7 +666,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
 
   def test_action_cable_redis_gems
     run_generator
-    assert_file "Gemfile", /^# gem 'redis'/
+    assert_file "Gemfile", /^# gem "redis"/
   end
 
   def test_generator_if_skip_test_is_given
@@ -731,13 +789,6 @@ class AppGeneratorTest < Rails::Generators::TestCase
     assert_match(/It works from file!/, run_generator([destination_root, "-m", "lib/template.rb"]))
   end
 
-  def test_argv_is_populated_for_template
-    FileUtils.cd(Rails.root)
-    argv = [destination_root, "-m", "lib/template.rb"]
-
-    assert_match %r/With ARGV! #{Regexp.escape argv.join(" ")}/, run_generator(argv)
-  end
-
   def test_usage_read_from_file
     assert_called(File, :read, returns: "USAGE FROM FILE") do
       assert_equal "USAGE FROM FILE", Rails::Generators::AppGenerator.desc
@@ -755,8 +806,8 @@ class AppGeneratorTest < Rails::Generators::TestCase
   end
 
   def test_file_is_added_for_backwards_compatibility
-    action :file, "lib/test_file.rb", "heres test data"
-    assert_file "lib/test_file.rb", "heres test data"
+    action :file, "lib/test_file.rb", "here's test data"
+    assert_file "lib/test_file.rb", "here's test data"
   end
 
   def test_pretend_option
@@ -795,8 +846,8 @@ class AppGeneratorTest < Rails::Generators::TestCase
     run_generator [destination_root, "--dev", "--skip-bundle"]
 
     assert_file "Gemfile" do |content|
-      assert_match(/gem 'web-console',\s+github: 'rails\/web-console'/, content)
-      assert_no_match(/\Agem 'web-console', '>= 4\.1\.0'\z/, content)
+      assert_match(/gem "web-console",\s+github: "rails\/web-console"/, content)
+      assert_no_match(/\Agem "web-console", ">= 4\.1\.0"\z/, content)
     end
   end
 
@@ -804,8 +855,8 @@ class AppGeneratorTest < Rails::Generators::TestCase
     run_generator [destination_root, "--edge"]
 
     assert_file "Gemfile" do |content|
-      assert_match(/gem 'web-console',\s+github: 'rails\/web-console'/, content)
-      assert_no_match(/\Agem 'web-console', '>= 4\.1\.0'\z/, content)
+      assert_match(/gem "web-console",\s+github: "rails\/web-console"/, content)
+      assert_no_match(/\Agem "web-console", ">= 4\.1\.0"\z/, content)
     end
   end
 
@@ -813,8 +864,8 @@ class AppGeneratorTest < Rails::Generators::TestCase
     run_generator [destination_root, "--main"]
 
     assert_file "Gemfile" do |content|
-      assert_match(/gem 'web-console',\s+github: 'rails\/web-console'/, content)
-      assert_no_match(/\Agem 'web-console', '>= 4\.1\.0'\z/, content)
+      assert_match(/gem "web-console",\s+github: "rails\/web-console"/, content)
+      assert_no_match(/\Agem "web-console", ">= 4\.1\.0"\z/, content)
     end
   end
 
@@ -853,8 +904,20 @@ class AppGeneratorTest < Rails::Generators::TestCase
   end
 
   def test_edge_option
-    generator([destination_root], edge: true, skip_webpack_install: true)
-    run_generator_instance
+    Rails.stub(:gem_version, Gem::Version.new("2.1.0")) do
+      generator([destination_root], edge: true, skip_webpack_install: true)
+      run_generator_instance
+    end
+
+    assert_equal 1, @bundle_commands.count("install")
+    assert_file "Gemfile", %r{^gem\s+["']rails["'],\s+github:\s+["']#{Regexp.escape("rails/rails")}["'],\s+branch:\s+["']2-1-stable["']$}
+  end
+
+  def test_edge_option_during_alpha
+    Rails.stub(:gem_version, Gem::Version.new("2.1.0.alpha")) do
+      generator([destination_root], edge: true, skip_webpack_install: true)
+      run_generator_instance
+    end
 
     assert_equal 1, @bundle_commands.count("install")
     assert_file "Gemfile", %r{^gem\s+["']rails["'],\s+github:\s+["']#{Regexp.escape("rails/rails")}["'],\s+branch:\s+["']main["']$}
@@ -1057,7 +1120,7 @@ class AppGeneratorTest < Rails::Generators::TestCase
     run_generator
 
     assert_file "Gemfile" do |content|
-      assert_match(/ruby '#{RUBY_VERSION}'/, content)
+      assert_match(/ruby "#{RUBY_VERSION}"/, content)
     end
     assert_file ".ruby-version" do |content|
       if ENV["RBENV_VERSION"]
@@ -1263,5 +1326,23 @@ class AppGeneratorTest < Rails::Generators::TestCase
       assert_file "config/environments/development.rb" do |content|
         assert_match(/^\s*# config\.file_watcher = ActiveSupport::EventedFileUpdateChecker/, content)
       end
+    end
+
+    def assert_webpack_installation_skipped(output)
+      assert_match(/^Skipping `rails webpacker:install`/, output)
+
+      %w(
+        .browserslistrc
+        babel.config.js
+        bin/webpack
+        bin/webpack-dev-server
+        config/webpack
+        config/webpack/development.js
+        config/webpack/environment.js
+        config/webpack/production.js
+        config/webpack/test.js
+        config/webpacker.yml
+        postcss.config.js
+      ).each { |f| assert_no_file(f) }
     end
 end

@@ -47,6 +47,8 @@ happens after every keystroke, and avoids the need to use execCommand at all.
 
 Run `bin/rails action_text:install` to add the Yarn package and copy over the necessary migration. Also, you need to set up Active Storage for embedded images and other attachments. Please refer to the [Active Storage Overview](active_storage_overview.html) guide.
 
+NOTE: ActionText uses polymorphic relationships with the `action_text_rich_texts` table so that it can be shared with all models that have rich text attributes. If your models with ActionText content use UUID values for identifiers, all models that use ActionText attributes will need to use UUID values for their unique identifiers. The generated migration for ActionText will also need to be updated to specify `type: :uuid` for the `:record` `references` line.
+
 After the installation is complete, a Rails app using Webpacker should have the following changes:
 
 1. Both `trix` and `@rails/actiontext` should be required in your JavaScript pack.
@@ -81,9 +83,15 @@ class Message < ApplicationRecord
 end
 ```
 
+or add rich text field while creating a new model using:
+
+```
+bin/rails generate model Message content:rich_text
+```
+
 **Note:** you don't need to add a `content` field to your `messages` table.
 
-Then refer to this field in the form for the model:
+Then use [`rich_text_area`] to refer to this field in the form for the model:
 
 ```erb
 <%# app/views/messages/_form.html.erb %>
@@ -112,11 +120,13 @@ class MessagesController < ApplicationController
 end
 ```
 
+[`rich_text_area`]: https://api.rubyonrails.org/classes/ActionView/Helpers/FormHelper.html#method-i-rich_text_area
+
 ## Rendering Rich Text content
 
 Action Text will sanitize and render rich content on your behalf.
 
-By default, the Action Text editor and content is styled by the Trix defaults.
+By default, the Action Text editor and content are styled by the Trix defaults.
 
 If you want to change these defaults, remove the `// require "actiontext.scss"`
 line from your `application.scss` to omit the [contents of that
@@ -170,7 +180,7 @@ Next, consider some rich text content that embeds an `<action-text-attachment>`
 element that references the `User` instance's signed GlobalID:
 
 ```html
-<p>Hello, <action-text-attachment sgid="BAh7CEkiCG…"></action-text-content>.</p>
+<p>Hello, <action-text-attachment sgid="BAh7CEkiCG…"></action-text-attachment>.</p>
 ```
 
 Action Text resolves uses the "BAh7CEkiCG…" String to resolve the `User`
@@ -184,7 +194,7 @@ instance. Next, consider the application's `users/user` partial:
 The resulting HTML rendered by Action Text would look something like:
 
 ```html
-<p>Hello, <action-text-attachment sgid="BAh7CEkiCG…"><span><img src="..."> Jane Doe</span></action-text-content>.</p>
+<p>Hello, <action-text-attachment sgid="BAh7CEkiCG…"><span><img src="..."> Jane Doe</span></action-text-attachment>.</p>
 ```
 
 To render a different partial, define `User#to_attachable_partial_path`:

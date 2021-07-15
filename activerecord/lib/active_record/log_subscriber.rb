@@ -37,7 +37,11 @@ module ActiveRecord
 
       return if IGNORE_PAYLOAD_NAMES.include?(payload[:name])
 
-      name  = "#{payload[:name]} (#{event.duration.round(1)}ms)"
+      name = if payload[:async]
+        "ASYNC #{payload[:name]} (#{payload[:lock_wait].round(1)}ms) (db time #{event.duration.round(1)}ms)"
+      else
+        "#{payload[:name]} (#{event.duration.round(1)}ms)"
+      end
       name  = "CACHE #{name}" if payload[:cached]
       sql   = payload[:sql]
       binds = nil
@@ -115,7 +119,7 @@ module ActiveRecord
       def debug(progname = nil, &block)
         return unless super
 
-        if ActiveRecord::Base.verbose_query_logs
+        if ActiveRecord.verbose_query_logs
           log_query_source
         end
       end

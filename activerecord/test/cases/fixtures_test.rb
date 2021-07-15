@@ -566,7 +566,7 @@ class HasManyThroughFixture < ActiveRecord::TestCase
     Class.new(ActiveRecord::Base) { define_singleton_method(:name) { name } }
   end
 
-  def test_has_many_through_with_default_table_name
+  def test_has_many_through_with_join_table_name_changed_to_match_habtm_table_name
     pt = make_model "ParrotTreasure"
     parrot = make_model "Parrot"
     treasure = make_model "Treasure"
@@ -585,7 +585,7 @@ class HasManyThroughFixture < ActiveRecord::TestCase
     assert_equal load_has_and_belongs_to_many["parrots_treasures"], rows["parrots_treasures"]
   end
 
-  def test_has_many_through_with_renamed_table
+  def test_has_many_through_with_default_table_name_on_join_table
     pt = make_model "ParrotTreasure"
     parrot = make_model "Parrot"
     treasure = make_model "Treasure"
@@ -788,6 +788,76 @@ class ForeignKeyFixturesTest < ActiveRecord::TestCase
   def test_number2
     assert true
   end
+end
+
+class FkObjectToPointTo < ActiveRecord::Base
+  has_many :fk_pointing_to_non_existent_objects
+end
+class FkPointingToNonExistentObject < ActiveRecord::Base
+  belongs_to :fk_object_to_point_to
+end
+
+class FixturesWithForeignKeyViolationsTest < ActiveRecord::TestCase
+  fixtures :fk_object_to_point_to
+
+  def setup
+    # other tests in this file load the parrots fixture but not the treasure one (see `test_create_fixtures`).
+    # this creates FK violations since Parrot and ParrotTreasure records are created.
+    # those violations can cause false positives in these tests. since they aren't related to these tests we
+    # delete the irrelevant records here (this test is transactional so it's fine).
+    Parrot.all.each(&:destroy)
+  end
+
+  def test_raises_fk_violations
+    fk_pointing_to_non_existent_object = <<~FIXTURE
+    first:
+      fk_object_to_point_to: one
+    FIXTURE
+    File.write(FIXTURES_ROOT + "/fk_pointing_to_non_existent_object.yml", fk_pointing_to_non_existent_object)
+
+    with_verify_foreign_keys_for_fixtures do
+      if current_adapter?(:SQLite3Adapter, :PostgreSQLAdapter)
+        assert_raise RuntimeError do
+          ActiveRecord::FixtureSet.create_fixtures(FIXTURES_ROOT, ["fk_pointing_to_non_existent_object"])
+        end
+      else
+        assert_nothing_raised do
+          ActiveRecord::FixtureSet.create_fixtures(FIXTURES_ROOT, ["fk_pointing_to_non_existent_object"])
+        end
+      end
+    end
+
+  ensure
+    File.delete(FIXTURES_ROOT + "/fk_pointing_to_non_existent_object.yml")
+    ActiveRecord::FixtureSet.reset_cache
+  end
+
+  def test_does_not_raise_if_no_fk_violations
+    fk_pointing_to_valid_object = <<~FIXTURE
+    first:
+      fk_object_to_point_to_id: 1
+    FIXTURE
+    File.write(FIXTURES_ROOT + "/fk_pointing_to_non_existent_object.yml", fk_pointing_to_valid_object)
+
+    with_verify_foreign_keys_for_fixtures do
+      assert_nothing_raised do
+        ActiveRecord::FixtureSet.create_fixtures(FIXTURES_ROOT, ["fk_pointing_to_non_existent_object"])
+      end
+    end
+
+  ensure
+    File.delete(FIXTURES_ROOT + "/fk_pointing_to_non_existent_object.yml")
+    ActiveRecord::FixtureSet.reset_cache
+  end
+
+  private
+    def with_verify_foreign_keys_for_fixtures
+      setting_was = ActiveRecord.verify_foreign_keys_for_fixtures
+      ActiveRecord.verify_foreign_keys_for_fixtures = true
+      yield
+    ensure
+      ActiveRecord.verify_foreign_keys_for_fixtures = setting_was
+    end
 end
 
 class OverRideFixtureMethodTest < ActiveRecord::TestCase
@@ -1103,7 +1173,7 @@ class FoxyFixturesTest < ActiveRecord::TestCase
   fixtures :parrots, :parrots_pirates, :pirates, :treasures, :mateys, :ships, :computers,
            :developers, :"admin/accounts", :"admin/users", :live_parrots, :dead_parrots, :books
 
-  if ActiveRecord::Base.connection.adapter_name == "PostgreSQL"
+  if current_adapter?(:PostgreSQLAdapter)
     require "models/uuid_parent"
     require "models/uuid_child"
     fixtures :uuid_parents, :uuid_children
@@ -1187,6 +1257,18 @@ class FoxyFixturesTest < ActiveRecord::TestCase
     assert(pirates(:blackbeard).parrots.include?(parrots(:george)))
     assert(pirates(:blackbeard).parrots.include?(parrots(:louis)))
     assert(parrots(:george).pirates.include?(pirates(:blackbeard)))
+  end
+
+  def test_supports_timestamps_in_join_tables
+    assert_not_nil developers(:david).created_at
+    assert_not_nil computers(:laptop).created_at
+
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "computers_developers"
+    end
+
+    computers_developers = klass.find_by(developer_id: developers(:david), computer_id: computers(:laptop))
+    assert_not_nil computers_developers.created_at
   end
 
   def test_supports_inline_habtm
@@ -1421,9 +1503,11 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       @prev_configs, ActiveRecord::Base.configurations = ActiveRecord::Base.configurations, config
       db_config = ActiveRecord::DatabaseConfigurations::HashConfig.new(ENV["RAILS_ENV"], "readonly", readonly_config)
 
+      teardown_shared_connection_pool
+
       handler = ActiveRecord::ConnectionAdapters::ConnectionHandler.new
-      handler.establish_connection(db_config)
       ActiveRecord::Base.connection_handler = handler
+      handler.establish_connection(db_config)
 
       ActiveRecord::Base.connects_to(database: { writing: :default, reading: :readonly })
 
@@ -1452,6 +1536,13 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       ro_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :reading).connection
 
       assert_equal rw_conn, ro_conn
+
+      teardown_shared_connection_pool
+
+      rw_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :writing).connection
+      ro_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :reading).connection
+
+      assert_not_equal rw_conn, ro_conn
     end
 
     def test_writing_and_reading_connections_are_the_same_for_non_default_shards
@@ -1465,6 +1556,13 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       ro_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :reading, shard: :two).connection
 
       assert_equal rw_conn, ro_conn
+
+      teardown_shared_connection_pool
+
+      rw_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :writing, shard: :two).connection
+      ro_conn = handler.retrieve_connection_pool("ActiveRecord::Base", role: :reading, shard: :two).connection
+
+      assert_not_equal rw_conn, ro_conn
     end
 
     def test_only_existing_connections_are_replaced
@@ -1477,6 +1575,17 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
 
       assert_raises(ActiveRecord::ConnectionNotEstablished) do
         ActiveRecord::Base.connected_to(role: :reading, shard: :two) do
+          ActiveRecord::Base.retrieve_connection
+        end
+      end
+    end
+
+    def test_only_existing_connections_are_restored
+      clean_up_connection_handler
+      teardown_shared_connection_pool
+
+      assert_raises(ActiveRecord::ConnectionNotEstablished) do
+        ActiveRecord::Base.connected_to(role: :reading) do
           ActiveRecord::Base.retrieve_connection
         end
       end
@@ -1502,17 +1611,21 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
     fixtures :dogs
 
     def setup
-      @old_value = ActiveRecord::Base.legacy_connection_handling
-      ActiveRecord::Base.legacy_connection_handling = true
+      @old_value = ActiveRecord.legacy_connection_handling
+      ActiveRecord.legacy_connection_handling = true
 
       @old_handler = ActiveRecord::Base.connection_handler
       @prev_configs, ActiveRecord::Base.configurations = ActiveRecord::Base.configurations, config
       db_config = ActiveRecord::DatabaseConfigurations::HashConfig.new(ENV["RAILS_ENV"], "readonly", readonly_config)
 
+      teardown_shared_connection_pool
+
       handler = ActiveRecord::ConnectionAdapters::ConnectionHandler.new
-      handler.establish_connection(db_config)
-      ActiveRecord::Base.connection_handlers = {}
       ActiveRecord::Base.connection_handler = handler
+      handler.establish_connection(db_config)
+      assert_deprecated do
+        ActiveRecord::Base.connection_handlers = {}
+      end
       ActiveRecord::Base.connects_to(database: { writing: :default, reading: :readonly })
 
       setup_shared_connection_pool
@@ -1522,7 +1635,7 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       ActiveRecord::Base.configurations = @prev_configs
       ActiveRecord::Base.connection_handler = @old_handler
       clean_up_legacy_connection_handlers
-      ActiveRecord::Base.legacy_connection_handling = false
+      ActiveRecord.legacy_connection_handling = false
     end
 
     def test_uses_writing_connection_for_fixtures
@@ -1543,6 +1656,13 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       ro_conn = reading.retrieve_connection_pool("ActiveRecord::Base").connection
 
       assert_equal rw_conn, ro_conn
+
+      teardown_shared_connection_pool
+
+      rw_conn = writing.retrieve_connection_pool("ActiveRecord::Base").connection
+      ro_conn = reading.retrieve_connection_pool("ActiveRecord::Base").connection
+
+      assert_not_equal rw_conn, ro_conn
     end
 
     def test_writing_and_reading_connections_are_the_same_for_non_default_shards_with_legacy_handling
@@ -1558,6 +1678,13 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
       ro_conn = reading.retrieve_connection_pool("ActiveRecord::Base", shard: :two).connection
 
       assert_equal rw_conn, ro_conn
+
+      teardown_shared_connection_pool
+
+      rw_conn = writing.retrieve_connection_pool("ActiveRecord::Base", shard: :two).connection
+      ro_conn = reading.retrieve_connection_pool("ActiveRecord::Base", shard: :two).connection
+
+      assert_not_equal rw_conn, ro_conn
     end
 
     def test_only_existing_connections_are_replaced
@@ -1570,6 +1697,17 @@ if current_adapter?(:SQLite3Adapter) && !in_memory_db?
 
       assert_raises(ActiveRecord::ConnectionNotEstablished) do
         ActiveRecord::Base.connected_to(role: :reading, shard: :two) do
+          ActiveRecord::Base.retrieve_connection
+        end
+      end
+    end
+
+    def test_only_existing_connections_are_restored
+      clean_up_legacy_connection_handlers
+      teardown_shared_connection_pool
+
+      assert_raises(ActiveRecord::ConnectionNotEstablished) do
+        ActiveRecord::Base.connected_to(role: :reading) do
           ActiveRecord::Base.retrieve_connection
         end
       end

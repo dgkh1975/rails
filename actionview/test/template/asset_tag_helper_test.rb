@@ -6,8 +6,21 @@ require "active_support/ordered_options"
 require "action_dispatch"
 ActionView::Template::Types.delegate_to Mime
 
+module AssetTagHelperTestHelpers
+  def with_preload_links_header(new_preload_links_header = true)
+    original_preload_links_header = ActionView::Helpers::AssetTagHelper.preload_links_header
+    ActionView::Helpers::AssetTagHelper.preload_links_header = new_preload_links_header
+
+    yield
+  ensure
+    ActionView::Helpers::AssetTagHelper.preload_links_header = original_preload_links_header
+  end
+end
+
 class AssetTagHelperTest < ActionView::TestCase
   tests ActionView::Helpers::AssetTagHelper
+
+  include AssetTagHelperTestHelpers
 
   attr_reader :request, :response
 
@@ -24,6 +37,7 @@ class AssetTagHelperTest < ActionView::TestCase
     def headers
       @headers ||= {}
     end
+    def sending?; false; end
   end
 
   def setup
@@ -515,6 +529,14 @@ class AssetTagHelperTest < ActionView::TestCase
     ActionView::Helpers::AssetTagHelper.apply_stylesheet_media_default = original_default_media
   end
 
+  def test_stylesheet_link_tag_without_default_extension_applied
+    assert_dom_equal %(<link href="/stylesheets/wellington.less" rel="stylesheet" />), stylesheet_link_tag("wellington.less", extname: false)
+  end
+
+  def test_javascript_include_tag_without_default_extension_applied
+    assert_dom_equal %(<script src="/javascripts/foo.jsx"></script>), javascript_include_tag("foo.jsx", extname: false)
+  end
+
   def test_javascript_include_tag_without_request
     @request = nil
     assert_dom_equal %(<script src="/javascripts/foo.js"></script>), javascript_include_tag("foo.js")
@@ -529,10 +551,29 @@ class AssetTagHelperTest < ActionView::TestCase
     end
   end
 
+  def test_should_not_set_preload_links_for_data_url
+    with_preload_links_header do
+      stylesheet_link_tag("data:text/css;base64,YWxlcnQoIkhlbGxvIik7")
+      javascript_include_tag("data:text/javascript;base64,YWxlcnQoIkhlbGxvIik7")
+      assert_nil @response.headers["Link"]
+    end
+  end
+
+  def test_should_generate_links_under_the_max_size
+    with_preload_links_header do
+      100.times do |i|
+        stylesheet_link_tag("http://example.com/style.css?#{i}")
+        javascript_include_tag("http://example.com/all.js?#{i}")
+      end
+      lines = @response.headers["Link"].split("\n")
+      assert_equal 2, lines.size
+    end
+  end
+
   def test_should_not_preload_links_with_defer
     with_preload_links_header do
       javascript_include_tag("http://example.com/all.js", defer: true)
-      assert_equal "", @response.headers["Link"]
+      assert_nil @response.headers["Link"]
     end
   end
 
@@ -550,6 +591,14 @@ class AssetTagHelperTest < ActionView::TestCase
       stylesheet_link_tag("http://example.com/style.css", crossorigin: "use-credentials")
       javascript_include_tag("http://example.com/all.js", crossorigin: true)
       expected = "<http://example.com/style.css>; rel=preload; as=style; crossorigin=use-credentials; nopush,<http://example.com/all.js>; rel=preload; as=script; crossorigin=anonymous; nopush"
+      assert_equal expected, @response.headers["Link"]
+    end
+  end
+
+  def test_should_set_preload_links_with_rel_modulepreload
+    with_preload_links_header do
+      javascript_include_tag("http://example.com/all.js", type: "module")
+      expected = "<http://example.com/all.js>; rel=modulepreload; as=script; nopush"
       assert_equal expected, @response.headers["Link"]
     end
   end
@@ -753,16 +802,6 @@ class AssetTagHelperTest < ActionView::TestCase
       assert_equal "http://localhost/images/xml.png", image_path("xml.png")
     end
   end
-
-  private
-    def with_preload_links_header(new_preload_links_header = true)
-      original_preload_links_header = ActionView::Helpers::AssetTagHelper.preload_links_header
-      ActionView::Helpers::AssetTagHelper.preload_links_header = new_preload_links_header
-
-      yield
-    ensure
-      ActionView::Helpers::AssetTagHelper.preload_links_header = original_preload_links_header
-    end
 end
 
 class AssetTagHelperNonVhostTest < ActionView::TestCase
@@ -913,6 +952,32 @@ class AssetTagHelperWithoutRequestTest < ActionView::TestCase
 
   def test_javascript_include_tag_without_request
     assert_dom_equal %(<script src="/javascripts/foo.js"></script>), javascript_include_tag("foo.js")
+  end
+end
+
+class AssetTagHelperWithStreamingRequest < ActionView::TestCase
+  tests ActionView::Helpers::AssetTagHelper
+
+  include AssetTagHelperTestHelpers
+
+  def setup
+    super
+    response.sending!
+  end
+
+  def test_stylesheet_link_tag_with_streaming
+    with_preload_links_header do
+      assert_dom_equal(
+        %(<link rel="stylesheet" href="/stylesheets/foo.css" />),
+        stylesheet_link_tag("foo.css")
+      )
+    end
+  end
+
+  def test_javascript_include_tag_with_streaming
+    with_preload_links_header do
+      assert_dom_equal %(<script src="/javascripts/foo.js"></script>), javascript_include_tag("foo.js")
+    end
   end
 end
 

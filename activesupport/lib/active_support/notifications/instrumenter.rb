@@ -31,6 +31,10 @@ module ActiveSupport
         end
       end
 
+      def new_event(name, payload = {}) # :nodoc:
+        Event.new(name, nil, nil, @id, payload)
+      end
+
       # Send a start notification with +name+ and +payload+.
       def start(name, payload)
         @notifier.start name, @id, payload
@@ -66,6 +70,19 @@ module ActiveSupport
         @cpu_time_finish = 0
         @allocation_count_start = 0
         @allocation_count_finish = 0
+      end
+
+      def record
+        start!
+        begin
+          yield payload if block_given?
+        rescue Exception => e
+          payload[:exception] = [e.class.name, e.message]
+          payload[:exception_object] = e
+          raise e
+        ensure
+          finish!
+        end
       end
 
       # Record information at the time this event starts

@@ -42,8 +42,8 @@ class Time
 
     # Layers additional behavior on Time.at so that ActiveSupport::TimeWithZone and DateTime
     # instances can be used when called with a single argument
-    def at_with_coercion(*args)
-      return at_without_coercion(*args) if args.size != 1
+    def at_with_coercion(*args, **kwargs)
+      return at_without_coercion(*args, **kwargs) if args.size != 1 || !kwargs.empty?
 
       # Time.at can be called with a time or numerical value
       time_or_number = args.first
@@ -159,6 +159,8 @@ class Time
       ::Time.new(new_year, new_month, new_day, new_hour, new_min, new_sec, new_offset)
     elsif utc?
       ::Time.utc(new_year, new_month, new_day, new_hour, new_min, new_sec)
+    elsif zone&.respond_to?(:utc_to_local)
+      ::Time.new(new_year, new_month, new_day, new_hour, new_min, new_sec, zone)
     elsif zone
       ::Time.local(new_year, new_month, new_day, new_hour, new_min, new_sec)
     else

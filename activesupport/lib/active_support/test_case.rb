@@ -12,6 +12,7 @@ require "active_support/testing/constant_lookup"
 require "active_support/testing/time_helpers"
 require "active_support/testing/file_fixtures"
 require "active_support/testing/parallelization"
+require "active_support/testing/parallelize_executor"
 require "concurrent/utility/processor_counter"
 
 module ActiveSupport
@@ -75,22 +76,9 @@ module ActiveSupport
         workers = Concurrent.physical_processor_count if workers == :number_of_processors
         workers = ENV["PARALLEL_WORKERS"].to_i if ENV["PARALLEL_WORKERS"]
 
-        return if workers <= 1
+        return if workers <= 1 || ActiveSupport.test_parallelization_disabled
 
-        executor = case with
-                   when :processes
-                     Testing::Parallelization.new(workers)
-                   when :threads
-                     Minitest::Parallel::Executor.new(workers)
-                   else
-                     raise ArgumentError, "#{with} is not a supported parallelization executor."
-        end
-
-        self.lock_threads = false if defined?(self.lock_threads) && with == :threads
-
-        Minitest.parallel_executor = executor
-
-        parallelize_me!
+        Minitest.parallel_executor = ActiveSupport::Testing::ParallelizeExecutor.new(size: workers, with: with)
       end
 
       # Set up hook for parallel testing. This can be used if you have multiple

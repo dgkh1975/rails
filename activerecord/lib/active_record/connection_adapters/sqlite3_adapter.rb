@@ -84,6 +84,7 @@ module ActiveRecord
       end
 
       def initialize(connection, logger, connection_options, config)
+        @memory_database = config[:database] == ":memory:"
         super(connection, logger, config)
         configure_connection
       end
@@ -153,6 +154,10 @@ module ActiveRecord
       alias supports_insert_on_duplicate_update? supports_insert_on_conflict?
       alias supports_insert_conflict_target? supports_insert_on_conflict?
 
+      def supports_concurrent_connections?
+        !@memory_database
+      end
+
       def active?
         !@connection.closed?
       end
@@ -206,6 +211,10 @@ module ActiveRecord
         end
       end
 
+      def all_foreign_keys_valid? # :nodoc:
+        execute("PRAGMA foreign_key_check").blank?
+      end
+
       # SCHEMA STATEMENTS ========================================
 
       def primary_keys(table_name) # :nodoc:
@@ -245,9 +254,17 @@ module ActiveRecord
       def remove_column(table_name, column_name, type = nil, **options) #:nodoc:
         alter_table(table_name) do |definition|
           definition.remove_column column_name
-          definition.foreign_keys.delete_if do |_, fk_options|
-            fk_options[:column] == column_name.to_s
+          definition.foreign_keys.delete_if { |fk| fk.column == column_name.to_s }
+        end
+      end
+
+      def remove_columns(table_name, *column_names, type: nil, **options) # :nodoc:
+        alter_table(table_name) do |definition|
+          column_names.each do |column_name|
+            definition.remove_column column_name
           end
+          column_names = column_names.map(&:to_s)
+          definition.foreign_keys.delete_if { |fk| column_names.include?(fk.column) }
         end
       end
 
@@ -308,8 +325,12 @@ module ActiveRecord
           sql << " ON CONFLICT #{insert.conflict_target} DO NOTHING"
         elsif insert.update_duplicates?
           sql << " ON CONFLICT #{insert.conflict_target} DO UPDATE SET "
-          sql << insert.touch_model_timestamps_unless { |column| "#{column} IS excluded.#{column}" }
-          sql << insert.updatable_columns.map { |column| "#{column}=excluded.#{column}" }.join(",")
+          if insert.raw_update_sql?
+            sql << insert.raw_update_sql
+          else
+            sql << insert.touch_model_timestamps_unless { |column| "#{column} IS excluded.#{column}" }
+            sql << insert.updatable_columns.map { |column| "#{column}=excluded.#{column}" }.join(",")
+          end
         end
 
         sql
@@ -329,16 +350,36 @@ module ActiveRecord
         end
       end
 
+      class SQLite3Integer < Type::Integer # :nodoc:
+        private
+          def _limit
+            # INTEGER storage class can be stored 8 bytes value.
+            # See https://www.sqlite.org/datatype3.html#storage_classes_and_datatypes
+            limit || 8
+          end
+      end
+
+      ActiveRecord::Type.register(:integer, SQLite3Integer, adapter: :sqlite3)
+
+      class << self
+        private
+          def initialize_type_map(m)
+            super
+            register_class_with_limit m, %r(int)i, SQLite3Integer
+          end
+      end
+
+      TYPE_MAP = Type::TypeMap.new.tap { |m| initialize_type_map(m) }
+
       private
+        def type_map
+          TYPE_MAP
+        end
+
         # See https://www.sqlite.org/limits.html,
         # the default value is 999 when not configured.
         def bind_params_length
           999
-        end
-
-        def initialize_type_map(m = type_map)
-          super
-          register_class_with_limit m, %r(int)i, SQLite3Integer
         end
 
         def table_structure(table_name)
@@ -446,6 +487,7 @@ module ActiveRecord
               options = { name: name.gsub(/(^|_)(#{from})_/, "\\1#{to}_"), internal: true }
               options[:unique] = true if index.unique
               options[:where] = index.where if index.where
+              options[:order] = index.orders if index.orders
               add_index(to, columns, **options)
             end
           end
@@ -544,17 +586,6 @@ module ActiveRecord
 
           execute("PRAGMA foreign_keys = ON", "SCHEMA")
         end
-
-        class SQLite3Integer < Type::Integer # :nodoc:
-          private
-            def _limit
-              # INTEGER storage class can be stored 8 bytes value.
-              # See https://www.sqlite.org/datatype3.html#storage_classes_and_datatypes
-              limit || 8
-            end
-        end
-
-        ActiveRecord::Type.register(:integer, SQLite3Integer, adapter: :sqlite3)
     end
     ActiveSupport.run_load_hooks(:active_record_sqlite3adapter, SQLite3Adapter)
   end

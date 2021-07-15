@@ -185,23 +185,16 @@ module ActiveRecord
         end
       end
 
-      # CONNECTION MANAGEMENT ====================================
-
-      def clear_cache! # :nodoc:
-        reload_type_map
-        super
-      end
-
       #--
       # DATABASE STATEMENTS ======================================
       #++
 
       # Executes the SQL statement in the context of this connection.
-      def execute(sql, name = nil)
+      def execute(sql, name = nil, async: false)
         materialize_transactions
         mark_transaction_written_if_write(sql)
 
-        log(sql, name) do
+        log(sql, name, async: async) do
           ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
             @connection.query(sql)
           end
@@ -211,8 +204,8 @@ module ActiveRecord
       # Mysql2Adapter doesn't have to free a result after using it, but we use this method
       # to write stuff in an abstract way without concerning ourselves about whether it
       # needs to be explicitly freed or not.
-      def execute_and_free(sql, name = nil) # :nodoc:
-        yield execute(sql, name)
+      def execute_and_free(sql, name = nil, async: false) # :nodoc:
+        yield execute(sql, name, async: async)
       end
 
       def begin_db_transaction
@@ -427,7 +420,7 @@ module ActiveRecord
         if supports_check_constraints?
           scope = quoted_scope(table_name)
 
-          chk_info = exec_query(<<~SQL, "SCHEMA")
+          sql = <<~SQL
             SELECT cc.constraint_name AS 'name',
                   cc.check_clause AS 'expression'
             FROM information_schema.check_constraints cc
@@ -437,6 +430,9 @@ module ActiveRecord
               AND tc.table_name = #{scope[:name]}
               AND cc.constraint_schema = #{scope[:schema]}
           SQL
+          sql += " AND cc.table_name = #{scope[:name]}" if mariadb?
+
+          chk_info = exec_query(sql, "SCHEMA")
 
           chk_info.map do |row|
             options = {
@@ -548,8 +544,12 @@ module ActiveRecord
           sql << " ON DUPLICATE KEY UPDATE #{no_op_column}=#{no_op_column}"
         elsif insert.update_duplicates?
           sql << " ON DUPLICATE KEY UPDATE "
-          sql << insert.touch_model_timestamps_unless { |column| "#{column}<=>VALUES(#{column})" }
-          sql << insert.updatable_columns.map { |column| "#{column}=VALUES(#{column})" }.join(",")
+          if insert.raw_update_sql?
+            sql << insert.raw_update_sql
+          else
+            sql << insert.touch_model_timestamps_unless { |column| "#{column}<=>VALUES(#{column})" }
+            sql << insert.updatable_columns.map { |column| "#{column}=VALUES(#{column})" }.join(",")
+          end
         end
 
         sql
@@ -561,56 +561,67 @@ module ActiveRecord
         end
       end
 
-      private
-        def initialize_type_map(m = type_map)
-          super
+      class << self
+        private
+          def initialize_type_map(m)
+            super
 
-          m.register_type(%r(char)i) do |sql_type|
-            limit = extract_limit(sql_type)
-            Type.lookup(:string, adapter: :mysql2, limit: limit)
+            m.register_type(%r(char)i) do |sql_type|
+              limit = extract_limit(sql_type)
+              Type.lookup(:string, adapter: :mysql2, limit: limit)
+            end
+
+            m.register_type %r(tinytext)i,   Type::Text.new(limit: 2**8 - 1)
+            m.register_type %r(tinyblob)i,   Type::Binary.new(limit: 2**8 - 1)
+            m.register_type %r(text)i,       Type::Text.new(limit: 2**16 - 1)
+            m.register_type %r(blob)i,       Type::Binary.new(limit: 2**16 - 1)
+            m.register_type %r(mediumtext)i, Type::Text.new(limit: 2**24 - 1)
+            m.register_type %r(mediumblob)i, Type::Binary.new(limit: 2**24 - 1)
+            m.register_type %r(longtext)i,   Type::Text.new(limit: 2**32 - 1)
+            m.register_type %r(longblob)i,   Type::Binary.new(limit: 2**32 - 1)
+            m.register_type %r(^float)i,     Type::Float.new(limit: 24)
+            m.register_type %r(^double)i,    Type::Float.new(limit: 53)
+
+            register_integer_type m, %r(^bigint)i,    limit: 8
+            register_integer_type m, %r(^int)i,       limit: 4
+            register_integer_type m, %r(^mediumint)i, limit: 3
+            register_integer_type m, %r(^smallint)i,  limit: 2
+            register_integer_type m, %r(^tinyint)i,   limit: 1
+
+            m.alias_type %r(year)i, "integer"
+            m.alias_type %r(bit)i,  "binary"
+
+            m.register_type %r(^enum)i, Type.lookup(:string, adapter: :mysql2)
+            m.register_type %r(^set)i,  Type.lookup(:string, adapter: :mysql2)
           end
 
-          m.register_type %r(tinytext)i,   Type::Text.new(limit: 2**8 - 1)
-          m.register_type %r(tinyblob)i,   Type::Binary.new(limit: 2**8 - 1)
-          m.register_type %r(text)i,       Type::Text.new(limit: 2**16 - 1)
-          m.register_type %r(blob)i,       Type::Binary.new(limit: 2**16 - 1)
-          m.register_type %r(mediumtext)i, Type::Text.new(limit: 2**24 - 1)
-          m.register_type %r(mediumblob)i, Type::Binary.new(limit: 2**24 - 1)
-          m.register_type %r(longtext)i,   Type::Text.new(limit: 2**32 - 1)
-          m.register_type %r(longblob)i,   Type::Binary.new(limit: 2**32 - 1)
-          m.register_type %r(^float)i,     Type::Float.new(limit: 24)
-          m.register_type %r(^double)i,    Type::Float.new(limit: 53)
-
-          register_integer_type m, %r(^bigint)i,    limit: 8
-          register_integer_type m, %r(^int)i,       limit: 4
-          register_integer_type m, %r(^mediumint)i, limit: 3
-          register_integer_type m, %r(^smallint)i,  limit: 2
-          register_integer_type m, %r(^tinyint)i,   limit: 1
-
-          m.register_type %r(^tinyint\(1\))i, Type::Boolean.new if emulate_booleans
-          m.alias_type %r(year)i, "integer"
-          m.alias_type %r(bit)i,  "binary"
-
-          m.register_type %r(^enum)i, Type.lookup(:string, adapter: :mysql2)
-          m.register_type %r(^set)i,  Type.lookup(:string, adapter: :mysql2)
-        end
-
-        def register_integer_type(mapping, key, **options)
-          mapping.register_type(key) do |sql_type|
-            if /\bunsigned\b/.match?(sql_type)
-              Type::UnsignedInteger.new(**options)
-            else
-              Type::Integer.new(**options)
+          def register_integer_type(mapping, key, **options)
+            mapping.register_type(key) do |sql_type|
+              if /\bunsigned\b/.match?(sql_type)
+                Type::UnsignedInteger.new(**options)
+              else
+                Type::Integer.new(**options)
+              end
             end
           end
-        end
 
-        def extract_precision(sql_type)
-          if /\A(?:date)?time(?:stamp)?\b/.match?(sql_type)
-            super || 0
-          else
-            super
+          def extract_precision(sql_type)
+            if /\A(?:date)?time(?:stamp)?\b/.match?(sql_type)
+              super || 0
+            else
+              super
+            end
           end
+      end
+
+      TYPE_MAP = Type::TypeMap.new.tap { |m| initialize_type_map(m) }
+      TYPE_MAP_WITH_BOOLEAN = Type::TypeMap.new(TYPE_MAP).tap do |m|
+        m.register_type %r(^tinyint\(1\))i, Type::Boolean.new
+      end
+
+      private
+        def type_map
+          emulate_booleans ? TYPE_MAP_WITH_BOOLEAN : TYPE_MAP
         end
 
         # See https://dev.mysql.com/doc/mysql-errors/en/server-error-reference.html
@@ -751,11 +762,6 @@ module ActiveRecord
           wait_timeout = 2147483 unless wait_timeout.is_a?(Integer)
           variables["wait_timeout"] = wait_timeout
 
-          # Set the collation of the connection character set.
-          if @config[:collation]
-            variables["collation_connection"] = @config[:collation]
-          end
-
           defaults = [":default", :default].to_set
 
           # Make MySQL reject illegal values rather than truncating or blanking them, see
@@ -775,18 +781,26 @@ module ActiveRecord
           end
           sql_mode_assignment = "@@SESSION.sql_mode = #{sql_mode}, " if sql_mode
 
+          # NAMES does not have an equals sign, see
+          # https://dev.mysql.com/doc/refman/en/set-names.html
+          # (trailing comma because variable_assignments will always have content)
+          if @config[:encoding]
+            encoding = +"NAMES #{@config[:encoding]}"
+            encoding << " COLLATE #{@config[:collation]}" if @config[:collation]
+            encoding << ", "
+          end
+
           # Gather up all of the SET variables...
-          variable_assignments = variables.map do |k, v|
+          variable_assignments = variables.filter_map do |k, v|
             if defaults.include?(v)
               "@@SESSION.#{k} = DEFAULT" # Sets the value to the global or compile default
             elsif !v.nil?
               "@@SESSION.#{k} = #{quote(v)}"
             end
-            # or else nil; compact to clear nils out
-          end.compact.join(", ")
+          end.join(", ")
 
           # ...and send them all in one query
-          execute("SET #{sql_mode_assignment} #{variable_assignments}", "SCHEMA")
+          execute("SET #{encoding} #{sql_mode_assignment} #{variable_assignments}", "SCHEMA")
         end
 
         def column_definitions(table_name) # :nodoc:
@@ -834,10 +848,6 @@ module ActiveRecord
         def version_string(full_version_string)
           full_version_string.match(/^(?:5\.5\.5-)?(\d+\.\d+\.\d+)/)[1]
         end
-
-        # Alias MysqlString to work Mashal.load(File.read("legacy_record.dump")).
-        # TODO: Remove the constant alias once Rails 6.1 has released.
-        MysqlString = Type::String # :nodoc:
 
         ActiveRecord::Type.register(:immutable_string, adapter: :mysql2) do |_, **args|
           Type::ImmutableString.new(true: "1", false: "0", **args)

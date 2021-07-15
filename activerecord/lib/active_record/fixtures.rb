@@ -181,7 +181,7 @@ module ActiveRecord
   #     end
   #   end
   #
-  # If you preload your test database with all fixture data (probably by running `bin/rails db:fixtures:load`)
+  # If you preload your test database with all fixture data (probably by running <tt>bin/rails db:fixtures:load</tt>)
   # and use transactional tests, then you may omit all fixtures declarations in your test cases since
   # all the data's already there and every case rolls back its changes.
   #
@@ -311,7 +311,7 @@ module ActiveRecord
   #
   # Just provide the polymorphic target type and Active Record will take care of the rest.
   #
-  # === has_and_belongs_to_many
+  # === has_and_belongs_to_many or has_many :through
   #
   # Time to give our monkey some fruit.
   #
@@ -637,6 +637,10 @@ module ActiveRecord
 
             conn.insert_fixtures_set(table_rows_for_connection, table_rows_for_connection.keys)
 
+            if ActiveRecord.verify_foreign_keys_for_fixtures && !conn.all_foreign_keys_valid?
+              raise "Foreign key violations found in your fixture data. Ensure you aren't referring to labels that don't exist on associations."
+            end
+
             # Cap primary key sequences to max(pk).
             if conn.respond_to?(:reset_pk_sequence!)
               set.each { |fs| conn.reset_pk_sequence!(fs.table_name) }
@@ -689,7 +693,6 @@ module ActiveRecord
         table_name,
         model_class: model_class,
         fixtures: fixtures,
-        config: config,
       ).to_hash
     end
 

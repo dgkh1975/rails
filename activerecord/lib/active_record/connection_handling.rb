@@ -114,7 +114,7 @@ module ActiveRecord
     #
     # If only a role is passed, Active Record will look up the connection
     # based on the requested role. If a non-established role is requested
-    # an `ActiveRecord::ConnectionNotEstablished` error will be raised:
+    # an +ActiveRecord::ConnectionNotEstablished+ error will be raised:
     #
     #   ActiveRecord::Base.connected_to(role: :writing) do
     #     Dog.create! # creates dog using dog writing connection
@@ -125,7 +125,7 @@ module ActiveRecord
     #   end
     #
     # When swapping to a shard, the role must be passed as well. If a non-existent
-    # shard is passed, an `ActiveRecord::ConnectionNotEstablished` error will be
+    # shard is passed, an +ActiveRecord::ConnectionNotEstablished+ error will be
     # raised.
     #
     # When a shard and role is passed, Active Record will first lookup the role,
@@ -135,7 +135,7 @@ module ActiveRecord
     #     Dog.first # finds first Dog record stored on the shard one replica
     #   end
     def connected_to(role: nil, shard: nil, prevent_writes: false, &blk)
-      if legacy_connection_handling
+      if ActiveRecord.legacy_connection_handling
         if self != Base
           raise NotImplementedError, "`connected_to` can only be called on ActiveRecord::Base with legacy connection handling."
         end
@@ -160,11 +160,11 @@ module ActiveRecord
       with_role_and_shard(role, shard, prevent_writes, &blk)
     end
 
-    # Connects a role and/or shard to the provided connection names. Optionally `prevent_writes`
-    # can be passed to block writes on a connection. `reading` will automatically set
-    # `prevent_writes` to true.
+    # Connects a role and/or shard to the provided connection names. Optionally +prevent_writes+
+    # can be passed to block writes on a connection. +reading+ will automatically set
+    # +prevent_writes+ to true.
     #
-    # `connected_to_many` is an alternative to deeply nested `connected_to` blocks.
+    # +connected_to_many+ is an alternative to deeply nested +connected_to+ blocks.
     #
     # Usage:
     #
@@ -176,7 +176,7 @@ module ActiveRecord
     def connected_to_many(*classes, role:, shard: nil, prevent_writes: false)
       classes = classes.flatten
 
-      if legacy_connection_handling
+      if ActiveRecord.legacy_connection_handling
         raise NotImplementedError, "connected_to_many is not available with legacy connection handling"
       end
 
@@ -184,7 +184,7 @@ module ActiveRecord
         raise NotImplementedError, "connected_to_many can only be called on ActiveRecord::Base."
       end
 
-      prevent_writes = true if role == reading_role
+      prevent_writes = true if role == ActiveRecord.reading_role
 
       connected_to_stack << { role: role, shard: shard, prevent_writes: prevent_writes, klasses: classes }
       yield
@@ -198,13 +198,13 @@ module ActiveRecord
     # being used. For example, when booting a console in readonly mode.
     #
     # It is not recommended to use this method in a request since it
-    # does not yield to a block like `connected_to`.
+    # does not yield to a block like +connected_to+.
     def connecting_to(role: default_role, shard: default_shard, prevent_writes: false)
-      if legacy_connection_handling
+      if ActiveRecord.legacy_connection_handling
         raise NotImplementedError, "`connecting_to` is not available with `legacy_connection_handling`."
       end
 
-      prevent_writes = true if role == reading_role
+      prevent_writes = true if role == ActiveRecord.reading_role
 
       self.connected_to_stack << { role: role, shard: shard, prevent_writes: prevent_writes, klasses: [self] }
     end
@@ -212,16 +212,16 @@ module ActiveRecord
     # Prevent writing to the database regardless of role.
     #
     # In some cases you may want to prevent writes to the database
-    # even if you are on a database that can write. `while_preventing_writes`
+    # even if you are on a database that can write. +while_preventing_writes+
     # will prevent writes to the database for the duration of the block.
     #
     # This method does not provide the same protection as a readonly
     # user and is meant to be a safeguard against accidental writes.
     #
-    # See `READ_QUERY` for the queries that are blocked by this
+    # See +READ_QUERY+ for the queries that are blocked by this
     # method.
     def while_preventing_writes(enabled = true, &block)
-      if legacy_connection_handling
+      if ActiveRecord.legacy_connection_handling
         connection_handler.while_preventing_writes(enabled, &block)
       else
         connected_to(role: current_role, prevent_writes: enabled, &block)
@@ -239,8 +239,8 @@ module ActiveRecord
     end
 
     def lookup_connection_handler(handler_key) # :nodoc:
-      if ActiveRecord::Base.legacy_connection_handling
-        handler_key ||= ActiveRecord::Base.writing_role
+      if ActiveRecord.legacy_connection_handling
+        handler_key ||= ActiveRecord.writing_role
         connection_handlers[handler_key] ||= ActiveRecord::ConnectionAdapters::ConnectionHandler.new
       else
         ActiveRecord::Base.connection_handler
@@ -249,7 +249,7 @@ module ActiveRecord
 
     # Clears the query cache for all connections associated with the current thread.
     def clear_query_caches_for_current_thread
-      if ActiveRecord::Base.legacy_connection_handling
+      if ActiveRecord.legacy_connection_handling
         ActiveRecord::Base.connection_handlers.each_value do |handler|
           clear_on_handler(handler)
         end
@@ -356,9 +356,9 @@ module ActiveRecord
       end
 
       def with_role_and_shard(role, shard, prevent_writes)
-        prevent_writes = true if role == reading_role
+        prevent_writes = true if role == ActiveRecord.reading_role
 
-        if ActiveRecord::Base.legacy_connection_handling
+        if ActiveRecord.legacy_connection_handling
           with_handler(role.to_sym) do
             connection_handler.while_preventing_writes(prevent_writes) do
               self.connected_to_stack << { shard: shard, klasses: [self] }

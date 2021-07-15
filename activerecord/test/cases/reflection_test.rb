@@ -260,7 +260,7 @@ class ReflectionTest < ActiveRecord::TestCase
   end
 
   def test_reflections_should_return_keys_as_strings
-    assert Category.reflections.keys.all? { |key| key.is_a? String }, "Model.reflections is expected to return string for keys"
+    assert Category.reflections.keys.all?(String), "Model.reflections is expected to return string for keys"
   end
 
   def test_has_and_belongs_to_many_reflection
@@ -419,6 +419,10 @@ class ReflectionTest < ActiveRecord::TestCase
   def test_foreign_key
     assert_equal "author_id", Author.reflect_on_association(:posts).foreign_key.to_s
     assert_equal "category_id", Post.reflect_on_association(:categorizations).foreign_key.to_s
+  end
+
+  def test_foreign_key_is_inferred_from_model_name
+    assert_equal "post_id", PostRecord.reflect_on_association(:comments).foreign_key.to_s
   end
 
   def test_symbol_for_class_name

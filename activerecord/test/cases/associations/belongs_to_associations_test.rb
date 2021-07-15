@@ -996,15 +996,17 @@ class BelongsToAssociationsTest < ActiveRecord::TestCase
 
   def test_polymorphic_assignment_foreign_key_type_string
     comment = Comment.first
-    comment.author   = Author.first
-    comment.resource = Member.first
+    comment.author   = authors(:david)
+    comment.resource = members(:groucho)
     comment.save
 
-    assert_equal Comment.all.to_a,
-      Comment.includes(:author).to_a
+    assert_equal 1, authors(:david).id
+    assert_equal 1, comment.author_id
+    assert_equal authors(:david), Comment.includes(:author).first.author
 
-    assert_equal Comment.all.to_a,
-      Comment.includes(:resource).to_a
+    assert_equal 1, members(:groucho).id
+    assert_equal "1", comment.resource_id
+    assert_equal members(:groucho), Comment.includes(:resource).first.resource
   end
 
   def test_polymorphic_assignment_foreign_type_field_updating
@@ -1132,6 +1134,11 @@ class BelongsToAssociationsTest < ActiveRecord::TestCase
     assert_equal error.message, "The :dependent option must be one of [:destroy, :delete, :destroy_async], but is :nullify"
   end
 
+  class EssayDestroy < ActiveRecord::Base
+    self.table_name = "essays"
+    belongs_to :book, dependent: :destroy, class_name: "DestroyableBook"
+  end
+
   class DestroyableBook < ActiveRecord::Base
     self.table_name = "books"
     belongs_to :author, class_name: "UndestroyableAuthor", dependent: :destroy
@@ -1153,6 +1160,17 @@ class BelongsToAssociationsTest < ActiveRecord::TestCase
 
     assert_no_difference ["UndestroyableAuthor.count", "DestroyableBook.count"] do
       assert_not book.destroy
+    end
+  end
+
+  def test_dependency_should_halt_parent_destruction_with_cascaded_three_levels
+    author = UndestroyableAuthor.create!(name: "Test")
+    book = DestroyableBook.create!(author: author)
+    essay = EssayDestroy.create!(book: book)
+
+    assert_no_difference ["UndestroyableAuthor.count", "DestroyableBook.count", "EssayDestroy.count"] do
+      assert_not essay.destroy
+      assert_not essay.destroyed?
     end
   end
 
@@ -1185,6 +1203,33 @@ class BelongsToAssociationsTest < ActiveRecord::TestCase
     assert_predicate firm_with_condition_proxy, :stale_target?
     assert_equal companies(:another_firm), client.firm
     assert_equal companies(:another_firm), client.firm_with_condition
+  end
+
+  def test_assigning_nil_on_an_association_clears_the_associations_inverse
+    with_has_many_inversing do
+      book = Book.create!
+      citation = book.citations.create!
+
+      assert_same book, citation.book
+
+      assert_nothing_raised do
+        citation.book = nil
+        citation.save!
+      end
+    end
+  end
+
+  def test_clearing_an_association_clears_the_associations_inverse
+    author = Author.create(name: "Jimmy Tolkien")
+    post = author.create_post(title: "The silly medallion", body: "")
+    assert_equal post, author.post
+    assert_equal author, post.author
+
+    author.update!(post: nil)
+    assert_nil author.post
+
+    post.update!(title: "The Silmarillion")
+    assert_nil author.post
   end
 
   def test_destroying_child_with_unloaded_parent_and_foreign_key_and_touch_is_possible_with_has_many_inversing
@@ -1452,6 +1497,16 @@ class BelongsToAssociationsTest < ActiveRecord::TestCase
         CommentWithAfterCreateUpdate.create(body: "foo", post: post, parent: parent)
       end
     end
+  end
+
+  test "assigning an association doesn't result in duplicate objects" do
+    post = Post.create!(title: "title", body: "body")
+    post.comments = [post.comments.build(body: "body")]
+    post.save!
+
+    assert_equal 1, post.comments.size
+    assert_equal 1, Comment.where(post_id: post.id).count
+    assert_equal post.id, Comment.last.post.id
   end
 end
 

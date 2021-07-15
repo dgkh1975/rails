@@ -51,10 +51,6 @@ class DriverTest < ActiveSupport::TestCase
     assert_equal ({ skip_image_loading: true }), driver.instance_variable_get(:@options)
   end
 
-  test "registerable? returns false if driver is rack_test" do
-    assert_not ActionDispatch::SystemTesting::Driver.new(:rack_test).send(:registerable?)
-  end
-
   test "define extra capabilities using chrome" do
     driver = ActionDispatch::SystemTesting::Driver.new(:selenium, screen_size: [1400, 1400], using: :chrome) do |option|
       option.add_argument("start-maximized")
@@ -152,13 +148,11 @@ class DriverTest < ActiveSupport::TestCase
     ::Selenium::WebDriver::Chrome::Service.driver_path = original_driver_path
   end
 
-  test "does not preload if used driver is not :selenium" do
-    assert_not_called_on_instance_of(ActionDispatch::SystemTesting::Browser, :preload) do
-      ActionDispatch::SystemTesting::Driver.new(:rack_test, using: :chrome)
-    end
+  test "does not configure browser if driver is not :selenium" do
+    # sanity check
+    assert ActionDispatch::SystemTesting::Driver.new(:selenium).instance_variable_get(:@browser)
 
-    assert_not_called_on_instance_of(ActionDispatch::SystemTesting::Browser, :preload) do
-      ActionDispatch::SystemTesting::Driver.new(:poltergeist)
-    end
+    assert_nil ActionDispatch::SystemTesting::Driver.new(:rack_test).instance_variable_get(:@browser)
+    assert_nil ActionDispatch::SystemTesting::Driver.new(:poltergeist).instance_variable_get(:@browser)
   end
 end

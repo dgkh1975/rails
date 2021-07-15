@@ -387,6 +387,36 @@ end
 
 The default error message for this helper is _"doesn't match confirmation"_.
 
+### `comparison`
+
+This check will validate a comparison between any two comparable values.
+The validator requires a compare option be supplied. Each option accepts a
+value, proc, or symbol. Any class that includes Comparable can be compared.
+
+```ruby
+class Promotion < ApplicationRecord
+  validates :start_date, comparison: { greater_than: :end_date }
+end
+```
+
+These options are all supported:
+
+* `:greater_than` - Specifies the value must be greater than the supplied
+  value. The default error message for this option is _"must be greater than
+  %{count}"_.
+* `:greater_than_or_equal_to` - Specifies the value must be greater than or
+  equal to the supplied value. The default error message for this option is
+  _"must be greater than or equal to %{count}"_.
+* `:equal_to` - Specifies the value must be equal to the supplied value. The
+  default error message for this option is _"must be equal to %{count}"_.
+* `:less_than` - Specifies the value must be less than the supplied value. The
+  default error message for this option is _"must be less than %{count}"_.
+* `:less_than_or_equal_to` - Specifies the value must be less than or equal to
+  the supplied value. The default error message for this option is _"must be
+  less than or equal to %{count}"_.
+* `:other_than` - Specifies the value must be other than the supplied value.
+  The default error message for this option is _"must be other than %{count}"_.
+
 ### `exclusion`
 
 This helper validates that the attributes' values are not included in a given
@@ -1348,7 +1378,7 @@ Displaying Validation Errors in Views
 
 Once you've created a model and added validations, if that model is created via
 a web form, you probably want to display an error message when one of the
-validations fail.
+validations fails.
 
 Because every application handles this kind of thing differently, Rails does
 not include any view helpers to help you generate these messages directly.

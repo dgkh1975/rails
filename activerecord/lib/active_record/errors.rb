@@ -100,7 +100,7 @@ module ActiveRecord
   end
 
   # Raised by {ActiveRecord::Base#destroy!}[rdoc-ref:Persistence#destroy!]
-  # when a call to {#destroy}[rdoc-ref:Persistence#destroy!]
+  # when a call to {#destroy}[rdoc-ref:Persistence#destroy]
   # would return false.
   #
   #   begin
@@ -371,6 +371,11 @@ module ActiveRecord
   # * https://www.postgresql.org/docs/current/static/transaction-iso.html
   # * https://dev.mysql.com/doc/mysql-errors/en/server-error-reference.html#error_er_lock_deadlock
   class TransactionRollbackError < StatementInvalid
+  end
+
+  # AsynchronousQueryInsideTransactionError will be raised when attempting
+  # to perform an asynchronous query from inside a transaction
+  class AsynchronousQueryInsideTransactionError < ActiveRecordError
   end
 
   # SerializationFailure will be raised when a transaction is rolled

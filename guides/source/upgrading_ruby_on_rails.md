@@ -16,6 +16,16 @@ Before attempting to upgrade an existing application, you should be sure you hav
 
 The best way to be sure that your application still works after upgrading is to have good test coverage before you start the process. If you don't have automated tests that exercise the bulk of your application, you'll need to spend time manually exercising all the parts that have changed. In the case of a Rails upgrade, that will mean every single piece of functionality in the application. Do yourself a favor and make sure your test coverage is good _before_ you start an upgrade.
 
+### Ruby Versions
+
+Rails generally stays close to the latest released Ruby version when it's released:
+
+* Rails 7 requires Ruby 2.7.0 or newer.
+* Rails 6 requires Ruby 2.5.0 or newer.
+* Rails 5 requires Ruby 2.2.2 or newer.
+
+It's a good idea to upgrade Ruby and Rails separately. Upgrade to the latest Ruby you can first, and then upgrade Rails.
+
 ### The Upgrade Process
 
 When changing Rails versions, it's best to move slowly, one minor version at a time, in order to make good use of the deprecation warnings. Rails version numbers are in the form Major.Minor.Patch. Major and Minor versions are allowed to make changes to the public API, so this may cause errors in your application. Patch versions only include bug fixes, and don't change any public API.
@@ -27,41 +37,33 @@ The process should go as follows:
 3. Fix tests and deprecated features.
 4. Move to the latest patch version of the next minor version.
 
-Repeat this process until you reach your target Rails version. Each time you move versions, you will need to change the Rails version number in the `Gemfile` (and possibly other gem versions) and run `bundle update`. Then run the Update task mentioned below to update configuration files, then run your tests.
+Repeat this process until you reach your target Rails version.
 
-You can find a list of all released Rails versions [here](https://rubygems.org/gems/rails/versions).
+#### Moving between versions
 
-### Ruby Versions
+To move between versions:
 
-Rails generally stays close to the latest released Ruby version when it's released:
+1. Change the Rails version number in the `Gemfile` and run `bundle update`.
+2. Change the versions for Rails JavaScript packages in `package.json` and run `yarn install`.
+3. Run the [Update task](#the-update-task).
+4. Run your tests.
 
-* Rails 7 requires Ruby 2.7.0 or newer.
-* Rails 6 requires Ruby 2.5.0 or newer.
-* Rails 5 requires Ruby 2.2.2 or newer.
-* Rails 4 prefers Ruby 2.0 and requires 1.9.3 or newer.
-* Rails 3.2.x is the last branch to support Ruby 1.8.7.
-* Rails 3 and above require Ruby 1.8.7 or higher. Support for all of the previous Ruby versions has been dropped officially. You should upgrade as early as possible.
-
-TIP: Ruby 1.8.7 p248 and p249 have marshalling bugs that crash Rails. Ruby Enterprise Edition has these fixed since the release of 1.8.7-2010.02. On the 1.9 front, Ruby 1.9.1 is not usable because it outright segfaults, so if you want to use 1.9.x, jump straight to 1.9.3 for smooth sailing.
+You can find a list of all released Rails gems [here](https://rubygems.org/gems/rails/versions).
 
 ### The Update Task
 
-Rails provides the `app:update` command (`rake rails:update` on 4.2 and earlier). After updating the Rails version
+Rails provides the `rails app:update` command. After updating the Rails version
 in the `Gemfile`, run this command.
 This will help you with the creation of new files and changes of old files in an
 interactive session.
 
 ```bash
 $ bin/rails app:update
-   identical  config/boot.rb
        exist  config
-    conflict  config/routes.rb
-Overwrite /myapp/config/routes.rb? (enter "h" for help) [Ynaqdh]
-       force  config/routes.rb
     conflict  config/application.rb
 Overwrite /myapp/config/application.rb? (enter "h" for help) [Ynaqdh]
        force  config/application.rb
-    conflict  config/environment.rb
+      create  config/initializers/new_framework_defaults_7_0.rb
 ...
 ```
 
@@ -71,7 +73,7 @@ Don't forget to review the difference, to see if there were any unexpected chang
 
 The new Rails version might have different configuration defaults than the previous version. However, after following the steps described above, your application would still run with configuration defaults from the *previous* Rails version. That's because the value for `config.load_defaults` in `config/application.rb` has not been changed yet.
 
-To allow you to upgrade to new defaults one by one, the update task has created a file `config/initializers/new_framework_defaults.rb`. Once your application is ready to run with new defaults, you can remove this file and flip the `config.load_defaults` value.
+To allow you to upgrade to new defaults one by one, the update task has created a file `config/initializers/new_framework_defaults_X.Y.rb` (with the desired Rails version in the filename). You should enable the new configuration defaults by uncommenting them in the file; this can be done gradually over several deployments. Once your application is ready to run with new defaults, you can remove this file and flip the `config.load_defaults` value.
 
 Upgrading from Rails 6.1 to Rails 7.0
 -------------------------------------
@@ -130,6 +132,42 @@ The default digest class for ActiveSupport::Digest is changing from SHA1 to SHA2
 This has consequences for things like Etags that will change and cache keys as well.
 Changing these keys can have impact on cache hit rates, so be careful and watch out
 for this when upgrading to the new hash.
+
+### New ActiveSupport::Cache serialization format
+
+A faster and more compact serialization format was introduced.
+
+To enable it you must set `config.active_support.cache_format_version = 7.0`:
+
+```ruby
+# config/application.rb
+
+config.load_defaults 6.1
+config.active_support.cache_format_version = 7.0
+```
+
+Or simply:
+
+```ruby
+# config/application.rb
+
+config.load_defaults 7.0
+```
+
+However Rails 6.1 applications are not able to read this new serialization format,
+so to ensure a seamless upgrade you must first deploy your Rails 7.0 upgrade with
+`config.active_support.cache_format_version = 6.1`, and then only once all Rails
+processes have been updated you can set `config.active_support.cache_format_version = 7.0`.
+
+Rails 7.0 is able to read both formats so the cache won't be invalidated during the
+upgrade.
+
+### ActiveStorage video preview image generation
+
+Video preview image generation now uses FFmpeg's scene change detection to generate
+more meaningful preview images. Previously the first frame of the video would be used
+and that caused problems if the video faded in from black. This change requires
+FFmpeg v3.4+.
 
 Upgrading from Rails 6.0 to Rails 6.1
 -------------------------------------
@@ -244,7 +282,7 @@ The default HTTP status code used in `ActionDispatch::SSL` when redirecting non-
 
 When processing variants in Active Storage, it's now required to have the [image_processing gem](https://github.com/janko-m/image_processing) bundled instead of directly using `mini_magick`. Image Processing is configured by default to use `mini_magick` behind the scenes, so the easiest way to upgrade is by replacing the `mini_magick` gem for the `image_processing` gem and making sure to remove the explicit usage of `combine_options` since it's no longer needed.
 
-That said, it's recommended to change the calls to raw `resize` for `image_processing` macros as they also sharpen the thumbnail after resizing. For example, instead of:
+For readability, you may wish to change raw `resize` calls to `image_processing` macros. For example, instead of:
 
 ```ruby
 video.preview(resize: "100x100")
@@ -659,7 +697,7 @@ user.highlights.first.filename # => "funky.jpg"
 user.highlights.second.filename # => "town.jpg"
 ```
 
-Existing applications can opt in to this new behavior by setting `config.active_storage.replace_on_assign_to_many` to `true`. The old behavior will be deprecated in Rails 6.1 and removed in a subsequent release.
+Existing applications can opt in to this new behavior by setting `config.active_storage.replace_on_assign_to_many` to `true`. The old behavior will be deprecated in Rails 7.0 and removed in Rails 7.1.
 
 Upgrading from Rails 5.1 to Rails 5.2
 -------------------------------------
@@ -719,12 +757,23 @@ Rails.application.secrets[:smtp_settings][:address]
 
 ### Removed deprecated support to `:text` and `:nothing` in `render`
 
-If your views are using `render :text`, they will no longer work. The new method
+If your controllers are using `render :text`, they will no longer work. The new method
 of rendering text with MIME type of `text/plain` is to use `render :plain`.
 
 Similarly, `render :nothing` is also removed and you should use the `head` method
 to send responses that contain only headers. For example, `head :ok` sends a
 200 response with no body to render.
+
+### Removed deprecated support of `redirect_to :back`
+
+In Rails 5.0, `redirect_to :back` was deprecated. In Rails 5.1, it was removed completely.
+
+As an alternative, use `redirect_back`. It's important to note that `redirect_back` also takes
+a `fallback_location` option which will be used in case the `HTTP_REFERER` is missing.
+
+```
+redirect_back(fallback_location: root_path)
+```
 
 
 Upgrading from Rails 4.2 to Rails 5.0
@@ -1856,7 +1905,7 @@ this gem such as `whitelist_attributes` or `mass_assignment_sanitizer` options.
 
 * Rails 4.0 has deprecated `ActiveRecord::TestCase` in favor of `ActiveSupport::TestCase`.
 
-* Rails 4.0 has deprecated the old-style hash based finder API. This means that
+* Rails 4.0 has deprecated the old-style hash-based finder API. This means that
   methods which previously accepted "finder options" no longer do.  For example, `Book.find(:all, conditions: { name: '1984' })` has been deprecated in favor of `Book.where(name: '1984')`
 
 * All dynamic methods except for `find_by_...` and `find_by_...!` are deprecated.

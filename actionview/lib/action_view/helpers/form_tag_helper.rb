@@ -5,7 +5,6 @@ require "action_view/helpers/url_helper"
 require "action_view/helpers/text_helper"
 require "active_support/core_ext/string/output_safety"
 require "active_support/core_ext/module/attribute_accessors"
-require "active_support/core_ext/symbol/starts_ends_with"
 
 module ActionView
   # = Action View Form Tag Helpers
@@ -105,7 +104,7 @@ module ActionView
 
         # a little duplication to construct fewer strings
         if sanitized_object_name.empty?
-          sanitized_method_name.dup
+          sanitized_method_name
         elsif suffixes.any?
           [sanitized_object_name, index, sanitized_method_name, *suffixes].compact.join("_")
         elsif index
@@ -924,7 +923,7 @@ module ActionView
 
         def form_tag_with_body(html_options, content)
           output = form_tag_html(html_options)
-          output << content
+          output << content.to_s if content
           output.safe_concat("</form>")
         end
 

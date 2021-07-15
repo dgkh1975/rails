@@ -9,8 +9,7 @@ module ActiveRecord
 
         case options[:dependent]
         when :destroy
-          target.destroy
-          raise ActiveRecord::Rollback unless target.destroyed?
+          raise ActiveRecord::Rollback unless target.destroy
         when :destroy_async
           id = owner.public_send(reflection.foreign_key.to_sym)
           primary_key_column = reflection.active_record_primary_key.to_sym
@@ -78,6 +77,8 @@ module ActiveRecord
             raise_on_type_mismatch!(record)
             set_inverse_instance(record)
             @updated = true
+          elsif target
+            remove_inverse_instance(target)
           end
 
           replace_keys(record, force: true)
@@ -126,7 +127,7 @@ module ActiveRecord
 
         def invertible_for?(record)
           inverse = inverse_reflection_for(record)
-          inverse && (inverse.has_one? || ActiveRecord::Base.has_many_inversing)
+          inverse && (inverse.has_one? || inverse.klass.has_many_inversing)
         end
 
         def stale_state

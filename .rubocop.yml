@@ -49,6 +49,9 @@ Layout/CaseIndentation:
 Layout/ClosingHeredocIndentation:
   Enabled: true
 
+Layout/ClosingParenthesisIndentation:
+  Enabled: true
+
 # Align comments with method definitions.
 Layout/CommentIndentation:
   Enabled: true
@@ -62,6 +65,9 @@ Layout/EndAlignment:
   Enabled: true
   EnforcedStyleAlignWith: variable
   AutoCorrect: true
+
+Layout/EndOfLine:
+  Enabled: true
 
 Layout/EmptyLineAfterMagicComment:
   Enabled: true
@@ -87,9 +93,6 @@ Layout/EmptyLinesAroundModuleBody:
 
 # Use Ruby >= 1.9 syntax for hashes. Prefer { a: :b } over { :a => :b }.
 Style/HashSyntax:
-  Enabled: true
-
-Layout/FirstArgumentIndentation:
   Enabled: true
 
 # Method definitions after `private` or `protected` isolated calls need one
@@ -250,7 +253,16 @@ Style/ColonMethodCall:
 Style/TrivialAccessors:
   Enabled: true
 
+Performance/BindCall:
+  Enabled: true
+
 Performance/FlatMap:
+  Enabled: true
+
+Performance/MapCompact:
+  Enabled: true
+
+Performance/SelectMap:
   Enabled: true
 
 Performance/RedundantMerge:
@@ -266,6 +278,9 @@ Performance/RegexpMatch:
   Enabled: true
 
 Performance/ReverseEach:
+  Enabled: true
+
+Performance/StringReplacement:
   Enabled: true
 
 Performance/UnfreezeString:

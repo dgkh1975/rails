@@ -23,6 +23,17 @@ end
 
 class ::MyOtherMailObserver < ::MyMailObserver; end
 
+class MyLogRecorder < Logger
+  def initialize
+    @io = StringIO.new
+    super(@io)
+  end
+
+  def recording
+    @io.string
+  end
+end
+
 module ApplicationTests
   class ConfigurationTest < ActiveSupport::TestCase
     include ActiveSupport::Testing::Isolation
@@ -49,9 +60,18 @@ module ApplicationTests
       end
     end
 
+    def switch_development_hosts_to(*hosts)
+      old_development_hosts = ENV["RAILS_DEVELOPMENT_HOSTS"]
+      ENV["RAILS_DEVELOPMENT_HOSTS"] = hosts.join(",")
+      yield
+    ensure
+      ENV["RAILS_DEVELOPMENT_HOSTS"] = old_development_hosts
+    end
+
     def setup
       build_app
       suppress_default_config
+      suppress_sqlite3_warning
     end
 
     def teardown
@@ -66,6 +86,14 @@ module ApplicationTests
     def restore_default_config
       FileUtils.rm_rf("#{app_path}/config/environments")
       FileUtils.mv("#{app_path}/config/__environments__", "#{app_path}/config/environments")
+    end
+
+    def suppress_sqlite3_warning
+      add_to_config "config.active_record.sqlite3_production_warning = false"
+    end
+
+    def restore_sqlite3_warning
+      remove_from_config ".*config.active_record.sqlite3_production_warning.*\n"
     end
 
     test "Rails.env does not set the RAILS_ENV environment variable which would leak out into rake tasks" do
@@ -572,6 +600,23 @@ module ApplicationTests
           assert_not app.config.public_file_server.enabled
         end
       end
+    end
+
+    test "EtagWithFlash module doesn't break when the session store is disabled" do
+      make_basic_app do |application|
+        application.config.session_store :disabled
+      end
+
+      class ::OmgController < ActionController::Base
+        def index
+          stale?(weak_etag: "something")
+          render plain: "else"
+        end
+      end
+
+      get "/"
+
+      assert last_response.ok?
     end
 
     test "Use key_generator when secret_key_base is set" do
@@ -1219,7 +1264,6 @@ module ApplicationTests
     test "autoloaders" do
       app "development"
 
-      config = Rails.application.config
       assert Rails.autoloaders.zeitwerk_enabled?
       assert_instance_of Zeitwerk::Loader, Rails.autoloaders.main
       assert_equal "rails.main", Rails.autoloaders.main.tag
@@ -1228,24 +1272,6 @@ module ApplicationTests
       assert_equal [Rails.autoloaders.main, Rails.autoloaders.once], Rails.autoloaders.to_a
       assert_equal ActiveSupport::Dependencies::ZeitwerkIntegration::Inflector, Rails.autoloaders.main.inflector
       assert_equal ActiveSupport::Dependencies::ZeitwerkIntegration::Inflector, Rails.autoloaders.once.inflector
-
-      config.autoloader = :classic
-      assert_not Rails.autoloaders.zeitwerk_enabled?
-      assert_nil Rails.autoloaders.main
-      assert_nil Rails.autoloaders.once
-      assert_equal 0, Rails.autoloaders.count
-
-      config.autoloader = :zeitwerk
-      assert Rails.autoloaders.zeitwerk_enabled?
-      assert_instance_of Zeitwerk::Loader, Rails.autoloaders.main
-      assert_equal "rails.main", Rails.autoloaders.main.tag
-      assert_instance_of Zeitwerk::Loader, Rails.autoloaders.once
-      assert_equal "rails.once", Rails.autoloaders.once.tag
-      assert_equal [Rails.autoloaders.main, Rails.autoloaders.once], Rails.autoloaders.to_a
-      assert_equal ActiveSupport::Dependencies::ZeitwerkIntegration::Inflector, Rails.autoloaders.main.inflector
-      assert_equal ActiveSupport::Dependencies::ZeitwerkIntegration::Inflector, Rails.autoloaders.once.inflector
-
-      assert_raises(ArgumentError) { config.autoloader = :unknown }
     end
 
     test "config.action_view.cache_template_loading with cache_classes default" do
@@ -1634,24 +1660,24 @@ module ApplicationTests
 
       app "production"
 
-      assert_not ActiveRecord::Base.dump_schema_after_migration
+      assert_not ActiveRecord.dump_schema_after_migration
     end
 
     test "config.active_record.dump_schema_after_migration is true by default in development" do
       app "development"
 
-      assert ActiveRecord::Base.dump_schema_after_migration
+      assert ActiveRecord.dump_schema_after_migration
     end
 
     test "config.active_record.verbose_query_logs is false by default in development" do
       app "development"
 
-      assert_not ActiveRecord::Base.verbose_query_logs
+      assert_not ActiveRecord.verbose_query_logs
     end
 
     test "config.active_record.suppress_multiple_database_warning is false by default in development" do
       app "development"
-      assert_not ActiveRecord::Base.suppress_multiple_database_warning
+      assert_not ActiveRecord.suppress_multiple_database_warning
     end
 
     test "config.annotations wrapping SourceAnnotationExtractor::Annotation class" do
@@ -1854,7 +1880,7 @@ module ApplicationTests
 
       app "development"
 
-      # TODO: Test deprecation message, assert_depcrecated { app "development" }
+      # TODO: Test deprecation message, assert_deprecated { app "development" }
       # does not collect it.
 
       assert_equal [X], C.descendants
@@ -2031,6 +2057,32 @@ module ApplicationTests
       assert_equal %w( foo bar ), Rails.application.config.my_custom_config
     end
 
+    test "config_for works with only a shared root array" do
+      set_custom_config <<~RUBY
+        shared:
+          - foo
+          - bar
+      RUBY
+
+      app "development"
+
+      assert_equal %w( foo bar ), Rails.application.config.my_custom_config
+    end
+
+    test "config_for returns only the env array when shared is an array" do
+      set_custom_config <<~RUBY
+        development:
+          - baz
+        shared:
+          - foo
+          - bar
+      RUBY
+
+      app "development"
+
+      assert_equal %w( baz ), Rails.application.config.my_custom_config
+    end
+
     test "config_for uses the Pathname object if it is provided" do
       set_custom_config <<~RUBY, "Pathname.new(Rails.root.join('config/custom.yml'))"
         development:
@@ -2117,10 +2169,10 @@ module ApplicationTests
     end
 
     test "config_for containing ERB tags should evaluate" do
-      set_custom_config <<~RUBY
+      set_custom_config <<~YAML
         development:
           key: <%= 'custom key' %>
-      RUBY
+      YAML
 
       app "development"
 
@@ -2163,6 +2215,28 @@ module ApplicationTests
       YAML.stub :load, { "development" => { "key" => "value" } } do
         assert_equal({ key: "value" }, Rails.application.config_for(:custom))
       end
+    end
+
+    test "config_for returns a ActiveSupport::OrderedOptions" do
+      app_file "config/custom.yml", <<~YAML
+        shared:
+          some_key: default
+
+        development:
+          some_key: value
+
+        test:
+      YAML
+
+      app "development"
+
+      config = Rails.application.config_for(:custom)
+      assert_instance_of ActiveSupport::OrderedOptions, config
+      assert_equal "value", config.some_key
+
+      config = Rails.application.config_for(:custom, env: :test)
+      assert_instance_of ActiveSupport::OrderedOptions, config
+      assert_equal "default", config.some_key
     end
 
     test "api_only is false by default" do
@@ -2229,6 +2303,32 @@ module ApplicationTests
       app "development"
 
       assert_equal true, ActiveRecord::Base.has_many_inversing
+    end
+
+    test "ActiveRecord.verify_foreign_keys_for_fixtures is true by default for new apps" do
+      app "development"
+
+      assert_equal true, ActiveRecord.verify_foreign_keys_for_fixtures
+    end
+
+    test "ActiveRecord.verify_foreign_keys_for_fixtures is false by default for upgraded apps" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app "development"
+
+      assert_equal false, ActiveRecord.verify_foreign_keys_for_fixtures
+    end
+
+    test "ActiveRecord.verify_foreign_keys_for_fixtures can be configured via config.active_record.verify_foreign_keys_for_fixtures" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app_file "config/initializers/new_framework_defaults_7_0.rb", <<-RUBY
+        Rails.application.config.active_record.verify_foreign_keys_for_fixtures = true
+      RUBY
+
+      app "development"
+
+      assert_equal true, ActiveRecord.verify_foreign_keys_for_fixtures
     end
 
     test "ActiveSupport::MessageEncryptor.use_authenticated_message_encryption is true by default for new apps" do
@@ -2321,6 +2421,20 @@ module ApplicationTests
       assert_equal OpenSSL::Digest::SHA256, ActiveSupport::KeyGenerator.hash_digest_class
     end
 
+    test "ActiveSupport.test_parallelization_minimum_number_of_tests can be configured via config.active_support.test_parallelization_minimum_number_of_tests" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app_file "config/environments/test.rb", <<-RUBY
+        Rails.application.configure do
+          config.active_support.test_parallelization_minimum_number_of_tests = 1234
+        end
+      RUBY
+
+      app "test"
+
+      assert_equal 1234, ActiveSupport.test_parallelization_minimum_number_of_tests
+    end
+
     test "custom serializers should be able to set via config.active_job.custom_serializers in an initializer" do
       class ::DummySerializer < ActiveJob::Serializers::ObjectSerializer; end
 
@@ -2336,7 +2450,7 @@ module ApplicationTests
     test "active record job queue is set" do
       app "development"
 
-      assert_equal ActiveSupport::InheritableOptions.new(destroy: :active_record_destroy), ActiveRecord::Base.queues
+      assert_equal ActiveSupport::InheritableOptions.new(destroy: :active_record_destroy), ActiveRecord.queues
     end
 
     test "destroy association async job should be loaded in configs" do
@@ -2655,6 +2769,25 @@ module ApplicationTests
       assert_equal 308, Rails.application.config.action_dispatch.ssl_default_redirect_status
     end
 
+    test "Rails.application.config.action_mailer.smtp_settings have open_timeout and read_timeout defined as 5 in 7.0 defaults" do
+      remove_from_config '.*config\.load_defaults.*\n'
+      add_to_config 'config.load_defaults "7.0"'
+
+      app "development"
+
+      assert_equal 5, ActionMailer::Base.smtp_settings[:open_timeout]
+      assert_equal 5, ActionMailer::Base.smtp_settings[:read_timeout]
+    end
+
+    test "Rails.application.config.action_mailer.smtp_settings does not have open_timeout and read_timeout configured on other versions" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app "development"
+
+      assert_nil ActionMailer::Base.smtp_settings[:open_timeout]
+      assert_nil ActionMailer::Base.smtp_settings[:read_timeout]
+    end
+
     test "ActiveSupport.utc_to_local_returns_utc_offset_times is true in 6.1 defaults" do
       remove_from_config '.*config\.load_defaults.*\n'
       add_to_config 'config.load_defaults "6.1"'
@@ -2760,6 +2893,30 @@ module ApplicationTests
       assert_kind_of ActiveSupport::HashWithIndifferentAccess, ActionCable.server.config.cable
     end
 
+    test "action_text.config.attachment_tag_name is 'action-text-attachment' with Rails 6 defaults" do
+      add_to_config 'config.load_defaults "6.1"'
+
+      app "development"
+
+      assert_equal "action-text-attachment", ActionText::Attachment.tag_name
+    end
+
+    test "action_text.config.attachment_tag_name is 'action-text-attachment' without defaults" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app "development"
+
+      assert_equal "action-text-attachment", ActionText::Attachment.tag_name
+    end
+
+    test "action_text.config.attachment_tag_name is can be overridden" do
+      add_to_config "config.action_text.attachment_tag_name = 'link'"
+
+      app "development"
+
+      assert_equal "link", ActionText::Attachment.tag_name
+    end
+
     test "ActionMailbox.logger is Rails.logger by default" do
       app "development"
 
@@ -2855,6 +3012,25 @@ module ApplicationTests
       assert_equal :another_queue, ActionMailbox.queues[:routing]
     end
 
+    test "ActionMailbox.storage_service is nil by default (default service)" do
+      app "development"
+      assert_nil(ActionMailbox.storage_service)
+    end
+
+    test "ActionMailbox.storage_service can be configured" do
+      add_to_config <<-RUBY
+        config.active_storage.service_configurations = {
+          email: {
+            root: "#{Dir.tmpdir}/email",
+            service: "Disk"
+          }
+        }
+        config.action_mailbox.storage_service = :email
+      RUBY
+      app "development"
+      assert_equal(:email, ActionMailbox.storage_service)
+    end
+
     test "ActionMailer::Base.delivery_job is ActionMailer::MailDeliveryJob by default" do
       app "development"
 
@@ -2928,9 +3104,64 @@ module ApplicationTests
       assert_not_includes(output, "rails_direct_uploads")
     end
 
+    test "ActiveStorage.video_preview_arguments uses the old arguments without Rails 7 defaults" do
+      remove_from_config '.*config\.load_defaults.*\n'
+
+      app "development"
+
+      assert_equal ActiveStorage.video_preview_arguments,
+        "-y -vframes 1 -f image2"
+    end
+
+    test "ActiveStorage.video_preview_arguments uses the new arguments by default" do
+      app "development"
+
+      assert_equal ActiveStorage.video_preview_arguments,
+        "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1'" \
+        " -frames:v 1 -f image2"
+    end
+
     test "hosts include .localhost in development" do
       app "development"
       assert_includes Rails.application.config.hosts, ".localhost"
+    end
+
+    test "hosts reads multiple values from RAILS_DEVELOPMENT_HOSTS" do
+      host = "agoodhost.com"
+      another_host = "bananapants.com"
+      switch_development_hosts_to(host, another_host) do
+        app "development"
+        assert_includes Rails.application.config.hosts, host
+        assert_includes Rails.application.config.hosts, another_host
+      end
+    end
+
+    test "hosts reads multiple values from RAILS_DEVELOPMENT_HOSTS and trims white space" do
+      host = "agoodhost.com"
+      host_with_white_space = "  #{host} "
+      another_host = "bananapants.com"
+      another_host_with_white_space = "     #{another_host}"
+      switch_development_hosts_to(host_with_white_space, another_host_with_white_space) do
+        app "development"
+        assert_includes Rails.application.config.hosts, host
+        assert_includes Rails.application.config.hosts, another_host
+      end
+    end
+
+    test "hosts reads from RAILS_DEVELOPMENT_HOSTS" do
+      host = "agoodhost.com"
+      switch_development_hosts_to(host) do
+        app "development"
+        assert_includes Rails.application.config.hosts, host
+      end
+    end
+
+    test "hosts does not read from RAILS_DEVELOPMENT_HOSTS in production" do
+      host = "agoodhost.com"
+      switch_development_hosts_to(host) do
+        app "production"
+        assert_not_includes Rails.application.config.hosts, host
+      end
     end
 
     test "disable_sandbox is false by default" do
@@ -3011,6 +3242,164 @@ module ApplicationTests
       app "development"
 
       assert_equal false, ActionDispatch::Request.return_only_media_type_on_content_type
+    end
+
+    test "ActionDispatch::DebugExceptions.log_rescued_responses is true by default" do
+      app "development"
+
+      assert_equal true, ActionDispatch::DebugExceptions.log_rescued_responses
+    end
+
+    test "ActionDispatch::DebugExceptions.log_rescued_responses can be configured" do
+      add_to_config <<-RUBY
+        config.action_dispatch.log_rescued_responses = false
+      RUBY
+
+      app "development"
+
+      assert_equal false, ActionDispatch::DebugExceptions.log_rescued_responses
+    end
+
+    test "logs a warning when running SQLite3 in production" do
+      restore_sqlite3_warning
+      app_file "config/initializers/active_record.rb", <<~RUBY
+        ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+      RUBY
+      add_to_config "config.logger = MyLogRecorder.new"
+
+      app "production"
+
+      assert_match(/You are running SQLite in production, this is generally not recommended/, Rails.logger.recording)
+    end
+
+    test "doesn't log a warning when running SQLite3 in production and sqlite3_production_warning=false" do
+      app_file "config/initializers/active_record.rb", <<~RUBY
+        ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+      RUBY
+      add_to_config "config.logger = MyLogRecorder.new"
+
+      app "production"
+
+      assert_no_match(/You are running SQLite in production, this is generally not recommended/, Rails.logger.recording)
+    end
+
+    test "doesn't log a warning when running MySQL in production" do
+      restore_sqlite3_warning
+      original_configurations = ActiveRecord::Base.configurations
+      ActiveRecord::Base.configurations = { production: { db1: { adapter: "mysql2" } } }
+      app_file "config/initializers/active_record.rb", <<~RUBY
+        ActiveRecord::Base.establish_connection(adapter: "mysql2")
+      RUBY
+      add_to_config "config.logger = MyLogRecorder.new"
+
+      app "production"
+
+      assert_no_match(/You are running SQLite in production, this is generally not recommended/, Rails.logger.recording)
+    ensure
+      ActiveRecord::Base.configurations = original_configurations
+    end
+
+    test "doesn't log a warning when running SQLite3 in development" do
+      restore_sqlite3_warning
+      app_file "config/initializers/active_record.rb", <<~RUBY
+        ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+      RUBY
+      add_to_config "config.logger = MyLogRecorder.new"
+
+      app "development"
+
+      assert_no_match(/You are running SQLite in production, this is generally not recommended/, Rails.logger.recording)
+    end
+
+    test "app starts with LocalCache middleware" do
+      app "development"
+
+      assert(Rails.application.config.middleware.map(&:name).include?("ActiveSupport::Cache::Strategy::LocalCache"))
+
+      local_cache_index = Rails.application.config.middleware.map(&:name).index("ActiveSupport::Cache::Strategy::LocalCache")
+      logger_index = Rails.application.config.middleware.map(&:name).index("Rails::Rack::Logger")
+      assert local_cache_index < logger_index
+    end
+
+    test "LocalCache middleware can be moved via app config" do
+      # you can't move Rails.cache.middleware as it doesn't exist yet
+      add_to_config "config.middleware.move_after(Rails::Rack::Logger, ActiveSupport::Cache::Strategy::LocalCache)"
+
+      app "development"
+
+      local_cache_index = Rails.application.config.middleware.map(&:name).index("ActiveSupport::Cache::Strategy::LocalCache")
+      logger_index = Rails.application.config.middleware.map(&:name).index("Rails::Rack::Logger")
+      assert local_cache_index > logger_index
+    end
+
+    test "LocalCache middleware can be moved via initializer" do
+      app_file "config/initializers/move_local_cache_middleware.rb", <<~RUBY
+        Rails.application.config.middleware.move_after(Rails::Rack::Logger, Rails.cache.middleware)
+      RUBY
+
+      app "development"
+
+      local_cache_index = Rails.application.config.middleware.map(&:name).index("ActiveSupport::Cache::Strategy::LocalCache")
+      logger_index = Rails.application.config.middleware.map(&:name).index("Rails::Rack::Logger")
+      assert local_cache_index > logger_index
+    end
+
+    test "LocalCache middleware can be removed via app config" do
+      # you can't delete Rails.cache.middleware as it doesn't exist yet
+      add_to_config "config.middleware.delete(ActiveSupport::Cache::Strategy::LocalCache)"
+
+      app "development"
+
+      assert_not(Rails.application.config.middleware.map(&:name).include?("ActiveSupport::Cache::Strategy::LocalCache"))
+    end
+
+    test "LocalCache middleware can be removed via initializer" do
+      app_file "config/initializers/remove_local_cache_middleware.rb", <<~RUBY
+        Rails.application.config.middleware.delete(Rails.cache.middleware)
+      RUBY
+
+      app "development"
+
+      assert_not(Rails.application.config.middleware.map(&:name).include?("ActiveSupport::Cache::Strategy::LocalCache"))
+    end
+
+    test "custom middleware with overridden names can be added, moved, or deleted" do
+      app_file "config/initializers/add_custom_middleware.rb", <<~RUBY
+        class CustomMiddlewareOne
+          def self.name
+            "1st custom middleware"
+          end
+          def initialize(app, *args); end
+          def new(app); self; end
+        end
+
+        class CustomMiddlewareTwo
+          def initialize(app, *args); end
+          def new(app); self; end
+        end
+
+        class CustomMiddlewareThree
+          def self.name
+            "3rd custom middleware"
+          end
+          def initialize(app, *args); end
+          def new(app); self; end
+        end
+
+        Rails.application.config.middleware.use(CustomMiddlewareOne)
+        Rails.application.config.middleware.use(CustomMiddlewareTwo)
+        Rails.application.config.middleware.use(CustomMiddlewareThree)
+        Rails.application.config.middleware.move_after(CustomMiddlewareTwo, CustomMiddlewareOne)
+        Rails.application.config.middleware.delete(CustomMiddlewareThree)
+      RUBY
+
+      app "development"
+
+      custom_middleware_one = Rails.application.config.middleware.map(&:name).index("1st custom middleware")
+      custom_middleware_two = Rails.application.config.middleware.map(&:name).index("CustomMiddlewareTwo")
+      assert custom_middleware_one > custom_middleware_two
+
+      assert_nil Rails.application.config.middleware.map(&:name).index("3rd custom middleware")
     end
 
     private

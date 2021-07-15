@@ -216,6 +216,17 @@ class AttributeMethodsTest < ActiveRecord::TestCase
     end
   end
 
+  test "read attributes_for_database" do
+    topic = Topic.new
+    topic.content = { one: 1, two: 2 }
+
+    db_attributes = Topic.instantiate(topic.attributes_for_database).attributes
+    before_type_cast_attributes = Topic.instantiate(topic.attributes_before_type_cast).attributes
+
+    assert_equal topic.attributes, db_attributes
+    assert_not_equal topic.attributes, before_type_cast_attributes
+  end
+
   test "read attributes_after_type_cast on a date" do
     tz = "Pacific Time (US & Canada)"
 
@@ -266,7 +277,8 @@ class AttributeMethodsTest < ActiveRecord::TestCase
   end
 
   test "case-sensitive attributes hash" do
-    assert_equal @loaded_fixtures["computers"]["workstation"].to_hash, Computer.first.attributes
+    expected = ["created_at", "developer", "extendedWarranty", "id", "system", "timezone", "updated_at"]
+    assert_equal expected, Computer.first.attributes.keys.sort
   end
 
   test "attributes without primary key" do
@@ -429,14 +441,14 @@ class AttributeMethodsTest < ActiveRecord::TestCase
     assert_equal "a", topic[:title]
   end
 
-  test "read overriden attribute with predicate respects override" do
+  test "read overridden attribute with predicate respects override" do
     topic = Topic.new
 
     topic.approved = true
 
     def topic.approved; false; end
 
-    assert_not topic.approved?, "overriden approved should be false"
+    assert_not topic.approved?, "overridden approved should be false"
   end
 
   test "string attribute predicate" do
@@ -788,7 +800,8 @@ class AttributeMethodsTest < ActiveRecord::TestCase
     in_time_zone "Pacific Time (US & Canada)" do
       record = Topic.new(id: 1)
       record.written_on = "Jan 01 00:00:00 2014"
-      assert_equal record, YAML.load(YAML.dump(record))
+      payload = YAML.dump(record)
+      assert_equal record, YAML.respond_to?(:unsafe_load) ? YAML.unsafe_load(payload) : YAML.load(payload)
     end
   ensure
     # NOTE: Reset column info because global topics
@@ -905,7 +918,7 @@ class AttributeMethodsTest < ActiveRecord::TestCase
     }
     assert_instance_of Topic, error.record
     assert_equal "hello", error.attribute
-    assert_equal "unknown attribute 'hello' for Topic.", error.message
+    assert_match "unknown attribute 'hello' for Topic.", error.message
   end
 
   test "method overrides in multi-level subclasses" do
@@ -964,6 +977,7 @@ class AttributeMethodsTest < ActiveRecord::TestCase
 
   test "define_attribute_method works with both symbol and string" do
     klass = Class.new(ActiveRecord::Base)
+    klass.table_name = "foo"
 
     assert_nothing_raised { klass.define_attribute_method(:foo) }
     assert_nothing_raised { klass.define_attribute_method("bar") }
