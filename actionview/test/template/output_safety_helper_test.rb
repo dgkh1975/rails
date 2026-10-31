@@ -35,24 +35,6 @@ class OutputSafetyHelperTest < ActionView::TestCase
     assert_equal "&quot;a&quot; &lt;br/&gt; &lt;b&gt; &lt;br/&gt; &lt;c&gt;", joined
   end
 
-  test "safe_join should return the safe string separated by $, when second argument is not passed" do
-    default_delimeter = $,
-
-    begin
-      $, = nil
-      joined = safe_join(["a", "b"])
-      assert_equal "ab", joined
-
-      silence_warnings do
-        $, = "|"
-      end
-      joined = safe_join(["a", "b"])
-      assert_equal "a|b", joined
-    ensure
-      $, = default_delimeter
-    end
-  end
-
   test "to_sentence should escape non-html_safe values" do
     actual = to_sentence(%w(< > & ' "))
     assert_predicate actual, :html_safe?
@@ -63,13 +45,19 @@ class OutputSafetyHelperTest < ActionView::TestCase
     assert_equal("&lt;script&gt;", actual)
   end
 
+  test "to_sentence handles an empty array" do
+    actual = to_sentence([])
+    assert_equal "", actual
+    assert_predicate actual, :html_safe?
+  end
+
   test "to_sentence does not double escape if single value is html_safe" do
     assert_equal("&lt;script&gt;", to_sentence([ERB::Util.html_escape("<script>")]))
     assert_equal("&lt;script&gt;", to_sentence(["&lt;script&gt;".html_safe]))
     assert_equal("&amp;lt;script&amp;gt;", to_sentence(["&lt;script&gt;"]))
   end
 
-  test "to_sentence connector words are checked for html safety" do
+  test "to_sentence connector words are checked for HTML safety" do
     assert_equal "one & two, and three", to_sentence(["one", "two", "three"], words_connector: " & ".html_safe)
     assert_equal "one & two", to_sentence(["one", "two"], two_words_connector: " & ".html_safe)
     assert_equal "one, two &lt;script&gt;alert(1)&lt;/script&gt; three", to_sentence(["one", "two", "three"], last_word_connector: " <script>alert(1)</script> ")

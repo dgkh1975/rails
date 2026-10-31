@@ -2,8 +2,9 @@
 
 module ActiveRecord
   module Associations
-    # = Active Record Has One Association
-    class HasOneAssociation < SingularAssociation #:nodoc:
+    # Active Record Has One Association
+    # =================================
+    class HasOneAssociation < SingularAssociation # :nodoc:
       include ForeignAssociation
 
       def handle_dependency
@@ -13,8 +14,8 @@ module ActiveRecord
 
         when :restrict_with_error
           if load_target
-            record = owner.class.human_attribute_name(reflection.name).downcase
-            owner.errors.add(:base, :'restrict_dependent_destroy.has_one', record: record)
+            association_name = owner.class.human_attribute_name(reflection.name)
+            owner.errors.add(:base, :'restrict_dependent_destroy.has_one', record: association_name.downcase, association_name: association_name)
             throw(:abort)
           end
 
@@ -33,8 +34,13 @@ module ActiveRecord
             target.destroy
             throw(:abort) unless target.destroyed?
           when :destroy_async
-            primary_key_column = target.class.primary_key.to_sym
-            id = target.public_send(primary_key_column)
+            if target.class.query_constraints_list
+              primary_key_column = target.class.query_constraints_list
+              id = primary_key_column.map { |col| target.public_send(col) }
+            else
+              primary_key_column = target.class.primary_key
+              id = target.public_send(primary_key_column)
+            end
 
             enqueue_destroy_association(
               owner_model_name: owner.class.to_s,
@@ -50,7 +56,32 @@ module ActiveRecord
         end
       end
 
+      def reference_changed_for_autosave?(record)
+        route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+        route.reference_needs_update?(owner, record) || reference_key_changed_for_save?(record)
+      end
+
+      def synchronize_reference(record)
+        route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+        route.write(owner, record, force: false)
+        set_inverse_instance(record)
+      end
+
       private
+        def reference_key_changed_for_save?(record)
+          # Through reflections have no single route to take the key from.
+          if reflection.through_reflection?
+            reflection.foreign_key_definition.any? do |key|
+              record.will_save_change_to_attribute?(record.class.attribute_aliases[key] || key)
+            end
+          else
+            route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+            route._reference_destination_key.any? do |key|
+              record.will_save_change_to_attribute?(key)
+            end
+          end
+        end
+
         def replace(record, save = true)
           raise_on_type_mismatch!(record) if record
 
@@ -70,7 +101,7 @@ module ActiveRecord
                 if save && !record.save
                   nullify_owner_attributes(record)
                   set_owner_attributes(target) if target
-                  raise RecordNotSaved, "Failed to save the new associated #{reflection.name}."
+                  raise RecordNotSaved.new("Failed to save the new associated #{reflection.name}.", record)
                 end
               end
             end
@@ -102,19 +133,30 @@ module ActiveRecord
 
             if target.persisted? && owner.persisted? && !target.save
               set_owner_attributes(target)
-              raise RecordNotSaved, "Failed to remove the existing associated #{reflection.name}. " \
-                                    "The record failed to save after its foreign key was set to nil."
+              raise RecordNotSaved.new(
+                "Failed to remove the existing associated #{reflection.name}. " \
+                "The record failed to save after its foreign key was set to nil.",
+                target
+              )
             end
           end
         end
 
         def nullify_owner_attributes(record)
-          record[reflection.foreign_key] = nil
+          route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+          primary_key = record.class.primary_key_definition
+          foreign_key = route._reference_destination_key
+
+          # Preserve shared primary key columns only if another foreign key
+          # column can be cleared to disassociate the record.
+          preserve_primary_key = foreign_key.any? { |key| !primary_key.include?(key) }
+
+          route.clear_reference(record, preserve: (primary_key if preserve_primary_key))
         end
 
-        def transaction_if(value)
+        def transaction_if(value, &block)
           if value
-            reflection.klass.transaction { yield }
+            reflection.klass.transaction(&block)
           else
             yield
           end
@@ -122,7 +164,7 @@ module ActiveRecord
 
         def _create_record(attributes, raise_error = false, &block)
           unless owner.persisted?
-            raise ActiveRecord::RecordNotSaved, "You cannot call create unless the parent is saved"
+            raise ActiveRecord::RecordNotSaved.new("You cannot call create unless the parent is saved", owner)
           end
 
           super

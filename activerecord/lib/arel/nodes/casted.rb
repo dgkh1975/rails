@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+require "active_model/attribute"
+
 module Arel # :nodoc: all
   module Nodes
     class Casted < Arel::Nodes::NodeExpression # :nodoc:
@@ -47,7 +50,7 @@ module Arel # :nodoc: all
 
     def self.build_quoted(other, attribute = nil)
       case other
-      when Arel::Nodes::Node, Arel::Attributes::Attribute, Arel::Table, Arel::Nodes::BindParam, Arel::SelectManager, Arel::Nodes::Quoted, Arel::Nodes::SqlLiteral
+      when Arel::Nodes::Node, Arel::Attributes::Attribute, Arel::Table, Arel::SelectManager, Arel::Nodes::SqlLiteral, ActiveModel::Attribute
         other
       else
         case attribute

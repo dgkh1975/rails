@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 module ActiveSupport
@@ -7,9 +8,12 @@ module ActiveSupport
         # Helper to define a test method using a String. Under the hood, it replaces
         # spaces with underscores and defines the test method.
         #
-        #   test "verify something" do
-        #     ...
-        #   end
+        # ```
+        # test "verify something" do
+        #   ...
+        # end
+        # ```
+        #: (String) ?{ () [self: untyped] -> void } -> void
         def test(name, &block)
           test_name = "test_#{name.gsub(/\s+/, '_')}".to_sym
           defined = method_defined? test_name

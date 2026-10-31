@@ -26,10 +26,20 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
   end
 
   def wait
-    sleep 1
+    sleep 0.5
+  end
+
+  def mkdir(dirs)
+    super
+    wait # wait for the events to fire
   end
 
   def touch(files)
+    super
+    wait # wait for the events to fire
+  end
+
+  def rm_f(files)
     super
     wait # wait for the events to fire
   end
@@ -43,11 +53,16 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
     assert_not_predicate checker, :updated?
 
     # Pipes used for flow control across fork.
-    boot_reader,  boot_writer  = IO.pipe
+    boot_reader, boot_writer = IO.pipe
     touch_reader, touch_writer = IO.pipe
+    result_reader, result_writer = IO.pipe
 
     pid = fork do
       assert_not_predicate checker, :updated?
+
+      # The listen gem start multiple background threads that need to reach a ready state.
+      # Unfortunately, it doesn't look like there is a clean way to block until they are ready.
+      wait
 
       # Fork is booted, ready for file to be touched
       # notify parent process.
@@ -57,10 +72,22 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
       # has been touched.
       IO.select([touch_reader])
 
+      10.times do
+        break if checker.updated?
+        wait
+      end
+
       assert_predicate checker, :updated?
+    rescue Exception => ex
+      result_writer.write("#{ex.class.name}: #{ex.message}")
+      raise
+    ensure
+      result_writer.close
     end
 
     assert pid
+
+    result_writer.close
 
     # Wait for fork to be booted before touching files.
     IO.select([boot_reader])
@@ -72,17 +99,28 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
     assert_predicate checker, :updated?
 
     Process.wait(pid)
+
+    assert_equal "", result_reader.read
   end
 
   test "can be garbage collected" do
-    previous_threads = Thread.list
-    checker_ref = WeakRef.new(ActiveSupport::EventedFileUpdateChecker.new([], tmpdir => ".rb") { })
-    listener_threads = Thread.list - previous_threads
+    # Use a separate thread to isolate objects and ensure they will be garbage collected.
+    checker_ref, listener_threads = Thread.new do
+      threads_before_checker = Thread.list
+      checker = ActiveSupport::EventedFileUpdateChecker.new([], tmpdir => ".rb") { }
 
-    wait # Wait for listener thread to start processing events.
-    GC.start
+      # Wait for listener thread to start processing events.
+      wait
 
-    assert_not_predicate checker_ref, :weakref_alive?
+      [WeakRef.new(checker), Thread.list - threads_before_checker]
+    end.value
+
+    5.times do
+      GC.start
+      listener_threads.each { |thread| thread.join(0.4) }
+    end
+
+    assert_not checker_ref.weakref_alive?, "EventedFileUpdateChecker was not garbage collected"
     assert_empty Thread.list & listener_threads
   end
 
@@ -97,8 +135,7 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
 
     assert_not_predicate checker, :updated?
 
-    FileUtils.touch(File.join(actual_dir, "a.rb"))
-    wait
+    touch(File.join(actual_dir, "a.rb"))
 
     assert_predicate checker, :updated?
     assert checker.execute_if_updated
@@ -114,8 +151,7 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
 
     checker = new_checker([], watched_dir => ".rb", not_exist_watched_dir => ".rb") { }
 
-    FileUtils.touch(File.join(watched_dir, "a.rb"))
-    wait
+    touch(File.join(watched_dir, "a.rb"))
     assert_predicate checker, :updated?
     assert checker.execute_if_updated
 
@@ -124,8 +160,7 @@ class EventedFileUpdateCheckerTest < ActiveSupport::TestCase
     assert_predicate checker, :updated?
     assert checker.execute_if_updated
 
-    FileUtils.touch(File.join(unwatched_dir, "a.rb"))
-    wait
+    touch(File.join(unwatched_dir, "a.rb"))
     assert_not_predicate checker, :updated?
     assert_not checker.execute_if_updated
   end

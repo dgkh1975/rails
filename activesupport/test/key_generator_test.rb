@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "abstract_unit"
+require "active_support/testing/ractors_assertions"
+require "active_support/testing/isolation"
 
 begin
   require "openssl"
@@ -59,6 +61,10 @@ else
       assert_raises(ArgumentError) { ActiveSupport::KeyGenerator.hash_digest_class = InvalidDigest }
       assert_raises(ArgumentError) { ActiveSupport::KeyGenerator.hash_digest_class = InvalidDigest.new }
     end
+
+    test "inspect does not show secrets" do
+      assert_match(/\A#<ActiveSupport::KeyGenerator:0x[0-9a-f]+>\z/, @generator.inspect)
+    end
   end
 
   class CachingKeyGeneratorTest < ActiveSupport::TestCase
@@ -98,4 +104,28 @@ else
     end
   end
 
+  class RactorKeyGeneratorTest < ActiveSupport::TestCase
+    # This test has to be isolated due to a bug with Ractors on 4.0.5. We can move it back with the other
+    # tests once 4.0.6 is released.
+    include ActiveSupport::Testing::Isolation
+    include ActiveSupport::Testing::RactorsAssertions
+
+    test "CachingKeyGenerator can work across ractors" do
+      # OpenSSL::Digest are not Ractor-safe, but the fix is already merged upstream. This test can be updated
+      # to use our implementation once a version of Ruby ships with ruby/openssl@502bc6c
+      key_generator = Class.new(ActiveSupport::KeyGenerator) do
+        def generate_key(salt, key_size)
+          OpenSSL::PKCS5.pbkdf2_hmac(@secret, salt, @iterations, key_size, "SHA1")
+        end
+      end.new("foo", iterations: 2)
+      caching_generator = ActiveSupport::CachingKeyGenerator.new(key_generator)
+      ActiveSupport::Ractors.make_shareable(caching_generator)
+
+      key = on_ractor(caching_generator) do |caching_generator|
+        caching_generator.generate_key("some_salt", 32)
+      end
+
+      assert_equal key, caching_generator.generate_key("some_salt", 32)
+    end
+  end
 end

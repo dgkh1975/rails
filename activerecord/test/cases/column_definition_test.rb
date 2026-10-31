@@ -5,11 +5,20 @@ require "cases/helper"
 module ActiveRecord
   module ConnectionAdapters
     class ColumnDefinitionTest < ActiveRecord::TestCase
-      def setup
-        @adapter = AbstractAdapter.new(nil)
-        def @adapter.native_database_types
+      class DummyAdapter < AbstractAdapter
+        class << self
+          def quote_column_name(column_name)
+            column_name.to_s
+          end
+        end
+
+        def native_database_types
           { string: "varchar" }
         end
+      end
+
+      def setup
+        @adapter = DummyAdapter.new(nil)
         @viz = @adapter.send(:schema_creation)
       end
 
@@ -28,6 +37,19 @@ module ActiveRecord
       def test_should_specify_not_null_if_null_option_is_false
         column_def = ColumnDefinition.new("title", "string", limit: 20, default: "Hello", null: false)
         assert_equal "title varchar(20) DEFAULT 'Hello' NOT NULL", @viz.accept(column_def)
+      end
+
+      def test_option_accessors_are_deprecated
+        column_def = ColumnDefinition.new("title", "string", { limit: 20 })
+
+        assert_deprecated(/options\[:limit\]/, ActiveRecord.deprecator) do
+          assert_equal 20, column_def.limit
+        end
+
+        assert_deprecated(/options\[:limit\]=/, ActiveRecord.deprecator) do
+          column_def.limit = 30
+        end
+        assert_equal 30, column_def.options[:limit]
       end
     end
   end

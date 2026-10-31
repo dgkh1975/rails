@@ -1,9 +1,16 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "active_support/rescuable"
-require "active_job/arguments"
 
 module ActiveJob
+  # Active Job \Execution
+  # =====================
+  #
+  # Provides methods to execute jobs immediately, and wraps job execution so
+  # that exceptions configured with
+  # [rescue_from](rdoc-ref:ActiveSupport::Rescuable::ClassMethods#rescue_from)
+  # are handled.
   module Execution
     extend ActiveSupport::Concern
     include ActiveSupport::Rescuable
@@ -12,14 +19,15 @@ module ActiveJob
     module ClassMethods
       # Performs the job immediately.
       #
-      #   MyJob.perform_now("mike")
+      # ```
+      # MyJob.perform_now("mike")
+      # ```
       #
-      def perform_now(*args)
-        job_or_instantiate(*args).perform_now
+      def perform_now(...)
+        job_or_instantiate(...).perform_now
       end
-      ruby2_keywords(:perform_now) if respond_to?(:ruby2_keywords, true)
 
-      def execute(job_data) #:nodoc:
+      def execute(job_data) # :nodoc:
         ActiveJob::Callbacks.run_callbacks(:execute) do
           job = deserialize(job_data)
           job.perform_now
@@ -31,13 +39,15 @@ module ActiveJob
     # but directly executed by blocking the execution of others until it's finished.
     # `perform_now` returns the value of your job's `perform` method.
     #
-    #   class MyJob < ActiveJob::Base
-    #     def perform
-    #       "Hello World!"
-    #     end
+    # ```
+    # class MyJob < ActiveJob::Base
+    #   def perform
+    #     "Hello World!"
     #   end
+    # end
     #
-    #   puts MyJob.new(*args).perform_now # => "Hello World!"
+    # puts MyJob.new(*args).perform_now # => "Hello World!"
+    # ```
     def perform_now
       # Guard against jobs that were persisted before we started counting executions by zeroing out nil counters
       self.executions = (executions || 0) + 1
@@ -46,7 +56,11 @@ module ActiveJob
 
       _perform_job
     rescue Exception => exception
-      rescue_with_handler(exception) || raise
+      handled = rescue_with_handler(exception)
+      return handled if handled
+
+      run_after_discard_procs(exception)
+      raise
     end
 
     def perform(*)
@@ -55,6 +69,7 @@ module ActiveJob
 
     private
       def _perform_job
+        ActiveSupport::ExecutionContext[:job] = self
         run_callbacks :perform do
           perform(*arguments)
         end

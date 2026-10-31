@@ -13,6 +13,23 @@ end
 class Rails::DummyController
 end
 
+module InspectorTestApp
+  class PostsController < ActionController::Base
+    def index
+    end
+
+    def show
+    end
+  end
+
+  module Admin
+    class UsersController < ActionController::Base
+      def index
+      end
+    end
+  end
+end
+
 module ActionDispatch
   module Routing
     class RoutesInspectorTest < ActiveSupport::TestCase
@@ -36,11 +53,13 @@ module ActionDispatch
         end
 
         assert_equal [
+          "Routes for application:",
           "       Prefix Verb URI Pattern              Controller#Action",
           "custom_assets GET  /custom/assets(.:format) custom_assets#show",
           "         blog      /blog                    Blog::Engine",
           "",
           "Routes for Blog::Engine:",
+          "Prefix Verb URI Pattern     Controller#Action",
           "  cart GET  /cart(.:format) cart#show"
         ], output
       end
@@ -59,10 +78,12 @@ module ActionDispatch
         end
 
         assert_equal [
+          "Routes for application:",
           "Prefix Verb URI Pattern Controller#Action",
           "  blog      /blog       Blog::Engine",
           "",
-          "Routes for Blog::Engine:"
+          "Routes for Blog::Engine:",
+          "No routes defined.",
         ], output
       end
 
@@ -128,45 +149,6 @@ module ActionDispatch
         ], output
       end
 
-      def test_inspect_routes_shows_dynamic_action_route
-        output = draw do
-          ActiveSupport::Deprecation.silence do
-            get "api/:action" => "api"
-          end
-        end
-
-        assert_equal [
-          "Prefix Verb URI Pattern            Controller#Action",
-          "       GET  /api/:action(.:format) api#:action"
-        ], output
-      end
-
-      def test_inspect_routes_shows_controller_and_action_only_route
-        output = draw do
-          ActiveSupport::Deprecation.silence do
-            get ":controller/:action"
-          end
-        end
-
-        assert_equal [
-          "Prefix Verb URI Pattern                    Controller#Action",
-          "       GET  /:controller/:action(.:format) :controller#:action"
-        ], output
-      end
-
-      def test_inspect_routes_shows_controller_and_action_route_with_constraints
-        output = draw do
-          ActiveSupport::Deprecation.silence do
-            get ":controller(/:action(/:id))", id: /\d+/
-          end
-        end
-
-        assert_equal [
-          "Prefix Verb URI Pattern                            Controller#Action",
-          "       GET  /:controller(/:action(/:id))(.:format) :controller#:action {:id=>/\\d+/}"
-        ], output
-      end
-
       def test_rails_routes_shows_route_with_defaults
         output = draw do
           get "photos/:id" => "photos#show", :defaults => { format: "jpg" }
@@ -174,7 +156,7 @@ module ActionDispatch
 
         assert_equal [
           "Prefix Verb URI Pattern           Controller#Action",
-          '       GET  /photos/:id(.:format) photos#show {:format=>"jpg"}'
+          "       GET  /photos/:id(.:format) photos#show #{{ format: "jpg" }}"
         ], output
       end
 
@@ -185,7 +167,7 @@ module ActionDispatch
 
         assert_equal [
           "Prefix Verb URI Pattern           Controller#Action",
-          "       GET  /photos/:id(.:format) photos#show {:id=>/[A-Z]\\d{5}/}"
+          "       GET  /photos/:id(.:format) photos#show #{{ id: /[A-Z]\d{5}/ }}"
         ], output
       end
 
@@ -219,7 +201,7 @@ module ActionDispatch
 
         assert_equal [
           "Prefix Verb URI Pattern        Controller#Action",
-          "       GET  /foo/:id(.:format) MountedRackApp {:id=>/[A-Z]\\d{5}/}"
+          "       GET  /foo/:id(.:format) MountedRackApp #{{ id: /[A-Z]\d{5}/ }}"
         ], output
       end
 
@@ -260,7 +242,7 @@ module ActionDispatch
 
         assert_equal [
           "          Prefix Verb URI Pattern Controller#Action",
-          "mounted_rack_app      /foo        MountedRackApp {:constraint=>( my custom constraint )}"
+          "mounted_rack_app      /foo        MountedRackApp #{{ constraint: constraint.new }}"
         ], output
       end
 
@@ -293,7 +275,7 @@ module ActionDispatch
 
         assert_equal [
           "Prefix Verb URI Pattern       Controller#Action",
-          "   foo GET  /foo(.:format)    redirect(301, /foo/bar) {:subdomain=>\"admin\"}",
+          "   foo GET  /foo(.:format)    redirect(301, /foo/bar) #{{ subdomain: "admin" }}",
           "   bar GET  /bar(.:format)    redirect(307, path: /foo/bar)",
           "foobar GET  /foobar(.:format) redirect(301)"
         ], output
@@ -317,11 +299,14 @@ module ActionDispatch
       end
 
       def test_routes_when_expanded
+        ActionDispatch::Routing::Mapper.route_source_locations = true
         engine = Class.new(Rails::Engine) do
           def self.inspect
             "Blog::Engine"
           end
         end
+        file_name = ActiveSupport::BacktraceCleaner.new.clean([__FILE__]).first
+        lineno = __LINE__
         engine.routes.draw do
           get "/cart", to: "cart#show"
         end
@@ -332,28 +317,37 @@ module ActionDispatch
           mount engine => "/blog", :as => "blog"
         end
 
-        assert_equal ["--[ Route 1 ]----------",
-                      "Prefix            | custom_assets",
-                      "Verb              | GET",
-                      "URI               | /custom/assets(.:format)",
-                      "Controller#Action | custom_assets#show",
-                      "--[ Route 2 ]----------",
-                      "Prefix            | custom_furnitures",
-                      "Verb              | GET",
-                      "URI               | /custom/furnitures(.:format)",
-                      "Controller#Action | custom_furnitures#show",
-                      "--[ Route 3 ]----------",
-                      "Prefix            | blog",
-                      "Verb              | ",
-                      "URI               | /blog",
-                      "Controller#Action | Blog::Engine",
-                      "",
-                      "[ Routes for Blog::Engine ]",
-                      "--[ Route 1 ]----------",
-                      "Prefix            | cart",
-                      "Verb              | GET",
-                      "URI               | /cart(.:format)",
-                      "Controller#Action | cart#show"], output
+        expected = [ "[ Routes for application ]",
+                     "--[ Route 1 ]----------",
+                     "Prefix            | custom_assets",
+                     "Verb              | GET",
+                     "URI               | /custom/assets(.:format)",
+                     "Controller#Action | custom_assets#show",
+                     "Source Location   | #{file_name}:#{lineno + 6}",
+                     "--[ Route 2 ]----------",
+                     "Prefix            | custom_furnitures",
+                     "Verb              | GET",
+                     "URI               | /custom/furnitures(.:format)",
+                     "Controller#Action | custom_furnitures#show",
+                     "Source Location   | #{file_name}:#{lineno + 7}",
+                     "--[ Route 3 ]----------",
+                     "Prefix            | blog",
+                     "Verb              | ",
+                     "URI               | /blog",
+                     "Controller#Action | Blog::Engine",
+                     "Source Location   | #{file_name}:#{lineno + 8}",
+                     "",
+                     "[ Routes for Blog::Engine ]",
+                     "--[ Route 1 ]----------",
+                     "Prefix            | cart",
+                     "Verb              | GET",
+                     "URI               | /cart(.:format)",
+                     "Controller#Action | cart#show",
+                     "Source Location   | #{file_name}:#{lineno + 2}"]
+
+        assert_equal expected, output
+      ensure
+        ActionDispatch::Routing::Mapper.route_source_locations = false
       end
 
       def test_no_routes_matched_filter_when_expanded
@@ -368,7 +362,7 @@ module ActionDispatch
       end
 
       def test_not_routes_when_expanded
-        output = draw(grep: "rails/dummy", formatter: ActionDispatch::Routing::ConsoleFormatter::Expanded.new) { }
+        output = draw(formatter: ActionDispatch::Routing::ConsoleFormatter::Expanded.new) { }
 
         assert_equal [
           "You don't have any routes defined!",
@@ -398,30 +392,6 @@ module ActionDispatch
                       "                DELETE /admin/posts/:id(.:format)      admin/posts#destroy"], output
       end
 
-      def test_regression_route_with_controller_regexp
-        output = draw do
-          ActiveSupport::Deprecation.silence do
-            get ":controller(/:action)", controller: /api\/[^\/]+/, format: false
-          end
-        end
-
-        assert_equal ["Prefix Verb URI Pattern            Controller#Action",
-                      "       GET  /:controller(/:action) :controller#:action"], output
-      end
-
-      def test_inspect_routes_shows_resources_route_when_assets_disabled
-        @set = ActionDispatch::Routing::RouteSet.new
-
-        output = draw do
-          get "/cart", to: "cart#show"
-        end
-
-        assert_equal [
-          "Prefix Verb URI Pattern     Controller#Action",
-          "  cart GET  /cart(.:format) cart#show"
-        ], output
-      end
-
       def test_routes_with_undefined_filter
         output = draw(controller: "Rails::MissingController") do
           get "photos/:id" => "photos#show", :id => /[A-Z]\d{5}/
@@ -445,7 +415,7 @@ module ActionDispatch
       end
 
       def test_no_routes_were_defined
-        output = draw(grep: "Rails::DummyController") { }
+        output = draw { }
 
         assert_equal [
           "You don't have any routes defined!",
@@ -477,6 +447,179 @@ module ActionDispatch
           "       Prefix Verb URI Pattern              Controller#Action",
           "custom_assets GET  /custom/assets(.:format) custom_assets#show",
         ], output
+      end
+
+      def test_route_with_proc_handler
+        output = draw do
+          get "/health", to: proc { [200, {}, ["OK"]] }
+        end
+        assert_equal [
+          "Prefix Verb URI Pattern       Controller#Action",
+          "health GET  /health(.:format) Inline handler (Proc/Lambda)"
+        ], output
+      end
+
+      def test_displaying_routes_for_engines_with_filter
+        engine = Class.new(Rails::Engine) do
+          def self.inspect
+            "Blog::Engine"
+          end
+        end
+        engine.routes.draw do
+          get "/cart", to: "cart#show"
+        end
+
+        output = draw(grep: "cart") do
+          get "/custom/assets", to: "custom_assets#show"
+          mount engine => "/blog", :as => "blog"
+        end
+
+        assert_equal [
+          "Routes for application:",
+          "No routes were found for this grep pattern.",
+          "For more information about routes, see the Rails guide: https://guides.rubyonrails.org/routing.html.",
+          "",
+          "Routes for Blog::Engine:",
+          "Prefix Verb URI Pattern     Controller#Action",
+          "  cart GET  /cart(.:format) cart#show"
+        ], output
+      end
+
+      def test_displaying_routes_for_engines_with_filter_not_matched
+        engine = Class.new(Rails::Engine) do
+          def self.inspect
+            "Blog::Engine"
+          end
+        end
+        engine.routes.draw do
+          get "/cart", to: "cart#show"
+        end
+
+        output = draw(grep: "dummy") do
+          get "/custom/assets", to: "custom_assets#show"
+          mount engine => "/blog", :as => "blog"
+        end
+
+        assert_equal [
+          "Routes for application:",
+          "No routes were found for this grep pattern.",
+          "For more information about routes, see the Rails guide: https://guides.rubyonrails.org/routing.html.",
+          "",
+          "Routes for Blog::Engine:",
+          "No routes were found for this grep pattern.",
+        ], output
+      end
+
+      def test_action_source_location_for_controller_action
+        @set.draw do
+          get "/posts", to: "inspector_test_app/posts#index"
+          get "/posts/:id", to: "inspector_test_app/posts#show"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        posts_index = routes.find { |r| r.reqs == "inspector_test_app/posts#index" }
+        posts_show = routes.find { |r| r.reqs == "inspector_test_app/posts#show" }
+
+        assert_match(/inspector_test\.rb:\d+/, posts_index.action_source_location)
+        assert_match(/inspector_test\.rb:\d+/, posts_show.action_source_location)
+        assert_not_equal posts_index.action_source_location, posts_show.action_source_location
+      end
+
+      def test_action_source_location_for_namespaced_controller
+        @set.draw do
+          get "/admin/users", to: "inspector_test_app/admin/users#index"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        admin_users_index = routes.find { |r| r.reqs == "inspector_test_app/admin/users#index" }
+
+        assert_match(/inspector_test\.rb:\d+/, admin_users_index.action_source_location)
+      end
+
+      def test_action_source_location_returns_nil_for_missing_controller
+        @set.draw do
+          get "/missing", to: "missing#index"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        missing = routes.find { |r| r.reqs == "missing#index" }
+
+        assert_nil missing.action_source_location
+      end
+
+      def test_action_source_location_returns_nil_for_missing_action
+        @set.draw do
+          get "/posts/missing", to: "inspector_test_app/posts#missing"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        missing = routes.find { |r| r.reqs == "inspector_test_app/posts#missing" }
+
+        assert_nil missing.action_source_location
+      end
+
+      def test_action_source_location_returns_nil_for_rack_app
+        @set.draw do
+          get "/health", to: proc { [200, {}, ["OK"]] }
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        health = routes.first
+
+        assert_nil health.action_source_location
+      end
+
+      def test_action_source_location_included_in_to_h
+        @set.draw do
+          get "/posts", to: "inspector_test_app/posts#index"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        hash = routes.first.to_h
+
+        assert hash.key?(:action_source_location)
+        assert_match(/inspector_test\.rb:\d+/, hash[:action_source_location])
+
+        assert hash.key?(:action_source_file)
+        assert_match(/inspector_test\.rb/, hash[:action_source_file])
+
+        assert hash.key?(:action_source_line)
+        assert_kind_of Integer, hash[:action_source_line]
+      end
+
+      def test_action_source_file_and_line_returns_tuple
+        @set.draw do
+          get "/posts", to: "inspector_test_app/posts#index"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        route = routes.find { |r| r.reqs == "inspector_test_app/posts#index" }
+        file, line = route.action_source_file_and_line
+
+        assert_match(/inspector_test\.rb/, file)
+        assert_kind_of Integer, line
+      end
+
+      def test_action_source_file_and_line_returns_nil_for_missing_action
+        @set.draw do
+          get "/posts/missing", to: "inspector_test_app/posts#missing"
+        end
+
+        routes = @set.routes.routes.map { |r| RouteWrapper.new(r) }
+        route = routes.find { |r| r.reqs == "inspector_test_app/posts#missing" }
+
+        assert_nil route.action_source_file_and_line
+      end
+
+      def test_action_source_location_in_expanded_output
+        @set.draw do
+          get "/posts", to: "inspector_test_app/posts#index"
+        end
+
+        inspector = RoutesInspector.new(@set.routes)
+        output = inspector.format(ConsoleFormatter::Expanded.new(width: 23))
+
+        assert_match(/Action Location.*inspector_test\.rb:\d+/m, output)
       end
 
       private

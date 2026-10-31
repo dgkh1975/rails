@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+require "base64"
+
 # NOTE: This class has to be defined in compact style in
 # order for rendering context subclassing to work correctly.
 class ActiveRecord::FixtureSet::RenderContext # :nodoc:

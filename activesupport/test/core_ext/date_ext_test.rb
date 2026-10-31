@@ -21,28 +21,44 @@ class DateExtCalculationsTest < ActiveSupport::TestCase
     assert_equal Date.new(1582, 10, 15), Date.new(1582, 10, 4).tomorrow
   end
 
-  def test_to_s
+  def test_to_fs
     date = Date.new(2005, 2, 21)
-    assert_equal "2005-02-21",          date.to_s
-    assert_equal "21 Feb",              date.to_s(:short)
-    assert_equal "February 21, 2005",   date.to_s(:long)
-    assert_equal "February 21st, 2005", date.to_s(:long_ordinal)
-    assert_equal "2005-02-21",          date.to_s(:db)
-    assert_equal "2005-02-21",          date.to_s(:inspect)
-    assert_equal "21 Feb 2005",         date.to_s(:rfc822)
-    assert_equal "2005-02-21",          date.to_s(:iso8601)
+    assert_equal "21 Feb",              date.to_fs(:short)
+    assert_equal "February 21, 2005",   date.to_fs(:long)
+    assert_equal "February 21st, 2005", date.to_fs(:long_ordinal)
+    assert_equal "2005-02-21",          date.to_fs(:db)
+    assert_equal "2005-02-21",          date.to_fs(:inspect)
+    assert_equal "21 Feb 2005",         date.to_fs(:rfc822)
+    assert_equal "21 Feb 2005",         date.to_fs(:rfc2822)
+    assert_equal "2005-02-21",          date.to_fs(:iso8601)
+    assert_equal date.to_s,             date.to_fs(:doesnt_exist)
+    assert_equal "21 Feb",              date.to_formatted_s(:short)
   end
 
-  def test_to_s_with_single_digit_day
+  def test_to_fs_with_single_digit_day
     date = Date.new(2005, 2, 1)
-    assert_equal "2005-02-01",          date.to_s
-    assert_equal "01 Feb",              date.to_s(:short)
-    assert_equal "February 01, 2005",   date.to_s(:long)
-    assert_equal "February 1st, 2005",  date.to_s(:long_ordinal)
-    assert_equal "2005-02-01",          date.to_s(:db)
-    assert_equal "2005-02-01",          date.to_s(:inspect)
-    assert_equal "01 Feb 2005",         date.to_s(:rfc822)
-    assert_equal "2005-02-01",          date.to_s(:iso8601)
+    assert_equal "01 Feb",              date.to_fs(:short)
+    assert_equal "February 01, 2005",   date.to_fs(:long)
+    assert_equal "February 1st, 2005",  date.to_fs(:long_ordinal)
+    assert_equal "2005-02-01",          date.to_fs(:db)
+    assert_equal "2005-02-01",          date.to_fs(:inspect)
+    assert_equal "01 Feb 2005",         date.to_fs(:rfc822)
+    assert_equal "2005-02-01",          date.to_fs(:iso8601)
+  end
+
+  def test_date_formats_can_be_extended
+    ActiveSupport::DateFormats.stub(:lookup, ->(format) { { custom_date_format: "%B %Y" }[format] }) do
+      assert_equal "February 2005", Date.new(2005, 2, 21).to_fs(:custom_date_format)
+    end
+  end
+
+  def test_deprecated_to_fs_custom_date_format
+    assert_deprecated(ActiveSupport.deprecator) do
+      Date::DATE_FORMATS[:custom] = "%B %Y"
+    end
+    assert_equal "February 2005", Date.new(2005, 2, 21).to_fs(:custom)
+  ensure
+    ActiveSupport::DateFormats::DEPRECATED_LIST.delete(:custom)
   end
 
   def test_readable_inspect

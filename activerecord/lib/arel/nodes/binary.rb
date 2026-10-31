@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Nodes
     class Binary < Arel::Nodes::NodeExpression
@@ -30,12 +31,18 @@ module Arel # :nodoc: all
     end
 
     module FetchAttribute
-      def fetch_attribute
+      def fetch_attribute(&)
         if left.is_a?(Arel::Attributes::Attribute)
-          yield left
+          left.fetch_attribute(&)
         elsif right.is_a?(Arel::Attributes::Attribute)
-          yield right
+          right.fetch_attribute(&)
         end
+      end
+    end
+
+    class As < Binary
+      def to_cte
+        Arel::Nodes::Cte.new(left.name, right)
       end
     end
 
@@ -105,14 +112,7 @@ module Arel # :nodoc: all
       end
     end
 
-    class Or < Binary
-      def fetch_attribute(&block)
-        left.fetch_attribute(&block) && right.fetch_attribute(&block)
-      end
-    end
-
     %w{
-      As
       Assignment
       Join
       Union

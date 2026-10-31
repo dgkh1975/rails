@@ -1,10 +1,15 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+require "strscan"
+
 module ActiveRecord
   module ConnectionAdapters
     module PostgreSQL
       module OID # :nodoc:
         class Hstore < Type::Value # :nodoc:
+          ERROR = "Invalid Hstore document: %s"
+
           include ActiveModel::Type::Helpers::Mutable
 
           def type
@@ -12,15 +17,56 @@ module ActiveRecord
           end
 
           def deserialize(value)
-            if value.is_a?(::String)
-              ::Hash[value.scan(HstorePair).map { |k, v|
-                v = v.upcase == "NULL" ? nil : v.gsub(/\A"(.*)"\Z/m, '\1').gsub(/\\(.)/, '\1')
-                k = k.gsub(/\A"(.*)"\Z/m, '\1').gsub(/\\(.)/, '\1')
-                [k, v]
-              }]
-            else
-              value
+            return value unless value.is_a?(::String)
+
+            scanner = StringScanner.new(value)
+            hash = {}
+
+            until scanner.eos?
+              unless scanner.skip(/"/)
+                raise(ArgumentError, ERROR % scanner.string.inspect)
+              end
+
+              unless key = scanner.scan(/^(\\[\\"]|[^\\"])*?(?=")/)
+                raise(ArgumentError, ERROR % scanner.string.inspect)
+              end
+
+              unless scanner.skip(/"=>?/)
+                raise(ArgumentError, ERROR % scanner.string.inspect)
+              end
+
+              if scanner.scan(/NULL/)
+                value = nil
+              else
+                unless scanner.skip(/"/)
+                  raise(ArgumentError, ERROR % scanner.string.inspect)
+                end
+
+                unless value = scanner.scan(/^(\\[\\"]|[^\\"])*?(?=")/)
+                  raise(ArgumentError, ERROR % scanner.string.inspect)
+                end
+
+                unless scanner.skip(/"/)
+                  raise(ArgumentError, ERROR % scanner.string.inspect)
+                end
+              end
+
+              key.gsub!('\"', '"')
+              key.gsub!("\\\\", "\\")
+
+              if value
+                value.gsub!('\"', '"')
+                value.gsub!("\\\\", "\\")
+              end
+
+              hash[key] = value
+
+              unless scanner.skip(/, /) || scanner.eos?
+                raise(ArgumentError, ERROR % scanner.string.inspect)
+              end
             end
+
+            hash
           end
 
           def serialize(value)
@@ -37,7 +83,7 @@ module ActiveRecord
             ActiveRecord::Store::StringKeyedHashAccessor
           end
 
-          # Will compare the Hash equivalents of +raw_old_value+ and +new_value+.
+          # Will compare the Hash equivalents of `raw_old_value` and `new_value`.
           # By comparing hashes, this avoids an edge case where the order of
           # the keys change between the two hashes, and they would not be marked
           # as equal.
@@ -46,12 +92,6 @@ module ActiveRecord
           end
 
           private
-            HstorePair = begin
-              quoted_string = /"[^"\\]*(?:\\.[^"\\]*)*"/
-              unquoted_string = /(?:\\.|[^\s,])[^\s=,\\]*(?:\\.[^\s=,\\]*|=[^,>])*/
-              /(#{quoted_string}|#{unquoted_string})\s*=>\s*(#{quoted_string}|#{unquoted_string})/
-            end
-
             def escape_hstore(value)
               if value.nil?
                 "NULL"

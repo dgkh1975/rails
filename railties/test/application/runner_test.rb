@@ -59,6 +59,17 @@ module ApplicationTests
       }
     end
 
+    def test_no_test_runner_loaded_outside_tests
+      app_file "bin/print_features.rb", <<-SCRIPT
+      p $LOADED_FEATURES.grep(%r{/rails/test_unit/(runner|test_parser|line_filtering)\\.rb\\z})
+      SCRIPT
+
+      %w(development production).each do |env|
+        output = Dir.chdir(app_path) { `RAILS_ENV=#{env} bin/rails runner "bin/print_features.rb"` }
+        assert_equal "[]", output.lines.last&.chomp, "in #{env}"
+      end
+    end
+
     def test_should_set_dollar_0_to_file
       app_file "bin/dollar0.rb", <<-SCRIPT
       puts $0
@@ -122,7 +133,7 @@ module ApplicationTests
     def test_runner_detects_bad_script_name
       output = rails("runner", "iuiqwiourowe", allow_failure: true)
       assert_not_predicate $?, :success?
-      assert_match "undefined local variable or method `iuiqwiourowe' for", output
+      assert_match(/undefined local variable or method [`']iuiqwiourowe' for/, output)
     end
 
     def test_environment_with_rails_env
@@ -147,6 +158,16 @@ module ApplicationTests
       MODEL
 
       assert_match "42", rails("runner", "puts Task.count")
+    end
+
+    def test_works_with_database_url
+      use_postgresql do |db_name|
+        previous_url = ENV["DATABASE_URL"]
+        ENV["DATABASE_URL"] = "postgres://localhost/#{db_name}"
+        assert_equal "1", rails("runner", "print 1")
+      ensure
+        ENV["DATABASE_URL"] = previous_url
+      end
     end
   end
 end

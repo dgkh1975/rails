@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 6.1 Release Notes
 ===============================
@@ -12,7 +12,7 @@ Highlights in Rails 6.1:
 * Destroy Associations Async
 
 These release notes cover only the major changes. To learn about various bug
-fixes and changes, please refer to the change logs or check out the [list of
+fixes and changes, please refer to the changelogs or check out the [list of
 commits](https://github.com/rails/rails/commits/6-1-stable) in the main Rails
 repository on GitHub.
 
@@ -47,7 +47,7 @@ your associations are loaded eagerly and stop N+1's before they happen.
 
 ### Delegated Types
 
-[Delegated Types](https://github.com/rails/rails/pull/39341) is an alternative to single-table inheritance. This is helpful for representing class hierarchies allowing the superclass to be a concrete class that is represented by its own table. Each subclass has its own table for additional attributes.
+[Delegated Types](https://github.com/rails/rails/pull/39341) is an alternative to single-table inheritance. This helps represent class hierarchies allowing the superclass to be a concrete class that is represented by its own table. Each subclass has its own table for additional attributes.
 
 ### Destroy Associations Async
 
@@ -176,7 +176,7 @@ Please refer to the [Changelog][action-view] for detailed changes.
 
 *   Make `locals` argument required on `ActionView::Template#initialize`.
 
-*   The `javascript_include_tag` and `stylesheet_link_tag` asset helpers generate a `Link` header that gives hints to modern browsers about preloading assets. This can be disabled by setting `config.action_view.preload_links_header` to `false`.
+*   The `javascript_include_tag` and `stylesheet_link_tag` asset helpers generate a `link` header that gives hints to modern browsers about preloading assets. This can be disabled by setting `config.action_view.preload_links_header` to `false`.
 
 Action Mailer
 -------------
@@ -244,9 +244,9 @@ Please refer to the [Changelog][active-record] for detailed changes.
 ### Notable changes
 
 *   MySQL: Uniqueness validator now respects default database collation,
-    no longer enforce case sensitive comparison by default.
+    no longer enforce case-sensitive comparison by default.
 
-*   `relation.create` does no longer leak scope to class level querying methods
+*   `relation.create` does no longer leak scope to class-level querying methods
     in initialization block and callbacks.
 
     Before:
@@ -265,7 +265,7 @@ Please refer to the [Changelog][active-record] for detailed changes.
     end
     ```
 
-*   Named scope chain does no longer leak scope to class level querying methods.
+*   Named scope chain does no longer leak scope to class-level querying methods.
 
     ```ruby
     class User < ActiveRecord::Base
@@ -300,7 +300,7 @@ Please refer to the [Changelog][active-record] for detailed changes.
 
     ```ruby
     User.where.not(name: "Jon", role: "admin")
-    # SELECT * FROM users WHERE NOT (name == 'Jon' AND role == 'admin')
+    # SELECT * FROM users WHERE NOT (name = 'Jon' AND role = 'admin')
     ```
 
 *   To use the new per-database connection handling applications must change
@@ -358,7 +358,7 @@ Please refer to the [Changelog][active-support] for detailed changes.
 
 ### Removals
 
-*   Remove deprecated fallback to `I18n.default_local` when `config.i18n.fallbacks` is empty.
+*   Remove deprecated fallback to `I18n.default_locale` when `config.i18n.fallbacks` is empty.
 
 *   Remove deprecated `LoggerSilence` constant.
 
@@ -440,6 +440,8 @@ Please refer to the [Changelog][action-mailbox] for detailed changes.
 ### Removals
 
 ### Deprecations
+
+*   Deprecate `Rails.application.credentials.action_mailbox.api_key` and `MAILGUN_INGRESS_API_KEY` in favor of `Rails.application.credentials.action_mailbox.signing_key` and `MAILGUN_INGRESS_SIGNING_KEY`.
 
 ### Notable changes
 

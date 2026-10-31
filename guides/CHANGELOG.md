@@ -1,4 +1,1 @@
-
-
-
-Please check [6-1-stable](https://github.com/rails/rails/blob/6-1-stable/guides/CHANGELOG.md) for previous changes.
+Please check [8-1-stable](https://github.com/rails/rails/blob/8-1-stable/guides/CHANGELOG.md) for previous changes.

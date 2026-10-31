@@ -9,7 +9,9 @@ require "tmpdir"
 require "concurrent/atomics"
 
 class LoggerTest < ActiveSupport::TestCase
-  include MultibyteTestHelpers
+  # We use Symbol#to_s to create these strings so warnings are emitted if they are mutated
+  UNICODE_STRING = :"こにちわ".to_s
+  BYTE_STRING = "\270\236\010\210\245".b.freeze
 
   Logger = ActiveSupport::Logger
 
@@ -26,6 +28,31 @@ class LoggerTest < ActiveSupport::TestCase
 
     assert_not Logger.logger_outputs_to?(@logger, STDOUT),         "Expected logger_outputs_to? to STDOUT to return false, but was true"
     assert_not Logger.logger_outputs_to?(@logger, STDOUT, STDERR), "Expected logger_outputs_to? to STDOUT or STDERR to return false, but was true"
+    assert_not Logger.logger_outputs_to?(@logger, "log/production.log")
+  end
+
+  def test_log_outputs_to_with_a_broadcast_logger
+    logger = ActiveSupport::BroadcastLogger.new(Logger.new(STDOUT))
+
+    assert(Logger.logger_outputs_to?(logger, STDOUT))
+    assert_not(Logger.logger_outputs_to?(logger, STDERR))
+
+    logger.broadcast_to(Logger.new(STDERR))
+    assert(Logger.logger_outputs_to?(logger, STDERR))
+  end
+
+  def test_log_outputs_to_with_a_filename
+    t = Tempfile.new ["development", "log"]
+    logger = ActiveSupport::BroadcastLogger.new(Logger.new(t.path))
+
+    assert Logger.logger_outputs_to?(logger, t)
+    assert Logger.logger_outputs_to?(logger, t.path)
+    assert Logger.logger_outputs_to?(logger, File.join(File.dirname(t.path), ".", File.basename(t.path)))
+    assert_not Logger.logger_outputs_to?(logger, "log/production.log")
+    assert_not Logger.logger_outputs_to?(logger, STDOUT)
+  ensure
+    logger.close
+    t.close true
   end
 
   def test_write_binary_data_to_existing_file
@@ -43,7 +70,9 @@ class LoggerTest < ActiveSupport::TestCase
     str = +"\x80"
     str.force_encoding("ASCII-8BIT")
 
-    logger.add Logger::DEBUG, str
+    assert_nothing_raised do
+      logger.add Logger::DEBUG, str
+    end
   ensure
     logger.close
     t.close true
@@ -61,10 +90,23 @@ class LoggerTest < ActiveSupport::TestCase
     str = +"\x80"
     str.force_encoding("ASCII-8BIT")
 
-    logger.add Logger::DEBUG, str
+    assert_nothing_raised do
+      logger.add Logger::DEBUG, str
+    end
   ensure
     logger.close
     File.unlink fname
+  end
+
+  def test_defaults_to_simple_formatter
+    logger = Logger.new(@output)
+    assert_instance_of ActiveSupport::Logger::SimpleFormatter, logger.formatter
+  end
+
+  def test_formatter_can_be_set_via_keyword_arg
+    custom_formatter = ::Logger::Formatter.new
+    logger = Logger.new(@output, formatter: custom_formatter)
+    assert_same custom_formatter, logger.formatter
   end
 
   def test_should_log_debugging_message_when_debugging
@@ -144,6 +186,19 @@ class LoggerTest < ActiveSupport::TestCase
     assert_includes @output.string, "THIS IS HERE"
   end
 
+  def test_silencer_can_be_disabled_from_an_instance
+    @logger.silencer = false
+
+    assert_equal false, ActiveSupport::Logger.silencer
+    @logger.silence do
+      @logger.debug "NOT SILENCED"
+    end
+
+    assert_includes @output.string, "NOT SILENCED"
+  ensure
+    ActiveSupport::Logger.silencer = true
+  end
+
   def test_unsilencing
     @logger.level = Logger::INFO
 
@@ -161,13 +216,13 @@ class LoggerTest < ActiveSupport::TestCase
     another_output  = StringIO.new
     another_logger  = ActiveSupport::Logger.new(another_output)
 
-    @logger.extend ActiveSupport::Logger.broadcast(another_logger)
+    logger = ActiveSupport::BroadcastLogger.new(@logger, another_logger)
 
-    @logger.debug "CORRECT DEBUG"
-    @logger.silence do |logger|
-      assert_kind_of ActiveSupport::Logger, logger
-      @logger.debug "FAILURE"
-      @logger.error "CORRECT ERROR"
+    logger.debug "CORRECT DEBUG"
+    logger.silence do |logger|
+      assert_kind_of ActiveSupport::BroadcastLogger, logger
+      logger.debug "FAILURE"
+      logger.error "CORRECT ERROR"
     end
 
     assert_includes @output.string, "CORRECT DEBUG"
@@ -183,13 +238,13 @@ class LoggerTest < ActiveSupport::TestCase
     another_output  = StringIO.new
     another_logger  = ::Logger.new(another_output)
 
-    @logger.extend ActiveSupport::Logger.broadcast(another_logger)
+    logger = ActiveSupport::BroadcastLogger.new(@logger, another_logger)
 
-    @logger.debug "CORRECT DEBUG"
-    @logger.silence do |logger|
-      assert_kind_of ActiveSupport::Logger, logger
-      @logger.debug "FAILURE"
-      @logger.error "CORRECT ERROR"
+    logger.debug "CORRECT DEBUG"
+    logger.silence do |logger|
+      assert_kind_of ActiveSupport::BroadcastLogger, logger
+      logger.debug "FAILURE"
+      logger.error "CORRECT ERROR"
     end
 
     assert_includes @output.string, "CORRECT DEBUG"
@@ -272,6 +327,9 @@ class LoggerTest < ActiveSupport::TestCase
   end
 
   def test_logger_level_main_fiber_safety
+    previous_isolation_level = ActiveSupport::IsolatedExecutionState.isolation_level
+    ActiveSupport::IsolatedExecutionState.isolation_level = :fiber
+
     @logger.level = Logger::INFO
     assert_level(Logger::INFO)
 
@@ -283,9 +341,14 @@ class LoggerTest < ActiveSupport::TestCase
       assert_level(Logger::ERROR)
       fiber.resume
     end
+  ensure
+    ActiveSupport::IsolatedExecutionState.isolation_level = previous_isolation_level
   end
 
   def test_logger_level_local_fiber_safety
+    previous_isolation_level = ActiveSupport::IsolatedExecutionState.isolation_level
+    ActiveSupport::IsolatedExecutionState.isolation_level = :fiber
+
     @logger.level = Logger::INFO
     assert_level(Logger::INFO)
 
@@ -313,6 +376,65 @@ class LoggerTest < ActiveSupport::TestCase
     end.resume
 
     assert_level(Logger::INFO)
+  ensure
+    ActiveSupport::IsolatedExecutionState.isolation_level = previous_isolation_level
+  end
+
+  def test_logger_level_thread_safety
+    previous_isolation_level = ActiveSupport::IsolatedExecutionState.isolation_level
+    ActiveSupport::IsolatedExecutionState.isolation_level = :thread
+
+    @logger.level = Logger::INFO
+    assert_level(Logger::INFO)
+
+    enumerator = Enumerator.new do |yielder|
+      @logger.level = Logger::DEBUG
+      yielder.yield @logger.level
+    end
+    assert_equal Logger::DEBUG, enumerator.next
+    assert_level(Logger::DEBUG)
+  ensure
+    ActiveSupport::IsolatedExecutionState.isolation_level = previous_isolation_level
+  end
+
+  def test_copied_logger_has_an_independent_local_level
+    copy = @logger.clone
+
+    copy.log_at(:fatal) do
+      assert_equal Logger::FATAL, copy.level
+      assert_equal Logger::DEBUG, @logger.level
+    end
+  end
+
+  def test_logger_freeze
+    logger = @logger.clone
+    logger.freeze
+
+    assert_nothing_raised do
+      assert_equal Logger::DEBUG, logger.level
+
+      logger.debug "I am frozen 1"
+      assert_includes @output.string, "I am frozen 1"
+
+      logger.debug { "I am frozen 2" }
+      assert_includes @output.string, "I am frozen 2"
+
+      logger.add Logger::INFO, "I am frozen 3"
+      assert_includes @output.string, "I am frozen 3"
+
+      logger.silence do
+        logger.debug "I am frozen 4"
+      end
+      assert_not_includes @output.string, "I am frozen 4"
+    end
+
+    assert_raises FrozenError do
+      logger.level = Logger::INFO
+    end
+
+    assert_raises FrozenError do
+      logger.formatter = Logger::Formatter.new
+    end
   end
 
   def test_temporarily_logging_at_a_noisier_level
@@ -348,6 +470,17 @@ class LoggerTest < ActiveSupport::TestCase
 
     assert_not_includes @output.string, "NOT THERE"
     assert_includes @output.string, "THIS IS HERE"
+  end
+
+  def test_log_at_only_impact_receiver
+    logger2 = Logger.new(StringIO.new)
+    assert_equal Logger::DEBUG, logger2.level
+    assert_equal Logger::DEBUG, @logger.level
+
+    @logger.log_at :error do
+      assert_equal Logger::DEBUG, logger2.level
+      assert_equal Logger::ERROR, @logger.level
+    end
   end
 
   private

@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 module ActiveSupport
@@ -13,12 +14,13 @@ module ActiveSupport
         precision = absolute_precision(number)
         return number unless precision
 
-        rounded_number = convert_to_decimal(number).round(precision, options.fetch(:round_mode, :default))
+        rounded_number = convert_to_decimal(number).round(precision, options.fetch(:round_mode, :default).to_sym)
         rounded_number.zero? ? rounded_number.abs : rounded_number # prevent showing negative zeros
       end
 
       def digit_count(number)
         return 1 if number.zero?
+        return 1 unless number.respond_to?(:finite?) && number.finite?
         (Math.log10(number.abs) + 1).floor
       end
 
@@ -35,15 +37,11 @@ module ActiveSupport
         end
 
         def absolute_precision(number)
-          if significant && options[:precision] > 0
+          if options[:significant] && options[:precision] && options[:precision] > 0
             options[:precision] - digit_count(convert_to_decimal(number))
           else
             options[:precision]
           end
-        end
-
-        def significant
-          options[:significant]
         end
     end
   end

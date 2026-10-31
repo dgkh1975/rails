@@ -3,11 +3,11 @@
 require "active_record/associations"
 
 module ActiveRecord::Associations::Builder # :nodoc:
-  class CollectionAssociation < Association #:nodoc:
-    CALLBACKS = [:before_add, :after_add, :before_remove, :after_remove]
+  class CollectionAssociation < Association # :nodoc:
+    CALLBACKS = [:before_add, :after_add, :before_remove, :after_remove].freeze
 
     def self.valid_options(options)
-      super + [:before_add, :after_add, :before_remove, :after_remove, :extend]
+      super + [:class_name, :before_add, :after_add, :before_remove, :after_remove, :extend]
     end
 
     def self.define_callbacks(model, reflection)
@@ -30,11 +30,18 @@ module ActiveRecord::Associations::Builder # :nodoc:
     def self.define_callback(model, callback_name, name, options)
       full_callback_name = "#{callback_name}_for_#{name}"
 
-      unless model.method_defined?(full_callback_name)
+      callback_values = Array(options[callback_name.to_sym])
+      method_defined = model.respond_to?(full_callback_name)
+
+      # If there are no callbacks, we must also check if a superclass had
+      # previously defined this association
+      return if callback_values.empty? && !method_defined
+
+      unless method_defined
         model.class_attribute(full_callback_name, instance_accessor: false, instance_predicate: false)
       end
 
-      callbacks = Array(options[callback_name.to_sym]).map do |callback|
+      callbacks = callback_values.map do |callback|
         case callback
         when Symbol
           ->(method, owner, record) { owner.send(callback, record) }
@@ -48,26 +55,32 @@ module ActiveRecord::Associations::Builder # :nodoc:
     end
 
     # Defines the setter and getter methods for the collection_singular_ids.
-    def self.define_readers(mixin, name)
+    def self.define_accessors(model, reflection, mixin)
       super
+      name = reflection.name
+      singular = name.to_s.singularize
 
-      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
-        def #{name.to_s.singularize}_ids
-          association(:#{name}).ids_reader
-        end
-      CODE
+      mixin.define_cached_method(:"_#{name}_ids", as: :"#{singular}_ids", namespace: :association_ids) do |batch|
+        batch << <<~RUBY
+          def _#{name}_ids
+            association = association(:#{name})
+            deprecated_associations_api_guard(association, :#{singular}_ids)
+            association.ids_reader
+          end
+        RUBY
+      end
+
+      mixin.define_cached_method(:"_#{name}_ids=", as: :"#{singular}_ids=", namespace: :association_ids) do |batch|
+        batch << <<~RUBY
+          def _#{name}_ids=(ids)
+            association = association(:#{name})
+            deprecated_associations_api_guard(association, :#{singular}_ids=)
+            association.ids_writer(ids)
+          end
+        RUBY
+      end
     end
 
-    def self.define_writers(mixin, name)
-      super
-
-      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
-        def #{name.to_s.singularize}_ids=(ids)
-          association(:#{name}).ids_writer(ids)
-        end
-      CODE
-    end
-
-    private_class_method :valid_options, :define_callback, :define_extensions, :define_readers, :define_writers
+    private_class_method :valid_options, :define_callback, :define_extensions, :define_accessors
   end
 end

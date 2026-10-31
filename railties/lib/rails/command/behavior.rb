@@ -1,10 +1,11 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "active_support"
 
 module Rails
   module Command
-    module Behavior #:nodoc:
+    module Behavior # :nodoc:
       extend ActiveSupport::Concern
 
       class_methods do

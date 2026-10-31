@@ -4,14 +4,20 @@ require "active_support/inflector/methods"
 require "active_support/dependencies"
 
 module ActionDispatch
+  # # Action Dispatch MiddlewareStack
+  #
+  # Read more about [Rails middleware
+  # stack](https://guides.rubyonrails.org/rails_on_rack.html#action-dispatcher-middleware-stack)
+  # in the guides.
   class MiddlewareStack
-    class Middleware
-      attr_reader :args, :block, :klass
+    class Middleware # :nodoc:
+      attr_reader :args, :kwargs, :block, :klass
 
-      def initialize(klass, args, block)
-        @klass = klass
-        @args  = args
-        @block = block
+      def initialize(klass, args, kwargs, block)
+        @klass  = klass
+        @args   = args
+        @kwargs = kwargs
+        @block  = block
       end
 
       def name; klass.name; end
@@ -20,13 +26,13 @@ module ActionDispatch
         case middleware
         when Middleware
           klass == middleware.klass
-        when Class
+        when Module
           klass == middleware
         end
       end
 
       def inspect
-        if klass.is_a?(Class)
+        if klass.is_a?(Module)
           klass.to_s
         else
           klass.class.to_s
@@ -34,7 +40,7 @@ module ActionDispatch
       end
 
       def build(app)
-        klass.new(app, *args, &block)
+        klass.new(app, *args, **kwargs, &block)
       end
 
       def build_instrumented(app)
@@ -42,10 +48,9 @@ module ActionDispatch
       end
     end
 
-    # This class is used to instrument the execution of a single middleware.
-    # It proxies the `call` method transparently and instruments the method
-    # call.
-    class InstrumentationProxy
+    # This class is used to instrument the execution of a single middleware. It
+    # proxies the `call` method transparently and instruments the method call.
+    class InstrumentationProxy # :nodoc:
       EVENT_NAME = "process_middleware.action_dispatch"
 
       def initialize(middleware, class_name)
@@ -72,8 +77,8 @@ module ActionDispatch
       yield(self) if block_given?
     end
 
-    def each
-      @middlewares.each { |x| yield x }
+    def each(&block)
+      @middlewares.each(&block)
     end
 
     def size
@@ -88,38 +93,46 @@ module ActionDispatch
       middlewares[i]
     end
 
-    def unshift(klass, *args, &block)
-      middlewares.unshift(build_middleware(klass, args, block))
+    def unshift(klass, *args, **kwargs, &block)
+      middlewares.unshift(build_middleware(klass, args, kwargs, block))
     end
-    ruby2_keywords(:unshift) if respond_to?(:ruby2_keywords, true)
 
     def initialize_copy(other)
       self.middlewares = other.middlewares.dup
     end
 
-    def insert(index, klass, *args, &block)
+    def insert(index, klass, *args, **kwargs, &block)
       index = assert_index(index, :before)
-      middlewares.insert(index, build_middleware(klass, args, block))
+      middlewares.insert(index, build_middleware(klass, args, kwargs, block))
     end
-    ruby2_keywords(:insert) if respond_to?(:ruby2_keywords, true)
 
     alias_method :insert_before, :insert
 
-    def insert_after(index, *args, &block)
+    def insert_after(index, ...)
       index = assert_index(index, :after)
-      insert(index + 1, *args, &block)
+      insert(index + 1, ...)
     end
-    ruby2_keywords(:insert_after) if respond_to?(:ruby2_keywords, true)
 
-    def swap(target, *args, &block)
+    def swap(target, ...)
       index = assert_index(target, :before)
-      insert(index, *args, &block)
+      insert(index, ...)
       middlewares.delete_at(index + 1)
     end
-    ruby2_keywords(:swap) if respond_to?(:ruby2_keywords, true)
 
+    # Deletes a middleware from the middleware stack.
+    #
+    # Returns the array of middlewares not including the deleted item, or returns
+    # nil if the target is not found.
     def delete(target)
-      middlewares.delete_if { |m| m.klass == target }
+      middlewares.reject! { |m| m.name == target.name }
+    end
+
+    # Deletes a middleware from the middleware stack.
+    #
+    # Returns the array of middlewares not including the deleted item, or raises
+    # `RuntimeError` if the target is not found.
+    def delete!(target)
+      delete(target) || (raise "No such middleware to remove: #{target.inspect}")
     end
 
     def move(target, source)
@@ -140,10 +153,9 @@ module ActionDispatch
       middlewares.insert(target_index + 1, source_middleware)
     end
 
-    def use(klass, *args, &block)
-      middlewares.push(build_middleware(klass, args, block))
+    def use(klass, *args, **kwargs, &block)
+      middlewares.push(build_middleware(klass, args, kwargs, block))
     end
-    ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)
 
     def build(app = nil, &block)
       instrumenting = ActiveSupport::Notifications.notifier.listening?(InstrumentationProxy::EVENT_NAME)
@@ -158,13 +170,19 @@ module ActionDispatch
 
     private
       def assert_index(index, where)
-        i = index.is_a?(Integer) ? index : middlewares.index { |m| m.klass == index }
+        i = index.is_a?(Integer) ? index : index_of(index)
         raise "No such middleware to insert #{where}: #{index.inspect}" unless i
         i
       end
 
-      def build_middleware(klass, args, block)
-        Middleware.new(klass, args, block)
+      def build_middleware(klass, args, kwargs, block)
+        Middleware.new(klass, args, kwargs, block)
+      end
+
+      def index_of(klass)
+        middlewares.index do |m|
+          m.name == klass.name
+        end
       end
   end
 end

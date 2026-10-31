@@ -1,8 +1,17 @@
 # frozen_string_literal: true
 
+require "active_support/core_ext/object/json"
+
 module ActiveModel
   module Type
-    class Binary < Value # :nodoc:
+    # Active Model \Binary \Type
+    # ==========================
+    #
+    # Attribute type for representation of binary data. This type is registered
+    # under the `:binary` key.
+    #
+    # Non-string values are coerced to strings using their `to_s` method.
+    class Binary < Value
       def type
         :binary
       end
@@ -15,7 +24,9 @@ module ActiveModel
         if value.is_a?(Data)
           value.to_s
         else
-          super
+          value = super
+          value = value.b if ::String === value && value.encoding != Encoding::BINARY
+          value
         end
       end
 
@@ -31,13 +42,19 @@ module ActiveModel
 
       class Data # :nodoc:
         def initialize(value)
-          @value = value.to_s
+          value = value.to_s
+          value = value.b unless value.encoding == Encoding::BINARY
+          @value = value
         end
 
         def to_s
           @value
         end
         alias_method :to_str, :to_s
+
+        def as_json(options = nil)
+          @value.as_json(options)
+        end
 
         def hex
           @value.unpack1("H*")

@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 3.2 Release Notes
 ===============================
@@ -11,7 +11,7 @@ Highlights in Rails 3.2:
 * Tagged Logging
 
 These release notes cover only the major changes. To learn about various bug
-fixes and changes, please refer to the change logs or check out the [list of
+fixes and changes, please refer to the changelogs or check out the [list of
 commits](https://github.com/rails/rails/commits/3-2-stable) in the main Rails
 repository on GitHub.
 
@@ -151,7 +151,7 @@ Railties
 * Allow scaffold/model/migration generators to accept "index" and "uniq" modifiers. For example,
 
     ```bash
-    bin/rails g scaffold Post title:string:index author:uniq price:decimal{7,2}
+    $ bin/rails g scaffold Post title:string:index author:uniq price:decimal{7,2}
     ```
 
     will create indexes for `title` and `author` with the latter being a unique index. Some types such as decimal accept custom options. In the example, `price` will be a decimal column with precision and scale set to 7 and 2 respectively.
@@ -162,7 +162,7 @@ Railties
 
 * Remove old `config.paths.app.controller` API in favor of `config.paths["app/controller"]`.
 
-#### Deprecations
+### Deprecations
 
 * `Rails::Plugin` is deprecated and will be removed in Rails 4.0. Instead of adding plugins to `vendor/plugins` use gems or bundler with path or git dependencies.
 
@@ -192,7 +192,7 @@ Action Pack
 
     Rails will use `layouts/single_car` when a request comes in `:show` action, and use `layouts/application` (or `layouts/cars`, if exists) when a request comes in for any other actions.
 
-* `form_for` is changed to use `#{action}_#{as}` as the css class and id if `:as` option is provided. Earlier versions used `#{as}_#{action}`.
+* `form_for` is changed to use `#{action}_#{as}` as the CSS class and id if `:as` option is provided. Earlier versions used `#{as}_#{action}`.
 
 * `ActionController::ParamsWrapper` on Active Record models now only wrap `attr_accessible` attributes if they were set. If not, only the attributes returned by the class method `attribute_names` will be wrapped. This fixes the wrapping of nested attributes by adding them to `attr_accessible`.
 
@@ -312,7 +312,7 @@ Action Pack
 
 #### Deprecations
 
-* Passing formats or handlers to render :template and friends like `render :template => "foo.html.erb"` is deprecated. Instead, you can provide :handlers and :formats directly as options: ` render :template => "foo", :formats => [:html, :js], :handlers => :erb`.
+* Passing formats or handlers to render :template and friends like `render :template => "foo.html.erb"` is deprecated. Instead, you can provide :handlers and :formats directly as options: `render :template => "foo", :formats => [:html, :js], :handlers => :erb`.
 
 ### Sprockets
 
@@ -516,7 +516,7 @@ Active Support
 
 * Added `Array#prepend` as an alias for `Array#unshift` and `Array#append` as an alias for `Array#<<`.
 
-* The definition of a blank string for Ruby 1.9 has been extended to Unicode whitespace. Also, in Ruby 1.8 the ideographic space U`3000 is considered to be whitespace.
+* The definition of a blank string for Ruby 1.9 has been extended to Unicode whitespace. Also, in Ruby 1.8 the ideographic space U+3000 is considered to be whitespace.
 
 * The inflector understands acronyms.
 

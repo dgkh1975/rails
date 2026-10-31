@@ -1,17 +1,20 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   module Type
-    class Serialized < DelegateClass(ActiveModel::Type::Value) # :nodoc:
+    class Serialized < ActiveSupport::Delegation::DelegateClass(ActiveModel::Type::Value) # :nodoc:
       undef to_yaml if method_defined?(:to_yaml)
 
       include ActiveModel::Type::Helpers::Mutable
+      include QueryPredicates::Decorator
 
       attr_reader :subtype, :coder
 
-      def initialize(subtype, coder)
+      def initialize(subtype, coder, comparable: false)
         @subtype = subtype
         @coder = coder
+        @comparable = comparable
         super(subtype)
       end
 
@@ -30,15 +33,24 @@ module ActiveRecord
         end
       end
 
-      def inspect
-        Kernel.instance_method(:inspect).bind(self).call
-      end
+      define_method(:inspect, Kernel.instance_method(:inspect))
 
       def changed_in_place?(raw_old_value, value)
         return false if value.nil?
+
+        if @comparable
+          return deserialize(raw_old_value) != value
+        end
+
         raw_new_value = encoded(value)
-        raw_old_value.nil? != raw_new_value.nil? ||
+
+        return true if raw_old_value.nil? != raw_new_value.nil?
+
+        if subtype.mutable?
           subtype.changed_in_place?(raw_old_value, raw_new_value)
+        else
+          raw_old_value != subtype.serialize(raw_new_value)
+        end
       end
 
       def accessor
@@ -55,7 +67,16 @@ module ActiveRecord
         coder.respond_to?(:object_class) && value.is_a?(coder.object_class)
       end
 
+      def serialized? # :nodoc:
+        true
+      end
+
       private
+        # Prevent Ruby 4.0 "delegator does not forward private method" warning.
+        # Kernel#inspect calls instance_variables_to_inspect which, without this,
+        # triggers Delegator#respond_to_missing? for a private method.
+        define_method(:instance_variables_to_inspect, Kernel.instance_method(:instance_variables))
+
         def default_value?(value)
           value == coder.load(nil)
         end
@@ -63,11 +84,11 @@ module ActiveRecord
         def encoded(value)
           return if default_value?(value)
           payload = coder.dump(value)
-          if payload && binary? && payload.encoding != Encoding::BINARY
-            payload = payload.dup if payload.frozen?
-            payload.force_encoding(Encoding::BINARY)
+          if payload && @subtype.binary?
+            ActiveModel::Type::Binary::Data.new(payload)
+          else
+            payload
           end
-          payload
         end
     end
   end

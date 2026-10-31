@@ -33,8 +33,14 @@ module Fun
   end
 end
 
+class ValidatingPost < Post
+  include ActiveModel::Validations
+
+  validates :title, presence: true
+end
+
 class TestController < ActionController::Base
-  protect_from_forgery
+  protect_from_forgery with: :null_session
 
   before_action :set_variable_for_layout
 
@@ -62,10 +68,6 @@ class TestController < ActionController::Base
     render "test/hello_world"
   end
 
-  def render_hello_world_with_last_modified_set
-    response.last_modified = Date.new(2008, 10, 10).to_time
-    render "test/hello_world"
-  end
 
   # :ported: compatibility
   def render_hello_world_with_forward_slash
@@ -118,6 +120,10 @@ class TestController < ActionController::Base
 
   def hello_world_with_layout_false
     render layout: false
+  end
+
+  def render_instance_variables
+    render inline: "<%= instance_variables.sort %>"
   end
 
   # :ported:
@@ -218,10 +224,6 @@ class TestController < ActionController::Base
     # let's just rely on the template
   end
 
-  # :ported:
-  def blank_response
-    render plain: " "
-  end
 
   # :ported:
   def layout_test
@@ -290,9 +292,6 @@ class TestController < ActionController::Base
     end
   end
 
-  def render_action_hello_world_as_symbol
-    render action: :hello_world
-  end
 
   def layout_test_with_different_layout
     render action: "hello_world", layout: "standard"
@@ -487,6 +486,14 @@ class TestController < ActionController::Base
     render partial: ActionView::Helpers::FormBuilder.new(:post, nil, view_context, {})
   end
 
+  def partial_with_form_builder_and_invalid_model
+    post = ValidatingPost.new
+
+    post.validate
+
+    render partial: ActionView::Helpers::FormBuilder.new(:post, post, view_context, {})
+  end
+
   def partial_with_form_builder_subclass
     render partial: LabellingFormBuilder.new(:post, nil, view_context, {})
   end
@@ -546,9 +553,6 @@ class TestController < ActionController::Base
     render partial: "customer", collection: []
   end
 
-  def partial_collection_shorthand_with_different_types_of_records_with_counter
-    partial_collection_shorthand_with_different_types_of_records
-  end
 
   def missing_partial
     render partial: "thisFileIsntHere"
@@ -574,10 +578,6 @@ class TestController < ActionController::Base
     render partial: "hash_greeting", collection: [ { first_name: "Pratik" }, { first_name: "Amy" } ], locals: { greeting: "Hola" }
   end
 
-  def partial_with_implicit_local_assignment
-    @customer = Customer.new("Marcel")
-    render partial: "customer"
-  end
 
   def render_call_to_partial_with_layout
     render action: "calling_partial_with_layout"
@@ -585,6 +585,41 @@ class TestController < ActionController::Base
 
   def render_call_to_partial_with_layout_in_main_layout_and_within_content_for_layout
     render action: "calling_partial_with_layout", layout: "layouts/partial_with_layout"
+  end
+
+  def render_renderable
+    locals = params[:locals]
+    format = params[:format]
+
+    renderable = Object.new
+    renderable.singleton_class.define_method :render_in do |view_context, **, &block|
+      view_context.render inline: block&.call || <<~ERB.strip, locals: locals
+        Hello, <%= name %>
+      ERB
+    end
+    if format.present?
+      renderable.singleton_class.define_method :format do
+        format.to_sym
+      end
+    end
+
+    if block_given?
+      yield(renderable, locals, format)
+    else
+      render(renderable: renderable)
+    end
+  end
+
+  def render_renderable_with_option_and_block
+    render_renderable do |renderable, locals|
+      render(renderable: renderable) { locals[:name] }
+    end
+  end
+
+  def render_renderable_with_object_and_block
+    render_renderable do |renderable, locals|
+      render(renderable) { locals[:name] }
+    end
   end
 
   before_action only: :render_with_filters do
@@ -680,6 +715,7 @@ class RenderTest < ActionController::TestCase
     get :partial_only, to: "test#partial_only"
     get :partial_with_counter, to: "test#partial_with_counter"
     get :partial_with_form_builder, to: "test#partial_with_form_builder"
+    get :partial_with_form_builder_and_invalid_model, to: "test#partial_with_form_builder_and_invalid_model"
     get :partial_with_form_builder_subclass, to: "test#partial_with_form_builder_subclass"
     get :partial_with_hash_object, to: "test#partial_with_hash_object"
     get :partial_with_locals, to: "test#partial_with_locals"
@@ -694,6 +730,9 @@ class RenderTest < ActionController::TestCase
     get :render_and_redirect, to: "test#render_and_redirect"
     get :render_call_to_partial_with_layout, to: "test#render_call_to_partial_with_layout"
     get :render_call_to_partial_with_layout_in_main_layout_and_within_content_for_layout, to: "test#render_call_to_partial_with_layout_in_main_layout_and_within_content_for_layout"
+    get :render_renderable, to: "test#render_renderable"
+    get :render_renderable_with_object_and_block, to: "test#render_renderable_with_object_and_block"
+    get :render_renderable_with_option_and_block, to: "test#render_renderable_with_option_and_block"
     get :render_custom_code, to: "test#render_custom_code"
     get :render_file_from_template, to: "test#render_file_from_template"
     get :render_file_not_using_full_path, to: "test#render_file_not_using_full_path"
@@ -706,6 +745,7 @@ class RenderTest < ActionController::TestCase
     get :render_hello_world_with_forward_slash, to: "test#render_hello_world_with_forward_slash"
     get :render_implicit_html_template_from_xhr_request, to: "test#render_implicit_html_template_from_xhr_request"
     get :render_implicit_js_template_without_layout, to: "test#render_implicit_js_template_without_layout"
+    get :render_instance_variables, to: "test#render_instance_variables"
     get :render_line_offset, to: "test#render_line_offset"
     get :render_nothing_with_appendix, to: "test#render_nothing_with_appendix"
     get :render_template_in_top_directory, to: "test#render_template_in_top_directory"
@@ -768,6 +808,29 @@ class RenderTest < ActionController::TestCase
     assert_response 200
     assert_response :success
     assert_equal "<html>Hello world!</html>", @response.body
+  end
+
+  def test_controller_does_not_leak_instance_variables
+    expected = [
+      :@_assigns, # attr_internal on ActionView::Base
+      :@_config, # attr_internal on ActionView::Base
+      :@_controller, # attr_internal on ActionView::Helpers::ControllerHelper
+      :@_default_form_builder, # attr_internal on ActionView::Helpers::FormHelper
+      :@_ivars, # ActionController::Testing::Functional (only appears inside an ActionController::TestCase)
+      :@_request, # attr_internal on ActionView::Helpers::ControllerHelper
+      :@current_template, # instance variable on ActionView::Base
+      :@lookup_context, # attr_reader on ActionView::Base
+      :@output_buffer, # attr_accessor on ActionView::Base::Context
+      :@variable_for_layout, # part of this test class
+      :@view_flow, # attr_accessor on ActionView::Base::Context
+      :@view_renderer, # attr_reader on ActionView::Base
+      :@virtual_path, # instance variable on ActionView::Base
+    ].inspect
+
+    get :render_instance_variables
+
+    assert_response 200
+    assert_equal expected, @response.body
   end
 
   # :ported:
@@ -1059,24 +1122,24 @@ class RenderTest < ActionController::TestCase
 
   def test_should_render_formatted_template
     get :formatted_html_erb
-    assert_equal "formatted html erb", @response.body
+    assert_equal "formatted HTML erb", @response.body
   end
 
   def test_should_render_formatted_html_erb_template
     get :formatted_xml_erb
-    assert_equal "<test>passed formatted html erb</test>", @response.body
+    assert_equal "<test>passed formatted HTML erb</test>", @response.body
   end
 
   def test_should_render_formatted_html_erb_template_with_bad_accepts_header
-    @request.env["HTTP_ACCEPT"] = "; a=dsf"
+    @request.env["HTTP_ACCEPT"] = "; q=dsf"
     get :formatted_xml_erb
-    assert_equal "<test>passed formatted html erb</test>", @response.body
+    assert_equal "<test>passed formatted HTML erb</test>", @response.body
   end
 
   def test_should_render_formatted_html_erb_template_with_faulty_accepts_header
     @request.accept = "image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, application/x-shockwave-flash, */*"
     get :formatted_xml_erb
-    assert_equal "<test>passed formatted html erb</test>", @response.body
+    assert_equal "<test>passed formatted HTML erb</test>", @response.body
   end
 
   def test_layout_test_with_different_layout
@@ -1262,7 +1325,7 @@ class RenderTest < ActionController::TestCase
     get :render_to_string_with_template_and_html_partial
     assert_equal "**only partial**\n", @controller.instance_variable_get(:@text)
     assert_equal "<strong>only partial</strong>\n", @controller.instance_variable_get(:@html)
-    assert_equal "<strong>only html partial</strong>\n", @response.body
+    assert_equal "<strong>only HTML partial</strong>\n", @response.body
     assert_equal "text/html", @response.media_type
   end
 
@@ -1275,7 +1338,7 @@ class RenderTest < ActionController::TestCase
 
   def test_render_template_within_a_template_with_other_format
     get :render_template_within_a_template_with_other_format
-    expected = "only html partial<p>This is grand!</p>"
+    expected = "only HTML partial<p>This is grand!</p>"
     assert_equal expected, @response.body.strip
     assert_equal "text/html", @response.media_type
   end
@@ -1298,6 +1361,44 @@ class RenderTest < ActionController::TestCase
   def test_partial_with_form_builder
     get :partial_with_form_builder
     assert_equal "<label for=\"post_title\">Title</label>\n", @response.body
+  end
+
+  def test_partial_with_form_builder_and_invalid_model
+    get :partial_with_form_builder_and_invalid_model
+
+    assert_equal <<~HTML.strip, @response.body.strip
+      <div class="field_with_errors"><label for="post_title">Title</label></div>
+    HTML
+  end
+
+  def test_partial_with_form_builder_and_invalid_model_custom_field_error_proc
+    old_proc = ActionView::Base.field_error_proc
+    ActionView::Base.field_error_proc = proc { |html| tag.div html, class: "errors" }
+
+    get :partial_with_form_builder_and_invalid_model
+
+    assert_equal <<~HTML.strip, @response.body.strip
+      <div class="errors"><label for="post_title">Title</label></div>
+    HTML
+  ensure
+    ActionView::Base.field_error_proc = old_proc if old_proc
+  end
+
+  def test_partial_with_form_builder_and_invalid_model_custom_rendering_field_error_proc
+    old_proc = ActionView::Base.field_error_proc
+    ActionView::Base.field_error_proc = proc do |html_tag, instance|
+      render inline: <<~ERB, locals: { html_tag: html_tag, instance: instance }
+        <div class="field_with_errors"><%= html_tag %> <span class="error"><%= [instance.error_message].join(', ') %></span></div>
+      ERB
+    end
+
+    get :partial_with_form_builder_and_invalid_model
+
+    assert_equal <<~HTML.strip, @response.body.strip
+      <div class="field_with_errors"><label for="post_title">Title</label> <span class="error">can&#39;t be blank</span></div>
+    HTML
+  ensure
+    ActionView::Base.field_error_proc = old_proc if old_proc
   end
 
   def test_partial_with_form_builder_subclass
@@ -1418,39 +1519,67 @@ class RenderTest < ActionController::TestCase
     assert_equal "Before (Anthony)\nInside from partial (Anthony)\nAfter\nBefore (David)\nInside from partial (David)\nAfter\nBefore (Ramm)\nInside from partial (Ramm)\nAfter", @response.body
   end
 
-  def test_template_annotations
-    ActionView::Base.annotate_rendered_view_with_filenames = true
+  def test_render_renderable
+    get :render_renderable, params: { format: :html, locals: { name: "Local" } }
 
-    get :greeting
+    assert_equal "Hello, Local", @response.body
+    assert_equal "text/html", @response.media_type
+  end
+
+  def test_render_renderable_with_object_and_block
+    get :render_renderable_with_object_and_block, params: { format: :html, locals: { name: "Hello, Local" } }
+
+    assert_equal "Hello, Local", @response.body
+    assert_equal "text/html", @response.media_type
+  end
+
+  def test_render_renderable_with_option_and_block
+    get :render_renderable_with_option_and_block, params: { format: :html, locals: { name: "Hello, Local" } }
+
+    assert_equal "Hello, Local", @response.body
+    assert_equal "text/html", @response.media_type
+  end
+
+  def with_annotations_enabled
+    ActionView::Base.annotate_rendered_view_with_filenames = true
+    ActionView::LookupContext::DetailsKey.clear
+    yield
+  ensure
+    ActionView::Base.annotate_rendered_view_with_filenames = false
+    ActionView::LookupContext::DetailsKey.clear
+  end
+
+  def test_template_annotations
+    with_annotations_enabled do
+      get :greeting
+    end
+
+    assert_match(/<!-- BEGIN [^\n]*(?:\n-->| -->)/, @response.body)
 
     assert_includes @response.body, "<!-- BEGIN"
     assert_includes @response.body, "<!-- END"
     assert_includes @response.body, "test/fixtures/actionpack/test/greeting.html.erb"
     assert_includes @response.body, "This is grand!"
-  ensure
-    ActionView::Base.annotate_rendered_view_with_filenames = false
   end
 
   def test_template_annotations_do_not_render_for_non_html_format
-    ActionView::Base.annotate_rendered_view_with_filenames = true
-
-    get :render_with_explicit_template_with_locals
+    with_annotations_enabled do
+      get :render_with_explicit_template_with_locals
+    end
 
     assert_not_includes @response.body, "BEGIN"
-    assert_equal @response.body.split("\n").length, 1
-  ensure
-    ActionView::Base.annotate_rendered_view_with_filenames = false
+    assert_equal 1, @response.body.split("\n").length
   end
 
   def test_line_offset_with_annotations_enabled
-    ActionView::Base.annotate_rendered_view_with_filenames = true
-
     exc = assert_raises ActionView::Template::Error do
-      get :render_line_offset
+      with_annotations_enabled do
+        get :render_line_offset
+      end
     end
     line = exc.backtrace.first
     assert(line =~ %r{:(\d+):})
-    assert_equal "1", $1,
+    assert_equal "2", $1,
       "The line offset is wrong, perhaps the wrong exception has been raised, exception was: #{exc.inspect}"
   ensure
     ActionView::Base.annotate_rendered_view_with_filenames = false

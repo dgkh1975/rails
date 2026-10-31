@@ -4,8 +4,8 @@ module ActionDispatch
   # :stopdoc:
   module Journey
     class Format
-      ESCAPE_PATH    = ->(value) { Router::Utils.escape_path(value) }
-      ESCAPE_SEGMENT = ->(value) { Router::Utils.escape_segment(value) }
+      ESCAPE_PATH    = ActiveSupport::Ractors.shareable_lambda { |value| Router::Utils.escape_path(value) }
+      ESCAPE_SEGMENT = ActiveSupport::Ractors.shareable_lambda { |value| Router::Utils.escape_segment(value) }
 
       Parameter = Struct.new(:name, :escaper) do
         def escape(value); escaper.call value; end
@@ -35,24 +35,37 @@ module ActionDispatch
       end
 
       def evaluate(hash)
-        parts = @parts.dup
+        buffer = +""
+        add_to(buffer, hash)
+        buffer
+      end
 
+      # Appends this format's expansion to +buffer+ - or nothing at all when
+      # a parameter is missing, which is how an optional group whose
+      # parameter is absent drops out of the generated path. Building into a
+      # shared buffer avoids the intermediate arrays and strings a
+      # join-based evaluation allocates on every generated URL.
+      protected def add_to(buffer, hash)
         @parameters.each do |index|
-          param = parts[index]
-          value = hash[param.name]
-          return "" unless value
-          parts[index] = param.escape value
+          return if hash[@parts[index].name].nil?
         end
 
-        @children.each { |index| parts[index] = parts[index].evaluate(hash) }
-
-        parts.join
+        @parts.each do |part|
+          case part
+          when String
+            buffer << part
+          when Journey::Format
+            part.add_to(buffer, hash)
+          else
+            buffer << part.escape(hash[part.name])
+          end
+        end
       end
     end
 
     module Visitors # :nodoc:
       class Visitor # :nodoc:
-        DISPATCH_CACHE = {}
+        DISPATCH_CACHE = {} # rubocop:disable Style/MutableConstant
 
         def accept(node)
           visit(node)
@@ -93,7 +106,7 @@ module ActionDispatch
       end
 
       class FunctionalVisitor # :nodoc:
-        DISPATCH_CACHE = {}
+        DISPATCH_CACHE = {} # rubocop:disable Style/MutableConstant
 
         def accept(node, seed)
           visit(node, seed)
@@ -126,8 +139,8 @@ module ActionDispatch
         def visit_DOT(n, seed);     terminal(n, seed); end
 
         instance_methods(false).each do |pim|
-          next unless pim =~ /^visit_(.*)$/
-          DISPATCH_CACHE[$1.to_sym] = pim
+          next unless pim.start_with?("visit_")
+          DISPATCH_CACHE[pim.name.delete_prefix("visit_").to_sym] = pim
         end
       end
 
@@ -146,12 +159,7 @@ module ActionDispatch
         end
 
         def visit_SYMBOL(n)
-          symbol = n.to_sym
-          if symbol == :controller
-            [Journey::Format.required_path(symbol)]
-          else
-            [Journey::Format.required_segment(symbol)]
-          end
+          [Journey::Format.required_segment(n.to_sym)]
         end
       end
 
@@ -165,31 +173,63 @@ module ActionDispatch
         INSTANCE = new
       end
 
-      class String < FunctionalVisitor # :nodoc:
-        private
-          def binary(node, seed)
-            visit(node.right, visit(node.left, seed))
-          end
-
-          def nary(node, seed)
+      class String # :nodoc:
+        def accept(node, seed)
+          case node.type
+          when :DOT
+            seed << node.left
+          when :LITERAL
+            seed << node.left
+          when :SYMBOL
+            seed << node.left
+          when :SLASH
+            seed << node.left
+          when :CAT
+            accept(node.right, accept(node.left, seed))
+          when :STAR
+            accept(node.left, seed)
+          when :OR
             last_child = node.children.last
-            node.children.inject(seed) { |s, c|
-              string = visit(c, s)
-              string << "|" unless last_child == c
-              string
-            }
+            node.children.each do |c|
+              accept(c, seed)
+              seed << "|" unless last_child == c
+            end
+            seed
+          when :GROUP
+            accept(node.left, seed << "(") << ")"
+          else
+            raise "Unknown node type: #{node.type}"
           end
+        end
 
-          def terminal(node, seed)
-            seed + node.left
-          end
-
-          def visit_GROUP(node, seed)
-            visit(node.left, seed.dup << "(") << ")"
-          end
-
-          INSTANCE = new
+        INSTANCE = new
       end
+
+      # class String < FunctionalVisitor # :nodoc:
+      #   private
+      #     def binary(node, seed)
+      #       visit(node.right, visit(node.left, seed))
+      #     end
+      #
+      #     def nary(node, seed)
+      #       last_child = node.children.last
+      #       node.children.inject(seed) { |s, c|
+      #         string = visit(c, s)
+      #         string << "|" unless last_child == c
+      #         string
+      #       }
+      #     end
+      #
+      #     def terminal(node, seed)
+      #       seed + node.left
+      #     end
+      #
+      #     def visit_GROUP(node, seed)
+      #       visit(node.left, seed.dup << "(") << ")"
+      #     end
+      #
+      #     INSTANCE = new
+      # end
 
       class Dot < FunctionalVisitor # :nodoc:
         def initialize

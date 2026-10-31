@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/generators/test_unit"
 require "rails/generators/resource_helpers"
 
@@ -11,10 +12,10 @@ module TestUnit # :nodoc:
       check_class_collision suffix: "ControllerTest"
 
       class_option :api, type: :boolean,
-                         desc: "Generates API functional tests"
+                         desc: "Generate API functional tests"
 
       class_option :system_tests, type: :string,
-                         desc: "Skip system test files"
+                         desc: "Generate system test files (set to 'true' to enable)"
 
       argument :attributes, type: :array, default: [], banner: "field:type field:type"
 
@@ -23,7 +24,13 @@ module TestUnit # :nodoc:
         template template_file,
                  File.join("test/controllers", controller_class_path, "#{controller_file_name}_controller_test.rb")
 
-        if !options.api? && options[:system_tests]
+        # Generate system tests if this isn't an API only app and the system
+        # tests option is true
+        if !options.api? && options[:system_tests] == "true"
+          if !File.exist?(File.join("test/application_system_test_case.rb"))
+            template "application_system_test_case.rb", File.join("test", "application_system_test_case.rb")
+          end
+
           template "system_test.rb", File.join("test/system", class_path, "#{file_name.pluralize}_test.rb")
         end
       end
@@ -39,19 +46,23 @@ module TestUnit # :nodoc:
 
       private
         def attributes_string
-          attributes_hash.map { |k, v| "#{k}: #{v}" }.join(", ")
+          if attributes_hash.empty?
+            "{}"
+          else
+            "{ #{attributes_hash.map { |k, v| "#{k}: #{v}" }.join(", ")} }"
+          end
         end
 
         def attributes_hash
           return {} if attributes_names.empty?
 
-          attributes_names.map do |name|
+          attributes_names.filter_map do |name|
             if %w(password password_confirmation).include?(name) && attributes.any?(&:password_digest?)
-              ["#{name}", "'secret'"]
+              ["#{name}", '"secret"']
             elsif !virtual?(name)
               ["#{name}", "@#{singular_table_name}.#{name}"]
             end
-          end.compact.sort.to_h
+          end.sort.to_h
         end
 
         def boolean?(name)
@@ -62,6 +73,16 @@ module TestUnit # :nodoc:
         def virtual?(name)
           attribute = attributes.find { |attr| attr.name == name }
           attribute&.virtual?
+        end
+
+        def datetime?(name)
+          attribute = attributes.find { |attr| attr.name == name }
+          attribute&.type == :datetime
+        end
+
+        def time?(name)
+          attribute = attributes.find { |attr| attr.name == name }
+          attribute&.type == :time
         end
     end
   end

@@ -1,11 +1,29 @@
 # frozen_string_literal: true
 
 require "helper"
+require "jobs/configuration_job"
 require "jobs/hello_job"
+require "active_support/testing/ractors_assertions"
 
 class QueuePriorityTest < ActiveSupport::TestCase
+  setup do
+    JobBuffer.clear
+  end
+
   test "priority unset by default" do
-    assert_nil HelloJob.priority
+    assert_nil HelloJob.new.priority
+  end
+
+  test "using a custom default_priority" do
+    original_default_priority = ActiveJob::Base.default_priority
+
+    begin
+      ActiveJob::Base.default_priority = 8
+
+      assert_equal 8, HelloJob.new.priority
+    ensure
+      ActiveJob::Base.default_priority = original_default_priority
+    end
   end
 
   test "uses given priority" do
@@ -42,8 +60,25 @@ class QueuePriorityTest < ActiveSupport::TestCase
     end
   end
 
-  test "uses priority passed to #set" do
-    job = HelloJob.set(priority: 123).perform_later
+  test "is assigned when perform_now" do
+    ConfigurationJob.set(priority: 123).perform_now
+    job = JobBuffer.last_value
     assert_equal 123, job.priority
+  end
+
+  test "is assigned when perform_later" do
+    ConfigurationJob.set(priority: 123).perform_later
+    job = JobBuffer.last_value
+    assert_equal 123, job.priority
+  end
+end
+
+class QueuePriorityRactorTest < ActiveSupport::TestCase
+  include ActiveSupport::Testing::Isolation
+  include ActiveSupport::Testing::RactorsAssertions
+
+  test "priority resolves from a non-main Ractor" do
+    assert_nil on_ractor { HelloJob.new.priority }
+    assert_nil on_ractor { HelloJob.default_priority }
   end
 end

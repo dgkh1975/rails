@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 raise "JRuby is required to use the JDOM backend for XmlMini" unless RUBY_PLATFORM.include?("java")
@@ -15,21 +16,15 @@ java_import org.xml.sax.Attributes unless defined? Attributes
 java_import org.w3c.dom.Node unless defined? Node
 
 module ActiveSupport
-  module XmlMini_JDOM #:nodoc:
+  module XmlMini_JDOM # :nodoc:
     extend self
 
     CONTENT_KEY = "__content__"
 
-    NODE_TYPE_NAMES = %w{ATTRIBUTE_NODE CDATA_SECTION_NODE COMMENT_NODE DOCUMENT_FRAGMENT_NODE
-    DOCUMENT_NODE DOCUMENT_TYPE_NODE ELEMENT_NODE ENTITY_NODE ENTITY_REFERENCE_NODE NOTATION_NODE
-    PROCESSING_INSTRUCTION_NODE TEXT_NODE}
-
-    node_type_map = {}
-    NODE_TYPE_NAMES.each { |type| node_type_map[Node.send(type)] = type }
-
     # Parse an XML Document string or IO into a simple hash using Java's jdom.
-    # data::
-    #   XML Document string or IO to parse
+    #
+    # data
+    # :   XML Document string or IO to parse
     def parse(data)
       if data.respond_to?(:read)
         data = data.read
@@ -55,10 +50,11 @@ module ActiveSupport
     private
       # Convert an XML element and merge into the hash
       #
-      # hash::
-      #   Hash to merge the converted element into.
-      # element::
-      #   XML element to merge into hash
+      # hash
+      # :   Hash to merge the converted element into.
+      #
+      # element
+      # :   XML element to merge into hash
       def merge_element!(hash, element, depth)
         raise "Document too deep!" if depth == 0
         delete_empty(hash)
@@ -71,8 +67,8 @@ module ActiveSupport
 
       # Actually converts an XML document element into a data structure.
       #
-      # element::
-      #   The document element to be collapsed.
+      # element
+      # :   The document element to be collapsed.
       def collapse(element, depth)
         hash = get_attributes(element)
 
@@ -80,7 +76,7 @@ module ActiveSupport
         if child_nodes.length > 0
           (0...child_nodes.length).each do |i|
             child = child_nodes.item(i)
-            merge_element!(hash, child, depth - 1) unless child.node_type == Node.TEXT_NODE
+            merge_element!(hash, child, depth - 1) unless child.node_type == Node::TEXT_NODE
           end
           merge_texts!(hash, element) unless empty_content?(element)
           hash
@@ -91,10 +87,11 @@ module ActiveSupport
 
       # Merge all the texts of an element into the hash
       #
-      # hash::
-      #   Hash to add the converted element to.
-      # element::
-      #   XML element whose texts are to me merged into the hash
+      # hash
+      # :   Hash to add the converted element to.
+      #
+      # element
+      # :   XML element whose texts are to me merged into the hash
       def merge_texts!(hash, element)
         delete_empty(hash)
         text_children = texts(element)
@@ -111,12 +108,14 @@ module ActiveSupport
       # an Array, it will be wrapped in an Array. Then the new value is
       # appended to that Array.
       #
-      # hash::
-      #   Hash to add key/value pair to.
-      # key::
-      #   Key to be added.
-      # value::
-      #   Value to be associated with key.
+      # hash
+      # :   Hash to add key/value pair to.
+      #
+      # key
+      # :   Key to be added.
+      #
+      # value
+      # :   Value to be associated with key.
       def merge!(hash, key, value)
         if hash.has_key?(key)
           if hash[key].instance_of?(Array)
@@ -135,8 +134,8 @@ module ActiveSupport
       # Converts the attributes array of an XML element into a hash.
       # Returns an empty Hash if node has no attributes.
       #
-      # element::
-      #   XML element to extract attributes from.
+      # element
+      # :   XML element to extract attributes from.
       def get_attributes(element)
         attribute_hash = {}
         attributes = element.attributes
@@ -149,14 +148,14 @@ module ActiveSupport
 
       # Determines if a document element has text content
       #
-      # element::
-      #   XML element to be checked.
+      # element
+      # :   XML element to be checked.
       def texts(element)
         texts = []
         child_nodes = element.child_nodes
         (0...child_nodes.length).each do |i|
           item = child_nodes.item(i)
-          if item.node_type == Node.TEXT_NODE
+          if item.node_type == Node::TEXT_NODE
             texts << item.get_data
           end
         end
@@ -165,14 +164,14 @@ module ActiveSupport
 
       # Determines if a document element has text content
       #
-      # element::
-      #   XML element to be checked.
+      # element
+      # :   XML element to be checked.
       def empty_content?(element)
         text = +""
         child_nodes = element.child_nodes
         (0...child_nodes.length).each do |i|
           item = child_nodes.item(i)
-          if item.node_type == Node.TEXT_NODE
+          if item.node_type == Node::TEXT_NODE
             text << item.get_data.strip
           end
         end

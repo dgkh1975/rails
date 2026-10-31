@@ -65,6 +65,13 @@ class MultiParameterAttributeTest < ActiveRecord::TestCase
     assert_nil topic.last_read
   end
 
+  def test_multiparameter_attributes_on_date_with_all_nil
+    attributes = { "last_read(1i)" => nil, "last_read(2i)" => nil, "last_read(3i)" => nil }
+    topic = Topic.find(1)
+    topic.attributes = attributes
+    assert_nil topic.last_read
+  end
+
   def test_multiparameter_attributes_on_time
     with_timezone_config default: :local do
       attributes = {
@@ -107,8 +114,8 @@ class MultiParameterAttributeTest < ActiveRecord::TestCase
     }
     topic = Topic.find(1)
     topic.attributes = attributes
-    # testing against to_s(:db) representation because either a Time or a DateTime might be returned, depending on platform
-    assert_equal "1850-06-24 16:24:00", topic.written_on.to_s(:db)
+    # testing against to_fs(:db) representation because either a Time or a DateTime might be returned, depending on platform
+    assert_equal "1850-06-24 16:24:00", topic.written_on.to_fs(:db)
   end
 
   def test_multiparameter_attributes_on_time_will_raise_on_big_time_if_missing_date_parts
@@ -249,36 +256,33 @@ class MultiParameterAttributeTest < ActiveRecord::TestCase
     Topic.reset_column_information
   end
 
-  # Oracle does not have a TIME datatype.
-  unless current_adapter?(:OracleAdapter)
-    def test_multiparameter_attributes_on_time_only_column_with_time_zone_aware_attributes_does_not_do_time_zone_conversion
-      with_timezone_config default: :utc, aware_attributes: true, zone: -28800 do
-        Topic.reset_column_information
-        attributes = {
-          "bonus_time(1i)" => "2000", "bonus_time(2i)" => "1", "bonus_time(3i)" => "1",
-          "bonus_time(4i)" => "16", "bonus_time(5i)" => "24"
-        }
-        topic = Topic.find(1)
-        topic.attributes = attributes
-        assert_equal Time.zone.local(2000, 1, 1, 16, 24, 0), topic.bonus_time
-        assert_not_predicate topic.bonus_time, :utc?
-
-        attributes = {
-          "written_on(1i)" => "2000", "written_on(2i)" => "", "written_on(3i)" => "",
-          "written_on(4i)" => "", "written_on(5i)" => ""
-        }
-        topic.attributes = attributes
-        assert_nil topic.written_on
-      end
-    ensure
+  def test_multiparameter_attributes_on_time_only_column_with_time_zone_aware_attributes_does_not_do_time_zone_conversion
+    with_timezone_config default: :utc, aware_attributes: true, zone: -28800 do
       Topic.reset_column_information
-    end
+      attributes = {
+        "bonus_time(1i)" => "2000", "bonus_time(2i)" => "1", "bonus_time(3i)" => "1",
+        "bonus_time(4i)" => "16", "bonus_time(5i)" => "24"
+      }
+      topic = Topic.find(1)
+      topic.attributes = attributes
+      assert_equal Time.zone.local(2000, 1, 1, 16, 24, 0), topic.bonus_time
+      assert_not_predicate topic.bonus_time, :utc?
 
-    def test_multiparameter_attributes_setting_time_attribute
-      topic = Topic.new("bonus_time(4i)" => "01", "bonus_time(5i)" => "05")
-      assert_equal 1, topic.bonus_time.hour
-      assert_equal 5, topic.bonus_time.min
+      attributes = {
+        "written_on(1i)" => "2000", "written_on(2i)" => "", "written_on(3i)" => "",
+        "written_on(4i)" => "", "written_on(5i)" => ""
+      }
+      topic.attributes = attributes
+      assert_nil topic.written_on
     end
+  ensure
+    Topic.reset_column_information
+  end
+
+  def test_multiparameter_attributes_setting_time_attribute
+    topic = Topic.new("bonus_time(4i)" => "01", "bonus_time(5i)" => "05")
+    assert_equal 1, topic.bonus_time.hour
+    assert_equal 5, topic.bonus_time.min
   end
 
   def test_multiparameter_attributes_on_time_with_empty_seconds
@@ -395,5 +399,26 @@ class MultiParameterAttributeTest < ActiveRecord::TestCase
       "written_on(5i)" => "55",
     )
     assert_not_predicate topic, :written_on_came_from_user?
+  end
+
+  def test_multiparameter_attributes_with_unclosed_parenthesis_raises_multiparameter_assignment_errors
+    ex = assert_raise(ActiveRecord::MultiparameterAssignmentErrors) do
+      Topic.new("written_on(" => "2024")
+    end
+    assert_equal 1, ex.errors.size
+    assert_equal "written_on", ex.errors[0].attribute
+  end
+
+  def test_multiparameter_attributes_with_malformed_name_reports_remaining_errors_alongside_valid_pairs
+    ex = assert_raise(ActiveRecord::MultiparameterAssignmentErrors) do
+      Topic.new(
+        "written_on(1i)" => "2024",
+        "written_on(2i)" => "6",
+        "written_on(3i)" => "24",
+        "broken(" => "x",
+      )
+    end
+    assert_equal 1, ex.errors.size
+    assert_equal "broken", ex.errors[0].attribute
   end
 end

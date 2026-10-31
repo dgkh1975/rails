@@ -32,11 +32,19 @@ class FileStoreTest < ActiveSupport::TestCase
   include CacheStoreBehavior
   include CacheStoreVersionBehavior
   include CacheStoreCoderBehavior
-  include LocalCacheBehavior
+  include CacheStoreCompressionBehavior
+  include CacheStoreSerializerBehavior
+  include CacheStoreFormatVersionBehavior
   include CacheDeleteMatchedBehavior
   include CacheIncrementDecrementBehavior
   include CacheInstrumentationBehavior
-  include AutoloadingCacheBehavior
+  include CacheLoggingBehavior
+
+  def test_inspect_shows_cache_path_and_options
+    assert_match(/\A#<ActiveSupport::Cache::FileStore:0x[0-9a-f]+/, @cache.inspect)
+    assert_match(/@cache_path=/, @cache.inspect)
+    assert_match(/@options=/, @cache.inspect)
+  end
 
   def test_clear
     gitkeep = File.join(cache_dir, ".gitkeep")
@@ -49,7 +57,7 @@ class FileStoreTest < ActiveSupport::TestCase
 
   def test_clear_without_cache_dir
     FileUtils.rm_r(cache_dir)
-    @cache.clear
+    assert_nothing_raised { @cache.clear }
   end
 
   def test_long_uri_encoded_keys
@@ -87,6 +95,18 @@ class FileStoreTest < ActiveSupport::TestCase
     path = @cache.send(:normalize_key, key, {})
     assert path.split("/").all? { |dir_name| dir_name.size <= ActiveSupport::Cache::FileStore::FILENAME_MAX_SIZE }
     assert_equal "B", File.basename(path)
+  end
+
+  def test_delete_matched_when_key_exceeds_max_filename_size
+    submaximal_key = "_" * (ActiveSupport::Cache::FileStore::FILENAME_MAX_SIZE - 1)
+
+    @cache.write(submaximal_key + "AB", "value")
+    @cache.delete_matched(/AB/)
+    assert_not @cache.exist?(submaximal_key + "AB")
+
+    @cache.write(submaximal_key + "/A", "value")
+    @cache.delete_matched(/A/)
+    assert_not @cache.exist?(submaximal_key + "/A")
   end
 
   # If nothing has been stored in the cache, there is a chance the cache directory does not yet exist
@@ -144,4 +164,9 @@ class FileStoreTest < ActiveSupport::TestCase
     @cache.write(1, nil)
     assert_equal false, @cache.write(1, "aaaaaaaaaa", unless_exist: true)
   end
+
+  private
+    def key_pattern(key, namespace: nil)
+      /.+\/#{Regexp.escape namespace.to_s}#{/%3A/i if namespace}#{Regexp.escape key}/
+    end
 end

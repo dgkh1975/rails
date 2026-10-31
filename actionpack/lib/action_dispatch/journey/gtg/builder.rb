@@ -8,7 +8,7 @@ module ActionDispatch
       class Builder # :nodoc:
         DUMMY_END_NODE = Nodes::Dummy.new
 
-        attr_reader :root, :ast, :endpoints
+        attr_reader :root, :ast
 
         def initialize(root)
           @root      = root
@@ -66,9 +66,8 @@ module ActionDispatch
           when Nodes::Group
             true
           when Nodes::Star
-            # the default star regex is /(.+)/ which is NOT nullable
-            # but since different constraints can be provided we must
-            # actually check if this is the case or not.
+            # the default star regex is /(.+)/ which is NOT nullable but since different
+            # constraints can be provided we must actually check if this is the case or not.
             node.regexp.match?("")
           when Nodes::Or
             node.children.any? { |c| nullable?(c) }

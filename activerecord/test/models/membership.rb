@@ -1,14 +1,17 @@
 # frozen_string_literal: true
 
 class Membership < ActiveRecord::Base
-  enum type: %i(Membership CurrentMembership SuperMembership SelectedMembership TenantMembership)
+  enum :type, %i(Membership CurrentMembership SuperMembership SelectedMembership TenantMembership MembershipWithDefaultScopeMethod)
   belongs_to :member
   belongs_to :club
+  has_one :sponsor, through: :club
+
+  belongs_to :simple_member, foreign_key: "member_id"
 end
 
 class CurrentMembership < Membership
   belongs_to :member
-  belongs_to :club
+  belongs_to :club, inverse_of: :membership
 end
 
 class SuperMembership < Membership
@@ -23,7 +26,9 @@ class SelectedMembership < Membership
 end
 
 class TenantMembership < Membership
-  cattr_accessor :current_member
+  class << self
+    attr_accessor :current_member
+  end
 
   belongs_to :member
   belongs_to :club
@@ -35,4 +40,21 @@ class TenantMembership < Membership
       all
     end
   }
+end
+
+class MembershipWithDefaultScopeMethod < Membership
+  class << self
+    attr_accessor :current_favorite
+
+    def default_scope
+      if current_favorite.nil?
+        all
+      else
+        where(favorite: current_favorite)
+      end
+    end
+  end
+
+  belongs_to :member
+  belongs_to :club
 end

@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
 require_relative "abstract_unit"
-require "active_support/configurable"
+
+ActiveSupport.deprecator.silence do
+  require "active_support/configurable"
+end
 
 class ConfigurableActiveSupport < ActiveSupport::TestCase
   class Parent
@@ -50,7 +53,7 @@ class ConfigurableActiveSupport < ActiveSupport::TestCase
     assert_not_respond_to instance, :baz=
   end
 
-  test "configuration accessors can take a default value" do
+  test "configuration accessors can take a default value as a block" do
     parent = Class.new do
       include ActiveSupport::Configurable
       config_accessor :hair_colors, :tshirt_colors do
@@ -60,6 +63,15 @@ class ConfigurableActiveSupport < ActiveSupport::TestCase
 
     assert_equal [:black, :blue, :white], parent.hair_colors
     assert_equal [:black, :blue, :white], parent.tshirt_colors
+  end
+
+  test "configuration accessors can take a default value as an option" do
+    parent = Class.new do
+      include ActiveSupport::Configurable
+      config_accessor :foo, default: :bar
+    end
+
+    assert_equal :bar, parent.foo
   end
 
   test "configuration hash is available on instance" do

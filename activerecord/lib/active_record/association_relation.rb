@@ -15,29 +15,49 @@ module ActiveRecord
       other == records
     end
 
-    %w(insert insert_all insert! insert_all! upsert upsert_all).each do |method|
-      class_eval <<~RUBY
-        def #{method}(attributes, **kwargs)
-          if @association.reflection.through_reflection?
-            raise ArgumentError, "Bulk insert or upsert is currently not supported for has_many through association"
-          end
+    def insert(...)
+      ensure_bulk_insert_or_upsert_supported!
 
-          scoping { klass.#{method}(attributes, **kwargs) }
-        end
-      RUBY
+      super
     end
 
-    def build(attributes = nil, &block)
-      if attributes.is_a?(Array)
-        attributes.collect { |attr| build(attr, &block) }
-      else
-        block = current_scope_restoring_block(&block)
-        scoping { _new(attributes, &block) }
-      end
+    def insert_all(...)
+      ensure_bulk_insert_or_upsert_supported!
+
+      super
     end
-    alias new build
+
+    def insert!(...)
+      ensure_bulk_insert_or_upsert_supported!
+
+      super
+    end
+
+    def insert_all!(...)
+      ensure_bulk_insert_or_upsert_supported!
+
+      super
+    end
+
+    def upsert(...)
+      ensure_bulk_insert_or_upsert_supported!
+
+      super
+    end
+
+    def upsert_all(...)
+      ensure_bulk_insert_or_upsert_supported!
+
+      super
+    end
 
     private
+      def ensure_bulk_insert_or_upsert_supported!
+        if @association.reflection.through_reflection?
+          raise ArgumentError, "Bulk insert or upsert is currently not supported for has_many through association"
+        end
+      end
+
       def _new(attributes, &block)
         @association.build(attributes, &block)
       end
@@ -53,6 +73,7 @@ module ActiveRecord
       def exec_queries
         super do |record|
           @association.set_inverse_instance_from_queries(record)
+          @association.set_strict_loading(record)
           yield record if block_given?
         end
       end

@@ -1,25 +1,31 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "time"
 require "base64"
 require "bigdecimal"
 require "bigdecimal/util"
+require "active_support/core_ext/date/conversions"
 require "active_support/core_ext/module/delegation"
 require "active_support/core_ext/string/inflections"
 require "active_support/core_ext/date_time/calculations"
 
 module ActiveSupport
-  # = XmlMini
+  # \XmlMini
+  # ========
   #
   # To use the much faster libxml parser:
-  #   gem 'libxml-ruby', '=0.9.7'
-  #   XmlMini.backend = 'LibXML'
+  #
+  # ```
+  # gem "libxml-ruby"
+  # XmlMini.backend = 'LibXML'
+  # ```
   module XmlMini
     extend self
 
     # This module decorates files deserialized using Hash.from_xml with
-    # the <tt>original_filename</tt> and <tt>content_type</tt> methods.
-    module FileLike #:nodoc:
+    # the `original_filename` and `content_type` methods.
+    module FileLike # :nodoc:
       attr_writer :original_filename, :content_type
 
       def original_filename
@@ -33,10 +39,10 @@ module ActiveSupport
 
     DEFAULT_ENCODINGS = {
       "binary" => "base64"
-    } unless defined?(DEFAULT_ENCODINGS)
+    }.freeze unless defined?(DEFAULT_ENCODINGS)
 
     unless defined?(TYPE_NAMES)
-      TYPE_NAMES = {
+      TYPE_NAMES = { # rubocop:disable Style/MutableConstant
         "Symbol"     => "symbol",
         "Integer"    => "integer",
         "BigDecimal" => "decimal",
@@ -46,30 +52,36 @@ module ActiveSupport
         "Date"       => "date",
         "DateTime"   => "dateTime",
         "Time"       => "dateTime",
+        "ActiveSupport::Duration" => "duration",
         "Array"      => "array",
         "Hash"       => "hash"
       }
     end
+    TYPE_NAMES["ActiveSupport::TimeWithZone"] = TYPE_NAMES["Time"]
+    TYPE_NAMES.freeze
 
     FORMATTING = {
       "symbol"   => Proc.new { |symbol| symbol.to_s },
-      "date"     => Proc.new { |date| date.to_s(:db) },
+      "date"     => Proc.new { |date| date.to_fs(:db) },
       "dateTime" => Proc.new { |time| time.xmlschema },
+      "duration" => Proc.new { |duration| duration.iso8601 },
       "binary"   => Proc.new { |binary| ::Base64.encode64(binary) },
       "yaml"     => Proc.new { |yaml| yaml.to_yaml }
-    } unless defined?(FORMATTING)
+    }.freeze unless defined?(FORMATTING)
 
-    # TODO use regexp instead of Date.parse
     unless defined?(PARSING)
-      PARSING = {
+      PARSING = { # rubocop:disable Style/MutableConstant
         "symbol"       => Proc.new { |symbol|  symbol.to_s.to_sym },
-        "date"         => Proc.new { |date|    ::Date.parse(date) },
+        "date"         => Proc.new { |date|    ::Date.strptime(date.to_s.strip, "%Y-%m-%d") },
         "datetime"     => Proc.new { |time|    Time.xmlschema(time).utc rescue ::DateTime.parse(time).utc },
+        "duration"     => Proc.new { |duration| Duration.parse(duration.to_s.strip) },
         "integer"      => Proc.new { |integer| integer.to_i },
         "float"        => Proc.new { |float|   float.to_f },
         "decimal"      => Proc.new do |number|
           if String === number
             number.to_d
+          elsif Float === number
+            BigDecimal(number, 0)
           else
             BigDecimal(number)
           end
@@ -78,6 +90,7 @@ module ActiveSupport
         "string"       => Proc.new { |string|  string.to_s },
         "yaml"         => Proc.new { |yaml|    YAML.load(yaml) rescue yaml },
         "base64Binary" => Proc.new { |bin|     ::Base64.decode64(bin) },
+        "hexBinary"    => Proc.new { |bin|     _parse_hex_binary(bin) },
         "binary"       => Proc.new { |bin, entity| _parse_binary(bin, entity) },
         "file"         => Proc.new { |file, entity| _parse_file(file, entity) }
       }
@@ -161,11 +174,12 @@ module ActiveSupport
         "#{left}#{middle.tr('_ ', '--')}#{right}"
       end
 
-      # TODO: Add support for other encodings
       def _parse_binary(bin, entity)
         case entity["encoding"]
         when "base64"
           ::Base64.decode64(bin)
+        when "hex", "hexBinary"
+          _parse_hex_binary(bin)
         else
           bin
         end
@@ -179,17 +193,43 @@ module ActiveSupport
         f
       end
 
+      def _parse_hex_binary(bin)
+        [bin].pack("H*")
+      end
+
       def current_thread_backend
-        Thread.current[:xml_mini_backend]
+        IsolatedExecutionState[:xml_mini_backend]
       end
 
       def current_thread_backend=(name)
-        Thread.current[:xml_mini_backend] = name && cast_backend_name_to_module(name)
+        IsolatedExecutionState[:xml_mini_backend] = name && cast_backend_name_to_module(name)
       end
 
+      # The backends Active Support ships, by the names +backend=+ takes; a
+      # name not among them loads +active_support/xml_mini/<name>+ and reads
+      # its +XmlMini_<name>+ module, as before.
       def cast_backend_name_to_module(name)
-        if name.is_a?(Module)
+        case name
+        when Module
           name
+        when "REXML"
+          require "active_support/xml_mini/rexml"
+          XmlMini_REXML
+        when "Nokogiri"
+          require "active_support/xml_mini/nokogiri"
+          XmlMini_Nokogiri
+        when "NokogiriSAX"
+          require "active_support/xml_mini/nokogirisax"
+          XmlMini_NokogiriSAX
+        when "LibXML"
+          require "active_support/xml_mini/libxml"
+          XmlMini_LibXML
+        when "LibXMLSAX"
+          require "active_support/xml_mini/libxmlsax"
+          XmlMini_LibXMLSAX
+        when "JDOM"
+          require "active_support/xml_mini/jdom"
+          XmlMini_JDOM
         else
           require "active_support/xml_mini/#{name.downcase}"
           ActiveSupport.const_get("XmlMini_#{name}")

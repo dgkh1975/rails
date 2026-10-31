@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+require "models/tag"
+require "models/tagging"
+require "models/comment"
+require "models/category"
+
 class Post < ActiveRecord::Base
   class CategoryPost < ActiveRecord::Base
     self.table_name = "categories_posts"
@@ -30,9 +35,15 @@ class Post < ActiveRecord::Base
   scope :containing_the_letter_a, -> { where("body LIKE '%a%'") }
   scope :titled_with_an_apostrophe, -> { where("title LIKE '%''%'") }
   scope :ranked_by_comments, -> { order(table[:comments_count].desc) }
+  scope :ordered_by_post_id, -> { order("posts.post_id ASC") }
 
   scope :limit_by, lambda { |l| limit(l) }
   scope :locked, -> { lock }
+  scope :most_commented, lambda { |comments_count|
+    joins(:comments)
+    .group("posts.id")
+    .having("count(comments.id) >= ?", comments_count)
+  }
 
   belongs_to :author
   belongs_to :readonly_author, -> { readonly }, class_name: "Author", foreign_key: :author_id
@@ -40,6 +51,7 @@ class Post < ActiveRecord::Base
   belongs_to :author_with_posts, -> { includes(:posts) }, class_name: "Author", foreign_key: :author_id
   belongs_to :author_with_address, -> { includes(:author_address) }, class_name: "Author", foreign_key: :author_id
   belongs_to :author_with_select, -> { select(:id) }, class_name: "Author", foreign_key: :author_id
+  belongs_to :author_with_the_letter_a, -> { where("name LIKE '%a%'") }, class_name: "Author", foreign_key: :author_id
 
   def first_comment
     super.body
@@ -54,6 +66,7 @@ class Post < ActiveRecord::Base
 
   scope :with_comments, -> { preload(:comments) }
   scope :with_tags, -> { preload(:taggings) }
+  scope :with_tags_cte, -> { with(posts_with_tags: where("tags_count > 0")).from("posts_with_tags AS posts") }
 
   scope :tagged_with, ->(id) { joins(:taggings).where(taggings: { tag_id: id }) }
   scope :tagged_with_comment, ->(comment) { joins(:taggings).where(taggings: { comment: comment }) }
@@ -78,11 +91,15 @@ class Post < ActiveRecord::Base
     end
   end
 
+  has_many :ordered_comments, class_name: "Comment", default_order: :body
+
   has_many :comments_with_extend, extend: NamedExtension, class_name: "Comment", foreign_key: "post_id" do
     def greeting
       "hello"
     end
   end
+
+  has_many :comments_with_extending, -> { extending(NamedExtension) }, class_name: "Comment", foreign_key: "post_id"
 
   has_many :comments_with_extend_2, extend: [NamedExtension, NamedExtension2], class_name: "Comment", foreign_key: "post_id"
 
@@ -97,6 +114,10 @@ class Post < ActiveRecord::Base
   has_one  :very_special_comment
   has_one  :very_special_comment_with_post, -> { includes(:post) }, class_name: "VerySpecialComment"
   has_one :very_special_comment_with_post_with_joins, -> { joins(:post).order("posts.id") }, class_name: "VerySpecialComment"
+  has_one :very_special_comment_with_string_joins, -> {
+    joins("JOIN posts AS p1 ON comments.post_id = p1.id")
+    .where.not(p1: { id: 999999 })
+  }, class_name: "VerySpecialComment"
   has_many :special_comments
   has_many :nonexistent_comments, -> { where "comments.id < 0" }, class_name: "Comment"
 
@@ -105,8 +126,16 @@ class Post < ActiveRecord::Base
 
   has_many :category_posts, class_name: "CategoryPost"
   has_many :scategories, through: :category_posts, source: :category
+  has_many :hmt_special_categories, -> { where.not(name: nil) },  through: :category_posts, source: :category, class_name: "SpecialCategory"
   has_and_belongs_to_many :categories
   has_and_belongs_to_many :special_categories, join_table: "categories_posts", association_foreign_key: "category_id"
+
+  has_many :essays, through: :categories
+  has_many :authors_of_essays_named_bob,
+    -> { where(name: "Bob") },
+    through: :essays,
+    source: :writer,
+    source_type: "Author"
 
   has_many :taggings, as: :taggable, counter_cache: :tags_count
   has_many :tags, through: :taggings do
@@ -223,6 +252,7 @@ class FirstPost < ActiveRecord::Base
 
   has_many :comments, foreign_key: :post_id
   has_one  :comment,  foreign_key: :post_id
+  has_one  :comment_with_inverse, class_name: "Comment", inverse_of: :post_with_inverse
 end
 
 class PostWithDefaultSelect < ActiveRecord::Base
@@ -252,6 +282,15 @@ class PostWithDefaultScope < ActiveRecord::Base
   self.inheritance_column = :disabled
   self.table_name = "posts"
   default_scope { order(:title) }
+end
+
+class PostWithWhereDefaultScope < ActiveRecord::Base
+  self.inheritance_column = :disabled
+  self.table_name = "posts"
+  default_scope { where(deleted_at: nil) }
+
+  belongs_to :author
+  has_many :comments, -> { unscope(where: :deleted_at) }, class_name: "CommentOnPostWithWhereDefaultScope", foreign_key: :post_id
 end
 
 class PostWithPreloadDefaultScope < ActiveRecord::Base
@@ -317,12 +356,30 @@ end
 class SubConditionalStiPost < ConditionalStiPost
 end
 
+class PostWithDestroyCallback < ActiveRecord::Base
+  self.inheritance_column = :disabled
+  self.table_name = "posts"
+
+  before_destroy do
+    throw :abort if id == 1
+  end
+end
+
 class FakeKlass
   extend ActiveRecord::Delegation::DelegateCache
+  include ActiveRecord::Sanitization
 
   class << self
-    def connection
-      Post.connection
+    def scope_registry
+      ActiveRecord::Scoping::ScopeRegistry.instance
+    end
+
+    def adapter_class
+      Post.adapter_class
+    end
+
+    def lease_connection
+      Post.lease_connection
     end
 
     def table_name
@@ -331,18 +388,6 @@ class FakeKlass
 
     def attribute_aliases
       {}
-    end
-
-    def sanitize_sql(sql)
-      sql
-    end
-
-    def sanitize_sql_for_order(sql)
-      sql
-    end
-
-    def disallow_raw_sql!(*args)
-      # noop
     end
 
     def columns_hash
@@ -364,7 +409,33 @@ class FakeKlass
     def base_class?
       true
     end
+
+    def deterministic_encrypted_attributes
+    end
   end
 
   inherited self
+end
+
+class Postesque < ActiveRecord::Base
+  belongs_to :author, class_name: "Author", foreign_key: :author_name, primary_key: :name
+  belongs_to :author_with_address, class_name: "Author", foreign_key: :author_id
+  belongs_to :author_with_the_letter_a, class_name: "Author", foreign_key: :author_id
+end
+
+class PostRecord < ActiveRecord::Base
+  has_many :comments
+
+  class << self
+    def model_name
+      ActiveModel::Name.new(self, nil, "Post")
+    end
+  end
+end
+
+class PostWithAliasedAuthorId < ActiveRecord::Base
+  self.table_name = "posts"
+  self.inheritance_column = nil
+  alias_attribute :writer_id, :author_id
+  belongs_to :author, foreign_key: :writer_id, inverse_of: :posts_with_aliased_author_id
 end

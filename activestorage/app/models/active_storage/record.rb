@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
-class ActiveStorage::Record < ActiveRecord::Base #:nodoc:
+# :markup: markdown
+class ActiveStorage::Record < ActiveRecord::Base # :nodoc:
   self.abstract_class = true
 end
 

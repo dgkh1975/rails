@@ -5,11 +5,13 @@ require "cases/helper"
 module ActiveRecord
   class Migration
     class CreateJoinTableTest < ActiveRecord::TestCase
+      skip_under_ractor_proxy
+
       attr_reader :connection
 
       def setup
         super
-        @connection = ActiveRecord::Base.connection
+        @connection = ActiveRecord::Base.lease_connection
       end
 
       teardown do
@@ -91,6 +93,12 @@ module ActiveRecord
         assert_equal video_id.sql_type, music_id.sql_type
       end
 
+      def test_create_join_table_can_set_primary_key
+        connection.create_join_table :artists, :musics, primary_key: [:artist_id, :music_id]
+
+        assert_equal %w(artist_id music_id), connection.primary_key(:artists_musics)
+      end
+
       def test_drop_join_table
         connection.create_join_table :artists, :musics
         connection.drop_join_table :artists, :musics
@@ -126,9 +134,23 @@ module ActiveRecord
         assert_not connection.table_exists?("catalog")
       end
 
+      def test_drop_join_table_with_drop_table_options
+        assert_not connection.table_exists?("artists_musics")
+        assert_nothing_raised do
+          connection.drop_join_table :artists, :musics, if_exists: true
+        end
+      end
+
       def test_drop_join_table_with_column_options
         connection.create_join_table :artists, :musics, column_options: { null: true }
         connection.drop_join_table :artists, :musics, column_options: { null: true }
+
+        assert_not connection.table_exists?("artists_musics")
+      end
+
+      def test_drop_join_table_with_primary_key
+        connection.create_join_table :artists, :musics, primary_key: [:artist_id, :music_id]
+        connection.drop_join_table :artists, :musics, primary_key: [:artist_id, :music_id]
 
         assert_not connection.table_exists?("artists_musics")
       end

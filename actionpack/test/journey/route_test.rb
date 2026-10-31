@@ -19,6 +19,22 @@ module ActionDispatch
         assert_same  defaults, route.defaults
       end
 
+      def test_verb_matchers
+        verbs = Route::VerbMatchers::VERBS
+
+        verbs.each_with_index do |verb, index|
+          matcher = Route::VerbMatchers.const_get(verb)
+          request_class = verb == "QUERY" ? ActionDispatch::Request : Rack::Request
+          request = request_class.new("REQUEST_METHOD" => verb)
+          other_verb = verbs[(index + 1) % verbs.size]
+          other_request = request_class.new("REQUEST_METHOD" => other_verb)
+
+          assert_equal verb, matcher.verb
+          assert matcher.call(request)
+          assert_not matcher.call(other_request)
+        end
+      end
+
       def test_route_adds_itself_as_memo
         app   = Object.new
         path  = path_from_string "/:controller(/:action(/:id(.:format)))"
@@ -109,6 +125,20 @@ module ActionDispatch
         found = routes.sort_by { |r| r.score(knowledge) }.last
 
         assert_equal specific, found
+      end
+
+      if RUBY_VERSION >= "4.0"
+        def test_route_instance_is_ractor_shareable
+          path  = path_from_string "/messages/:id(.:format)"
+          route = Route.new(name: "name", path: path, defaults: { controller: "messages", action: "show" })
+
+          assert_nothing_raised { Ractor.make_shareable(route) }
+          assert Ractor.shareable?(route)
+
+          assert_equal "/messages/1", route.format(id: 1)
+          assert_equal [:id], route.required_parts
+          assert_nothing_raised { route.eager_load! }
+        end
       end
     end
   end

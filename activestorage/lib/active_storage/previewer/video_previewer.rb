@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+require "shellwords"
+
 module ActiveStorage
   class Previewer::VideoPreviewer < Previewer
     class << self
@@ -8,7 +11,7 @@ module ActiveStorage
       end
 
       def ffmpeg_exists?
-        return @ffmpeg_exists if defined?(@ffmpeg_exists)
+        return @ffmpeg_exists unless @ffmpeg_exists.nil?
 
         @ffmpeg_exists = system(ffmpeg_path, "-version", out: File::NULL, err: File::NULL)
       end
@@ -28,21 +31,11 @@ module ActiveStorage
 
     private
       def draw_relevant_frame_from(file, &block)
-        ffmpeg_args = [
+        draw self.class.ffmpeg_path,
+          *Shellwords.split(ActiveStorage.video_preview_input_arguments),
           "-i", file.path,
-          "-vf",
-            # Select the first video frame, plus keyframes and frames
-            # that meet the scene change threshold.
-            'select=eq(n\,0)+eq(key\,1)+gt(scene\,0.015),' +
-            # Loop the first 1-2 selected frames in case we were only
-            # able to select 1 frame, then drop the first looped frame.
-            # This lets us use the first video frame as a fallback.
-            "loop=loop=-1:size=2,trim=start_frame=1",
-          "-frames:v", "1",
-          "-f", "image2", "-",
-        ]
-
-        draw self.class.ffmpeg_path, *ffmpeg_args, &block
+          *Shellwords.split(ActiveStorage.video_preview_arguments),
+          "-", &block
       end
   end
 end

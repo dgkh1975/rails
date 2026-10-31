@@ -5,23 +5,25 @@ require "active_support/core_ext/module/attribute_accessors"
 require "action_view/template/resolver"
 
 module ActionView
-  # = Action View Lookup Context
+  # Action View Lookup Context
+  # ==========================
   #
-  # <tt>LookupContext</tt> is the object responsible for holding all information
+  # `LookupContext` is the object responsible for holding all information
   # required for looking up templates, i.e. view paths and details.
-  # <tt>LookupContext</tt> is also responsible for generating a key, given to
+  # `LookupContext` is also responsible for generating a key, given to
   # view paths, used in the resolver cache lookup. Since this key is generated
   # only once during the request, it speeds up all cache accesses.
-  class LookupContext #:nodoc:
-    attr_accessor :prefixes, :rendered_format
+  class LookupContext # :nodoc:
+    attr_accessor :prefixes
 
-    mattr_accessor :fallbacks, default: FallbackFileSystemResolver.instances
-
-    mattr_accessor :registered_details, default: []
+    singleton_class.attr_reader :default_procs, :registered_details
+    @default_procs = {}.freeze
+    @registered_details = [].freeze
 
     def self.register_detail(name, &block)
-      registered_details << name
-      Accessors::DEFAULT_PROCS[name] = block
+      block = ActiveSupport::Ractors.shareable_proc(&block)
+      @default_procs = @default_procs.merge(name => block).freeze
+      @registered_details = @default_procs.keys.freeze
 
       Accessors.define_method(:"default_#{name}", &block)
       Accessors.module_eval <<-METHOD, __FILE__, __LINE__ + 1
@@ -37,8 +39,7 @@ module ActionView
     end
 
     # Holds accessors for the registered details.
-    module Accessors #:nodoc:
-      DEFAULT_PROCS = {}
+    module Accessors # :nodoc:
     end
 
     register_detail(:locale) do
@@ -52,45 +53,62 @@ module ActionView
     register_detail(:variants) { [] }
     register_detail(:handlers) { Template::Handlers.extensions }
 
-    class DetailsKey #:nodoc:
+    class DetailsKey # :nodoc:
       alias :eql? :equal?
 
-      @details_keys = Concurrent::Map.new
-      @digest_cache = Concurrent::Map.new
-      @view_context_mutex = Mutex.new
-
       def self.digest_cache(details)
-        @digest_cache[details_cache_key(details)] ||= Concurrent::Map.new
+        digest_cache_store.compute_if_absent(details_cache_key(details)) { Concurrent::Map.new }
       end
 
       def self.details_cache_key(details)
-        if details[:formats]
-          details = details.dup
-          details[:formats] &= Template::Types.symbols
+        details_keys.fetch(details) do
+          if formats = details[:formats]
+            if normalized = Template.normalized_formats(formats)
+              details = details.dup
+              details[:formats] = normalized
+            end
+          end
+          details_keys[details] ||= TemplateDetails::Requested.new(**details)
         end
-        @details_keys[details] ||= Object.new
       end
 
       def self.clear
-        ActionView::ViewPaths.all_view_paths.each do |path_set|
-          path_set.each(&:clear_cache)
+        ActionView::PathRegistry.all_resolvers.each do |resolver|
+          resolver.clear_cache
         end
-        ActionView::LookupContext.fallbacks.each(&:clear_cache)
-        @view_context_class = nil
-        @details_keys.clear
-        @digest_cache.clear
+        ActionView::LookupContext.reset_view_context_class
+        details_keys.clear
+        digest_cache_store.clear
       end
 
       def self.digest_caches
-        @digest_cache.values
+        digest_cache_store.values
       end
 
-      def self.view_context_class(klass)
-        @view_context_mutex.synchronize do
-          @view_context_class ||= klass.with_empty_template_cache
-        end
+      def self.details_keys
+        ActiveSupport::Ractors.store_if_absent(:action_view_details_keys) { Concurrent::Map.new }
+      end
+      private_class_method :details_keys
+
+      def self.digest_cache_store
+        ActiveSupport::Ractors.store_if_absent(:action_view_digest_caches) { Concurrent::Map.new }
+      end
+      private_class_method :digest_cache_store
+    end
+
+    def self.reset_view_context_class
+      @view_context_mutex.synchronize { @view_context_class = nil }
+    end
+
+    def self.view_context_class
+      return @view_context_class if @view_context_class
+      base = ActionView::Base # prevent recursive locking
+      @view_context_mutex.synchronize do
+        @view_context_class = base.with_empty_template_cache
       end
     end
+    @view_context_mutex = Mutex.new
+    ActiveSupport.on_load(:action_view) { ActionView::LookupContext.view_context_class }
 
     # Add caching behavior on top of Details.
     module DetailsCache
@@ -98,7 +116,7 @@ module ActionView
 
       # Calculate the details key. Remove the handlers from calculation to improve performance
       # since the user cannot modify it explicitly.
-      def details_key #:nodoc:
+      def details_key # :nodoc:
         @details_key ||= DetailsKey.details_cache_key(@details) if @cache
       end
 
@@ -124,50 +142,69 @@ module ActionView
       attr_reader :view_paths, :html_fallback_for_js
 
       def find(name, prefixes = [], partial = false, keys = [], options = {})
-        @view_paths.find(*args_for_lookup(name, prefixes, partial, keys, options))
+        if options.empty? # most common path
+          details, details_key = @details, self.details_key
+        else
+          details, details_key = detail_args_for(options)
+        end
+        @view_paths.find(name, prefixes, partial, details, details_key, keys)
       end
-      alias :find_template :find
+
+      def find!(name, prefixes = [], partial = false, keys = [], options = {})
+        if options.empty?
+          details, details_key = @details, self.details_key
+        else
+          details, details_key = detail_args_for(options)
+        end
+        @view_paths.find!(name, prefixes, partial, details, details_key, keys)
+      end
 
       def find_all(name, prefixes = [], partial = false, keys = [], options = {})
-        @view_paths.find_all(*args_for_lookup(name, prefixes, partial, keys, options))
+        if options.empty?
+          details, details_key = @details, self.details_key
+        else
+          details, details_key = detail_args_for(options)
+        end
+        @view_paths.find_all(name, prefixes, partial, details, details_key, keys)
       end
 
       def exists?(name, prefixes = [], partial = false, keys = [], **options)
-        @view_paths.exists?(*args_for_lookup(name, prefixes, partial, keys, options))
+        if options.empty?
+          details, details_key = @details, self.details_key
+        else
+          details, details_key = detail_args_for(options)
+        end
+        @view_paths.exists?(name, prefixes, partial, details, details_key, keys)
       end
       alias :template_exists? :exists?
 
       def any?(name, prefixes = [], partial = false)
-        @view_paths.exists?(*args_for_any(name, prefixes, partial))
+        details, details_key = detail_args_for_any
+        @view_paths.exists?(name, prefixes, partial, details, details_key, [])
       end
       alias :any_templates? :any?
 
-      # Adds fallbacks to the view paths. Useful in cases when you are rendering
-      # a :file.
-      def with_fallbacks
-        view_paths = build_view_paths((@view_paths.paths + self.class.fallbacks).uniq)
+      def any_formats?(name, prefixes = [], partial = false, keys = [], options = {})
+        exists?(name, prefixes, partial, keys, **options, formats: default_formats)
+      end
 
-        if block_given?
-          raise ArgumentError, <<~eowarn.squish
-          Calling `with_fallbacks` with a block is not supported. Call methods on
-          the lookup context returned by `with_fallbacks` instead.
-          eowarn
-        else
-          ActionView::LookupContext.new(view_paths, @details, @prefixes)
-        end
+      def append_view_paths(paths)
+        @view_paths = build_view_paths(@view_paths.to_a + paths)
+      end
+
+      def prepend_view_paths(paths)
+        @view_paths = build_view_paths(paths + @view_paths.to_a)
       end
 
     private
       # Whenever setting view paths, makes a copy so that we can manipulate them in
       # instance objects as we wish.
       def build_view_paths(paths)
-        ActionView::PathSet.new(Array(paths))
-      end
-
-      def args_for_lookup(name, prefixes, partial, keys, details_options)
-        name, prefixes = normalize_name(name, prefixes)
-        details, details_key = detail_args_for(details_options)
-        [name, prefixes, partial || false, details, details_key, keys]
+        if ActionView::PathSet === paths
+          paths
+        else
+          ActionView::PathSet.new(Array(paths))
+        end
       end
 
       # Compute details hash and key according to user options (e.g. passed from #render).
@@ -184,21 +221,15 @@ module ActionView
         [user_details, details_key]
       end
 
-      def args_for_any(name, prefixes, partial)
-        name, prefixes = normalize_name(name, prefixes)
-        details, details_key = detail_args_for_any
-        [name, prefixes, partial || false, details, details_key]
-      end
-
       def detail_args_for_any
         @detail_args_for_any ||= begin
           details = {}
 
-          registered_details.each do |k|
+          LookupContext.registered_details.each do |k|
             if k == :variants
               details[k] = :any
             else
-              details[k] = Accessors::DEFAULT_PROCS[k].call
+              details[k] = LookupContext.default_procs[k].call
             end
           end
 
@@ -208,23 +239,6 @@ module ActionView
             [details, nil]
           end
         end
-      end
-
-      # Support legacy foo.erb names even though we now ignore .erb
-      # as well as incorrectly putting part of the path in the template
-      # name instead of the prefix.
-      def normalize_name(name, prefixes)
-        prefixes = prefixes.presence
-        parts    = name.to_s.split("/")
-        parts.shift if parts.first.empty?
-        name = parts.pop
-
-        return name, prefixes || [""] if parts.empty?
-
-        parts    = parts.join("/")
-        prefixes = prefixes ? prefixes.map { |p| "#{p}/#{parts}" } : [parts]
-
-        return name, prefixes
       end
     end
 
@@ -254,14 +268,14 @@ module ActionView
     end
 
     def initialize_details(target, details)
-      registered_details.each do |k|
-        target[k] = details[k] || Accessors::DEFAULT_PROCS[k].call
+      LookupContext.registered_details.each do |k|
+        target[k] = details[k] || LookupContext.default_procs[k].call
       end
       target
     end
     private :initialize_details
 
-    # Override formats= to expand ["*/*"] values and automatically
+    # Override formats= to expand ["\*/*"] values and automatically
     # add :html as fallback to :js.
     def formats=(values)
       if values
@@ -269,12 +283,9 @@ module ActionView
         values.concat(default_formats) if values.delete "*/*"
         values.uniq!
 
-        invalid_values = (values - Template::Types.symbols)
-        unless invalid_values.empty?
-          raise ArgumentError, "Invalid formats: #{invalid_values.map(&:inspect).join(", ")}"
-        end
+        Template.validate_formats(values)
 
-        if values == [:js]
+        if (values.length == 1) && (values[0] == :js)
           values << :html
           @html_fallback_for_js = true
         end

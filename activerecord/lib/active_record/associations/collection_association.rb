@@ -1,33 +1,42 @@
 # frozen_string_literal: true
 
+require "active_support/core_ext/enumerable"
+
 module ActiveRecord
   module Associations
-    # = Active Record Association Collection
+    # Active Record Association Collection
+    # ====================================
     #
     # CollectionAssociation is an abstract class that provides common stuff to
     # ease the implementation of association proxies that represent
     # collections. See the class hierarchy in Association.
     #
-    #   CollectionAssociation:
-    #     HasManyAssociation => has_many
-    #       HasManyThroughAssociation + ThroughAssociation => has_many :through
+    # ```
+    # CollectionAssociation:
+    #   HasManyAssociation => has_many
+    #     HasManyThroughAssociation + ThroughAssociation => has_many :through
+    # ```
     #
     # The CollectionAssociation class provides common methods to the collections
-    # defined by +has_and_belongs_to_many+, +has_many+ or +has_many+ with
-    # the +:through association+ option.
+    # defined by `has_and_belongs_to_many`, `has_many` or `has_many` with
+    # the `:through association` option.
     #
     # You need to be careful with assumptions regarding the target: The proxy
     # does not fetch records from the database until it needs them, but new
-    # ones created with +build+ are added to the target. So, the target may be
+    # ones created with `build` are added to the target. So, the target may be
     # non-empty and still lack children waiting to be read from the database.
     # If you look directly to the database you cannot assume that's the entire
     # collection because new records may have been added to the target, etc.
     #
     # If you need to work on all current children, new and existing records,
-    # +load_target+ and the +loaded+ flag are your friends.
-    class CollectionAssociation < Association #:nodoc:
+    # `load_target` and the `loaded` flag are your friends.
+    class CollectionAssociation < Association # :nodoc:
+      attr_accessor :nested_attributes_target
+
       # Implements the reader method, e.g. foo.items for Foo.has_many :items
       def reader
+        ensure_klass_exists!
+
         if stale_target?
           reload
         end
@@ -44,29 +53,28 @@ module ActiveRecord
       # Implements the ids reader method, e.g. foo.item_ids for Foo.has_many :items
       def ids_reader
         if loaded?
-          target.pluck(reflection.association_primary_key)
+          target.pluck(*reflection.association_primary_key)
         elsif !target.empty?
-          load_target.pluck(reflection.association_primary_key)
+          load_target.pluck(*reflection.association_primary_key)
         else
-          @association_ids ||= scope.pluck(reflection.association_primary_key)
+          @association_ids ||= scope.pluck(*reflection.association_primary_key)
         end
       end
 
       # Implements the ids writer method, e.g. foo.item_ids= for Foo.has_many :items
       def ids_writer(ids)
-        primary_key = reflection.association_primary_key
-        pk_type = klass.type_for_attribute(primary_key)
+        primary_key = reflection.association_primary_key_definition
         ids = Array(ids).compact_blank
-        ids.map! { |i| pk_type.cast(i) }
+        ids.map! { |id| primary_key.cast(id, klass) }
 
-        records = klass.where(primary_key => ids).index_by do |r|
-          r.public_send(primary_key)
+        records = klass.where(primary_key.name => ids).index_by do |record|
+          primary_key.value_of(record)
         end.values_at(*ids).compact
 
         if records.size != ids.size
-          found_ids = records.map { |record| record.public_send(primary_key) }
+          found_ids = records.map { |record| primary_key.value_of(record) }
           not_found_ids = ids - found_ids
-          klass.all.raise_record_not_found_exception!(ids, records.size, ids.size, primary_key, not_found_ids)
+          klass.all.raise_record_not_found_exception!(ids, records.size, ids.size, primary_key.name, not_found_ids)
         else
           replace(records)
         end
@@ -75,13 +83,14 @@ module ActiveRecord
       def reset
         super
         @target = []
+        @replaced_or_added_targets = Set.new.compare_by_identity
         @association_ids = nil
       end
 
       def find(*args)
         if options[:inverse_of] && loaded?
           args_flatten = args.flatten
-          model = scope.klass
+          model = scope.model
 
           if args_flatten.blank?
             error_message = "Couldn't find #{model.name} without an ID"
@@ -109,12 +118,12 @@ module ActiveRecord
         end
       end
 
-      # Add +records+ to this association. Since +<<+ flattens its argument list
-      # and inserts each record, +push+ and +concat+ behave identically.
+      # Add `records` to this association. Since +<<+ flattens its argument list
+      # and inserts each record, `push` and `concat` behave identically.
       def concat(*records)
         records = records.flatten
         if owner.new_record?
-          load_target
+          skip_strict_loading { load_target }
           concat_records(records)
         else
           transaction { concat_records(records) }
@@ -122,8 +131,8 @@ module ActiveRecord
       end
 
       # Removes all records from the association without calling callbacks
-      # on the associated records. It honors the +:dependent+ option. However
-      # if the +:dependent+ value is +:destroy+ then in that case the +:delete_all+
+      # on the associated records. It honors the `:dependent` option. However
+      # if the `:dependent` value is `:destroy` then in that case the `:delete_all`
       # deletion strategy for the association is applied.
       #
       # You can force a particular deletion strategy by passing a parameter.
@@ -163,36 +172,36 @@ module ActiveRecord
         end
       end
 
-      # Removes +records+ from this association calling +before_remove+ and
-      # +after_remove+ callbacks.
+      # Removes `records` from this association calling `before_remove` and
+      # `after_remove` callbacks.
       #
-      # This method is abstract in the sense that +delete_records+ has to be
+      # This method is abstract in the sense that `delete_records` has to be
       # provided by descendants. Note this method does not imply the records
       # are actually removed from the database, that depends precisely on
-      # +delete_records+. They are in any case removed from the collection.
+      # `delete_records`. They are in any case removed from the collection.
       def delete(*records)
         delete_or_destroy(records, options[:dependent])
       end
 
-      # Deletes the +records+ and removes them from this association calling
-      # +before_remove+ , +after_remove+ , +before_destroy+ and +after_destroy+ callbacks.
+      # Deletes the `records` and removes them from this association calling
+      # `before_remove`, `after_remove`, `before_destroy` and `after_destroy` callbacks.
       #
       # Note that this method removes records from the database ignoring the
-      # +:dependent+ option.
+      # `:dependent` option.
       def destroy(*records)
         delete_or_destroy(records, :destroy)
       end
 
       # Returns the size of the collection by executing a SELECT COUNT(*)
       # query if the collection hasn't been loaded, and calling
-      # <tt>collection.size</tt> if it has.
+      # `collection.size` if it has.
       #
-      # If the collection has been already loaded +size+ and +length+ are
+      # If the collection has been already loaded `size` and `length` are
       # equivalent. If not and you are going to need the records anyway
-      # +length+ will take one less query. Otherwise +size+ is more efficient.
+      # `length` will take one less query. Otherwise `size` is more efficient.
       #
       # This method is abstract in the sense that it relies on
-      # +count_records+, which is a method descendants have to provide.
+      # `count_records`, which is a method descendants have to provide.
       def size
         if !find_target? || loaded?
           target.size
@@ -211,24 +220,24 @@ module ActiveRecord
       # Returns true if the collection is empty.
       #
       # If the collection has been loaded
-      # it is equivalent to <tt>collection.size.zero?</tt>. If the
+      # it is equivalent to `collection.size.zero?`. If the
       # collection has not been loaded, it is equivalent to
-      # <tt>!collection.exists?</tt>. If the collection has not already been
+      # `!collection.exists?`. If the collection has not already been
       # loaded and you are going to fetch the records anyway it is better to
-      # check <tt>collection.length.zero?</tt>.
+      # check `collection.length.zero?`.
       def empty?
-        if loaded? || @association_ids || reflection.has_cached_counter?
+        if loaded? || @association_ids || reflection.has_active_cached_counter?
           size.zero?
         else
           target.empty? && !scope.exists?
         end
       end
 
-      # Replace this collection with +other_array+. This will perform a diff
+      # Replace this collection with `other_array`. This will perform a diff
       # and delete/add only records that have changed.
       def replace(other_array)
         other_array.each { |val| raise_on_type_mismatch!(val) }
-        original_target = load_target.dup
+        original_target = skip_strict_loading { load_target }.dup
 
         if owner.new_record?
           replace_records(other_array, original_target)
@@ -243,14 +252,15 @@ module ActiveRecord
       end
 
       def include?(record)
-        if record.is_a?(reflection.klass)
-          if record.new_record?
-            include_in_memory?(record)
-          else
-            loaded? ? target.include?(record) : scope.exists?(record.id)
-          end
+        klass = reflection.klass
+        return false unless record.is_a?(klass)
+
+        if loaded?
+          target.include?(record)
+        elsif record.new_record?
+          include_in_memory?(record)
         else
-          false
+          scope.exists?(klass.primary_key_definition.where_hash(record.id))
         end
       end
 
@@ -264,26 +274,26 @@ module ActiveRecord
       end
 
       def add_to_target(record, skip_callbacks: false, replace: false, &block)
-        if replace || association_scope.distinct_value
-          index = @target.index(record)
-        end
-        replace_on_target(record, index, skip_callbacks, &block)
+        replace_on_target(record, skip_callbacks, replace: replace || association_scope.distinct_value, &block)
       end
 
       def target=(record)
-        return super unless ActiveRecord::Base.has_many_inversing
+        return super unless reflection.klass.has_many_inversing
 
         case record
+        when nil
+          # It's not possible to remove the record from the inverse association.
         when Array
           super
         else
-          add_to_target(record, skip_callbacks: true, replace: true)
+          replace_on_target(record, true, replace: true, inversing: true)
         end
       end
 
-      def scope
+      def scope(routes = nil)
         scope = super
         scope.none! if null_scope?
+        scope.default_order!(options[:default_order]) if options[:default_order].present?
         scope
       end
 
@@ -293,10 +303,14 @@ module ActiveRecord
 
       def find_from_target?
         loaded? ||
-          owner.strict_loading? ||
+          (owner.strict_loading? && owner.strict_loading_all?) ||
           reflection.strict_loading? ||
           owner.new_record? ||
           target.any? { |record| record.new_record? || record.changed? }
+      end
+
+      def collection?
+        true
       end
 
       private
@@ -310,19 +324,20 @@ module ActiveRecord
         #
         # So the task of this method is to merge them according to the following rules:
         #
-        #   * The final array must not have duplicates
-        #   * The order of the persisted array is to be preserved
-        #   * Any changes made to attributes on objects in the memory array are to be preserved
-        #   * Otherwise, attributes should have the value found in the database
+        # ```
+        # * The final array must not have duplicates
+        # * The order of the persisted array is to be preserved
+        # * Any changes made to attributes on objects in the memory array are to be preserved
+        # * Otherwise, attributes should have the value found in the database
+        # ```
         def merge_target_lists(persisted, memory)
           return persisted if memory.empty?
-          return memory    if persisted.empty?
 
           persisted.map! do |record|
             if mem_record = memory.delete(record)
 
-              ((record.attribute_names & mem_record.attribute_names) - mem_record.changed_attribute_names_to_save).each do |name|
-                mem_record[name] = record[name]
+              ((record.attribute_names & mem_record.attribute_names) - mem_record.changed_attribute_names_to_save - mem_record.class._attr_readonly).each do |name|
+                mem_record._write_attribute(name, record._read_attribute(name))
               end
 
               mem_record
@@ -331,12 +346,12 @@ module ActiveRecord
             end
           end
 
-          persisted + memory
+          persisted + memory.reject(&:persisted?)
         end
 
         def _create_record(attributes, raise = false, &block)
           unless owner.persisted?
-            raise ActiveRecord::RecordNotSaved, "You cannot call create unless the parent is saved"
+            raise ActiveRecord::RecordNotSaved.new("You cannot call create unless the parent is saved", owner)
           end
 
           if attributes.is_a?(Array)
@@ -392,8 +407,8 @@ module ActiveRecord
         end
 
         # Delete the given records from the association,
-        # using one of the methods +:destroy+, +:delete_all+
-        # or +:nullify+ (or +nil+, in which case a default is used).
+        # using one of the methods `:destroy`, `:delete_all`
+        # or `:nullify` (or `nil`, in which case a default is used).
         def delete_records(records, method)
           raise NotImplementedError
         end
@@ -414,7 +429,7 @@ module ActiveRecord
           common_records = intersection(new_target, original_target)
           common_records.each do |record|
             skip_callbacks = true
-            replace_on_target(record, @target.index(record), skip_callbacks)
+            replace_on_target(record, skip_callbacks, replace: true)
           end
         end
 
@@ -437,7 +452,11 @@ module ActiveRecord
           records
         end
 
-        def replace_on_target(record, index, skip_callbacks)
+        def replace_on_target(record, skip_callbacks, replace:, inversing: false)
+          if replace && (!record.new_record? || @replaced_or_added_targets.include?(record))
+            index = @target.index(record)
+          end
+
           catch(:abort) do
             callback(:before_add, record)
           end || return unless skip_callbacks
@@ -447,6 +466,12 @@ module ActiveRecord
           @_was_loaded = true
 
           yield(record) if block_given?
+
+          if !index && @replaced_or_added_targets.include?(record)
+            index = @target.index(record)
+          end
+
+          @replaced_or_added_targets << record if inversing || index || record.new_record?
 
           if index
             target[index] = record
@@ -470,7 +495,11 @@ module ActiveRecord
 
         def callbacks_for(callback_name)
           full_callback_name = "#{callback_name}_for_#{reflection.name}"
-          owner.class.send(full_callback_name)
+          if owner.class.respond_to?(full_callback_name)
+            owner.class.send(full_callback_name)
+          else
+            []
+          end
         end
 
         def include_in_memory?(record)

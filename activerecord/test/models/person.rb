@@ -17,8 +17,9 @@ class Person < ActiveRecord::Base
 
   has_many :references
   has_many :bad_references
-  has_many :fixed_bad_references, -> { where favourite: true }, class_name: "BadReference"
-  has_one  :favourite_reference, -> { where "favourite=?", true }, class_name: "Reference"
+  has_many :fixed_bad_references, -> { where favorite: true }, class_name: "BadReference"
+  has_one  :favorite_reference, -> { where favorite: true }, class_name: "Reference"
+  has_one  :favorite_reference_job, through: :favorite_reference, source: :job
   has_many :posts_with_comments_sorted_by_comment_id, -> { includes(:comments).order("comments.id") }, through: :readers, source: :post
   has_many :first_posts, -> { where(id: [1, 2]) }, through: :readers
 
@@ -38,7 +39,11 @@ class Person < ActiveRecord::Base
   has_many :agents_posts_authors, through: :agents_posts, source: :author
   has_many :essays, primary_key: "first_name", foreign_key: "writer_id"
 
+  has_many :polymorphic_comments, as: :person, primary_key: :external_id
+
   scope :males,   -> { where(gender: "M") }
+
+  attr_readonly :born_at
 end
 
 class PersonWithDependentDestroyJobs < ActiveRecord::Base
@@ -125,8 +130,8 @@ class NestedPerson < ActiveRecord::Base
   end
 end
 
-class Insure
-  INSURES = %W{life annuality}
+module Insure
+  INSURES = %W{life annuality}.freeze
 
   def self.load(mask)
     INSURES.select do |insure|
@@ -143,5 +148,10 @@ end
 class SerializedPerson < ActiveRecord::Base
   self.table_name = "people"
 
-  serialize :insures, Insure
+  serialize :insures, coder: Insure
+end
+
+class LockVersionValidatedPerson < ActiveRecord::Base
+  self.table_name = "people"
+  validates :lock_version, numericality: { only_integer: true }, allow_nil: false
 end

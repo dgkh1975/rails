@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   class PredicateBuilder
     class RangeHandler # :nodoc:
@@ -10,8 +11,8 @@ module ActiveRecord
       end
 
       def call(attribute, value)
-        begin_bind = predicate_builder.build_bind_attribute(attribute.name, value.begin)
-        end_bind = predicate_builder.build_bind_attribute(attribute.name, value.end)
+        begin_bind = predicate_builder.build_bind_attribute(attribute, value.begin)
+        end_bind = predicate_builder.build_bind_attribute(attribute, value.end)
         attribute.between(RangeWithBinds.new(begin_bind, end_bind, value.exclude_end?))
       end
 

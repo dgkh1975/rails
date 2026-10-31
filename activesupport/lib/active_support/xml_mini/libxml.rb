@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "libxml"
@@ -5,12 +6,13 @@ require "active_support/core_ext/object/blank"
 require "stringio"
 
 module ActiveSupport
-  module XmlMini_LibXML #:nodoc:
+  module XmlMini_LibXML # :nodoc:
     extend self
 
     # Parse an XML Document string or IO into a simple hash using libxml.
-    # data::
-    #   XML Document string or IO to parse
+    #
+    # data
+    # :   XML Document string or IO to parse
     def parse(data)
       if !data.respond_to?(:read)
         data = StringIO.new(data || "")
@@ -25,21 +27,21 @@ module ActiveSupport
   end
 end
 
-module LibXML #:nodoc:
-  module Conversions #:nodoc:
-    module Document #:nodoc:
+module LibXML # :nodoc:
+  module Conversions # :nodoc:
+    module Document # :nodoc:
       def to_hash
         root.to_hash
       end
     end
 
-    module Node #:nodoc:
+    module Node # :nodoc:
       CONTENT_ROOT = "__content__"
 
       # Convert XML document to hash.
       #
-      # hash::
-      #   Hash to merge the converted element into.
+      # hash
+      # :   Hash to merge the converted element into.
       def to_hash(hash = {})
         node_hash = {}
 

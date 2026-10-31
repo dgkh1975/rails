@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
-  module Attached::Changes #:nodoc:
+  module Attached::Changes # :nodoc:
     extend ActiveSupport::Autoload
 
     eager_autoload do
@@ -11,6 +12,12 @@ module ActiveStorage
 
       autoload :DeleteOne
       autoload :DeleteMany
+
+      autoload :DetachOne
+      autoload :DetachMany
+
+      autoload :PurgeOne
+      autoload :PurgeMany
     end
   end
 end

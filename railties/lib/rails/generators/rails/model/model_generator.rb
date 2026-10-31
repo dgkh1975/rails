@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/generators/model_helpers"
 
 module Rails
@@ -9,6 +10,10 @@ module Rails
 
       argument :attributes, type: :array, default: [], banner: "field[:type][:index] field[:type][:index]"
       hook_for :orm, required: true, desc: "ORM to be invoked"
+
+      class << self
+        delegate(:desc, to: :orm_generator)
+      end
     end
   end
 end

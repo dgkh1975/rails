@@ -10,6 +10,7 @@ class HttpBasicAuthenticationTest < ActionController::TestCase
     before_action :auth_with_special_chars, only: :special_creds
 
     http_basic_authenticate_with name: "David", password: "Goliath", only: :search
+    http_basic_authenticate_with name: "David", password: "Goliath", content_type: "application/json", only: :search_with_content_type
 
     def index
       render plain: "Hello Secret"
@@ -29,6 +30,17 @@ class HttpBasicAuthenticationTest < ActionController::TestCase
 
     def search
       render plain: "All inline"
+    end
+
+    def search_with_content_type
+      render plain: "All inline"
+    end
+
+    def no_password
+      username, password = authenticate_with_http_basic do |username, password|
+        [username, password]
+      end
+      render plain: "Hello #{username} (password: #{password.inspect})"
     end
 
     private
@@ -59,7 +71,7 @@ class HttpBasicAuthenticationTest < ActionController::TestCase
       end
   end
 
-  AUTH_HEADERS = ["HTTP_AUTHORIZATION", "X-HTTP_AUTHORIZATION", "X_HTTP_AUTHORIZATION", "REDIRECT_X_HTTP_AUTHORIZATION"]
+  AUTH_HEADERS = ["HTTP_AUTHORIZATION", "X-HTTP_AUTHORIZATION", "X_HTTP_AUTHORIZATION", "REDIRECT_X_HTTP_AUTHORIZATION"].freeze
 
   tests DummyController
 
@@ -137,6 +149,21 @@ class HttpBasicAuthenticationTest < ActionController::TestCase
     assert_equal 'Basic realm="SuperSecret"', @response.headers["WWW-Authenticate"]
   end
 
+  test "authentication request with a missing password" do
+    @request.env["HTTP_AUTHORIZATION"] = "Basic #{::Base64.encode64("David")}"
+    get :search
+
+    assert_response :unauthorized
+  end
+
+  test "authentication request with no required password" do
+    @request.env["HTTP_AUTHORIZATION"] = "Basic #{::Base64.encode64("George")}"
+    get :no_password
+
+    assert_response :success
+    assert_equal "Hello George (password: nil)", @response.body
+  end
+
   test "authentication request with valid credential" do
     @request.env["HTTP_AUTHORIZATION"] = encode_credentials("pretty", "please")
     get :display
@@ -168,6 +195,14 @@ class HttpBasicAuthenticationTest < ActionController::TestCase
     @request.env["HTTP_AUTHORIZATION"] = header
     get :search
     assert_response :unauthorized
+  end
+
+  test "authentication request with content_type" do
+    @request.env["HTTP_AUTHORIZATION"] = encode_credentials("pretty", "please")
+    get :search_with_content_type
+
+    assert_response :unauthorized
+    assert_equal "application/json", @response.media_type
   end
 
   private

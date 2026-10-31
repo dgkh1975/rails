@@ -1,9 +1,56 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Visitors
     class PostgreSQL < Arel::Visitors::ToSql
       private
+        def visit_Arel_Nodes_UpdateStatement(o, collector)
+          collector.retryable = false
+          o = prepare_update_statement(o)
+
+          collector << "UPDATE "
+
+          # UPDATE with JOIN is in the form of:
+          #
+          #   UPDATE t1 AS __active_record_update_alias
+          #   SET ..
+          #   FROM t1 JOIN t2 ON t2.join_id = t1.join_id ..
+          #   WHERE t1.id = __active_record_update_alias.id AND ..
+          if has_join_sources?(o)
+            collector = visit o.relation.left, collector
+            collect_nodes_for o.values, collector, " SET "
+            collector << " FROM "
+            collector = inject_join o.relation.right, collector, " "
+          else
+            collector = visit o.relation, collector
+            collect_nodes_for o.values, collector, " SET "
+          end
+
+          collect_nodes_for o.wheres, collector, " WHERE ", " AND "
+          collect_nodes_for o.orders, collector, " ORDER BY "
+          maybe_visit o.limit, collector
+          maybe_visit o.comment, collector
+
+          if o.returning.empty?
+            collector
+          else
+            collector << " RETURNING "
+            visit o.returning, collector
+          end
+        end
+
+        # In the simple case, PostgreSQL allows us to place FROM or JOINs directly into the UPDATE
+        # query. However, this does not allow for LIMIT, OFFSET and ORDER. To support
+        # these, we must use a subquery.
+        def prepare_update_statement(o)
+          if o.key && has_join_sources?(o) && !has_group_by_and_having?(o) && !has_limit_or_offset_or_orders?(o)
+            prepare_update_statement_with_self_join(o)
+          else
+            super
+          end
+        end
+
         def visit_Arel_Nodes_Matches(o, collector)
           op = o.case_sensitive ? " LIKE " : " ILIKE "
           collector = infix_value o, collector, op
@@ -63,7 +110,13 @@ module Arel # :nodoc: all
 
         def visit_Arel_Nodes_Lateral(o, collector)
           collector << "LATERAL "
-          grouping_parentheses o, collector
+          grouping_parentheses o.expr, collector
+        end
+
+        def visit_Arel_Nodes_InnerJoin(o, collector)
+          return super if o.right
+          collector << "CROSS JOIN "
+          visit o.left, collector
         end
 
         def visit_Arel_Nodes_IsNotDistinctFrom(o, collector)
@@ -78,31 +131,13 @@ module Arel # :nodoc: all
           visit o.right, collector
         end
 
-        def visit_Arel_Nodes_NullsFirst(o, collector)
-          visit o.expr, collector
-          collector << " NULLS FIRST"
-        end
-
-        def visit_Arel_Nodes_NullsLast(o, collector)
-          visit o.expr, collector
-          collector << " NULLS LAST"
-        end
-
-        BIND_BLOCK = proc { |i| "$#{i}" }
-        private_constant :BIND_BLOCK
+        # Placeholders for the first binds of a query, rather than a new String for every
+        # bind of every query compiled.
+        BIND_PLACEHOLDERS = Array.new(256) { |i| -"$#{i}" }.freeze
+        BIND_BLOCK = ActiveSupport::Ractors.shareable_proc { |i| BIND_PLACEHOLDERS[i] || "$#{i}" }
+        private_constant :BIND_PLACEHOLDERS, :BIND_BLOCK
 
         def bind_block; BIND_BLOCK; end
-
-        # Used by Lateral visitor to enclose select queries in parentheses
-        def grouping_parentheses(o, collector)
-          if o.expr.is_a? Nodes::SelectStatement
-            collector << "("
-            visit o.expr, collector
-            collector << ")"
-          else
-            visit o.expr, collector
-          end
-        end
 
         # Utilized by GroupingSet, Cube & RollUp visitors to
         # handle grouping aggregation semantics

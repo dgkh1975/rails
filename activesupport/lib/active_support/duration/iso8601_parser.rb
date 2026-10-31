@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "strscan"
@@ -6,7 +7,7 @@ module ActiveSupport
   class Duration
     # Parses a string formatted according to ISO 8601 Duration into the hash.
     #
-    # See {ISO 8601}[https://en.wikipedia.org/wiki/ISO_8601#Durations] for more information.
+    # See [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601#Durations) for more information.
     #
     # This parser allows negative parts to be present in pattern.
     class ISO8601Parser # :nodoc:
@@ -22,11 +23,11 @@ module ActiveSupport
       DATE_COMPONENT = /(-?\d+(?:[.,]\d+)?)(Y|M|D|W)/
       TIME_COMPONENT = /(-?\d+(?:[.,]\d+)?)(H|M|S)/
 
-      DATE_TO_PART = { "Y" => :years, "M" => :months, "W" => :weeks, "D" => :days }
-      TIME_TO_PART = { "H" => :hours, "M" => :minutes, "S" => :seconds }
+      DATE_TO_PART = { "Y" => :years, "M" => :months, "W" => :weeks, "D" => :days }.freeze
+      TIME_TO_PART = { "H" => :hours, "M" => :minutes, "S" => :seconds }.freeze
 
-      DATE_COMPONENTS = [:years, :months, :days]
-      TIME_COMPONENTS = [:hours, :minutes, :seconds]
+      DATE_COMPONENTS = [:years, :months, :days].freeze
+      TIME_COMPONENTS = [:hours, :minutes, :seconds].freeze
 
       attr_reader :parts, :scanner
       attr_accessor :mode, :sign
@@ -102,12 +103,12 @@ module ActiveSupport
           raise_parsing_error("is empty duration") if parts.empty?
 
           # Mixing any of Y, M, D with W is invalid.
-          if parts.key?(:weeks) && (parts.keys & DATE_COMPONENTS).any?
+          if parts.key?(:weeks) && parts.keys.intersect?(DATE_COMPONENTS)
             raise_parsing_error("mixing weeks with other date parts not allowed")
           end
 
           # Specifying an empty T part is invalid.
-          if mode == :time && (parts.keys & TIME_COMPONENTS).empty?
+          if mode == :time && !parts.keys.intersect?(TIME_COMPONENTS)
             raise_parsing_error("time part marker is present but time part is empty")
           end
 

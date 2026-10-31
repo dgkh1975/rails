@@ -5,8 +5,9 @@ require "models/topic"
 require "models/reply"
 require "models/author"
 require "models/post"
+require "active_support/log_subscriber/test_helper"
 
-if ActiveRecord::Base.connection.prepared_statements
+if ActiveRecord::Base.lease_connection.prepared_statements
   module ActiveRecord
     class BindParameterTest < ActiveRecord::TestCase
       fixtures :topics, :authors, :author_addresses, :posts
@@ -23,9 +24,15 @@ if ActiveRecord::Base.connection.prepared_statements
         end
       end
 
+      def run(*)
+        with_debug_event_reporting do
+          super
+        end
+      end
+
       def setup
         super
-        @connection = ActiveRecord::Base.connection
+        @connection = ActiveRecord::Base.lease_connection
         @subscriber = LogListener.new
         @subscription = ActiveSupport::Notifications.subscribe("sql.active_record", @subscriber)
       end
@@ -63,10 +70,10 @@ if ActiveRecord::Base.connection.prepared_statements
         assert_equal 1, Topic.find(1).id
         assert_raises(RecordNotFound) { SillyReply.find(2) }
 
-        topic_sql = cached_statement(Topic, Topic.primary_key)
+        topic_sql = cached_statement(Topic, [Topic.primary_key])
         assert_includes statement_cache, to_sql_key(topic_sql)
 
-        reply_sql = cached_statement(SillyReply, SillyReply.primary_key)
+        reply_sql = cached_statement(SillyReply, [SillyReply.primary_key])
         assert_includes statement_cache, to_sql_key(reply_sql)
 
         replies = SillyReply.where(id: 2).limit(1)
@@ -102,7 +109,7 @@ if ActiveRecord::Base.connection.prepared_statements
 
         topics = Topic.where("topics.id = ?", 1)
         assert_equal [1], topics.map(&:id)
-        assert_not_includes statement_cache, to_sql_key(topics.arel)
+        assert_includes statement_cache, to_sql_key(topics.arel)
       end
 
       def test_too_many_binds
@@ -156,11 +163,9 @@ if ActiveRecord::Base.connection.prepared_statements
         assert_logs_binds(binds)
       end
 
-      def test_logs_legacy_binds_after_type_cast
-        binds = [[Topic.column_for_attribute("id"), "10"]]
-        assert_deprecated do
-          assert_logs_binds(binds)
-        end
+      def test_logs_unnamed_binds
+        binds = ["abcd"]
+        assert_logs_unnamed_binds(binds)
       end
 
       def test_bind_params_to_sql_with_prepared_statements
@@ -171,6 +176,32 @@ if ActiveRecord::Base.connection.prepared_statements
         @connection.unprepared_statement do
           assert_bind_params_to_sql
         end
+      end
+
+      def test_nested_unprepared_statements
+        assert_predicate @connection, :prepared_statements?
+
+        @connection.unprepared_statement do
+          assert_not_predicate @connection, :prepared_statements?
+
+          @connection.unprepared_statement do
+            assert_not_predicate @connection, :prepared_statements?
+          end
+
+          assert_not_predicate @connection, :prepared_statements?
+        end
+
+        assert_predicate @connection, :prepared_statements?
+      end
+
+      def test_binds_with_filtered_attributes
+        ActiveRecord::Base.filter_attributes = [:auth]
+
+        binds = [Relation::QueryAttribute.new("auth_token", "abcd", Type::String.new)]
+
+        assert_filtered_log_binds(binds)
+
+        ActiveRecord::Base.filter_attributes = []
       end
 
       private
@@ -190,7 +221,7 @@ if ActiveRecord::Base.connection.prepared_statements
 
           authors = Author.where(id: [1, 2, 3, nil])
           assert_equal sql, @connection.to_sql(authors.arel)
-          assert_sql(sql) { assert_equal 3, authors.length }
+          assert_queries_match(sql) { assert_equal 3, authors.length }
 
           # prepared_statements: true
           #
@@ -204,7 +235,27 @@ if ActiveRecord::Base.connection.prepared_statements
 
           authors = Author.where(id: [1, 2, 3, 9223372036854775808])
           assert_equal sql, @connection.to_sql(authors.arel)
-          assert_sql(sql) { assert_equal 3, authors.length }
+          assert_queries_match(sql) { assert_equal 3, authors.length }
+
+          # prepared_statements: true
+          #
+          #   SELECT `authors`.* FROM `authors` WHERE `authors`.`id` IN (?, ?, ?)
+          #
+          # prepared_statements: false
+          #
+          #   SELECT `authors`.* FROM `authors` WHERE `authors`.`id` IN (1, 2, 3)
+          #
+          params = if current_adapter?(:Mysql2Adapter, :TrilogyAdapter)
+            # With MySQL integers are casted as string for security.
+            bind_params((1..3).map(&:to_s))
+          else
+            bind_params(1..3)
+          end
+
+          sql = "SELECT #{table}.* FROM #{table} WHERE #{pk} IN (#{params})"
+          arel_node = Arel.sql("SELECT #{table}.* FROM #{table} WHERE #{pk} IN (?)", [1, 2, 3])
+          assert_equal sql, @connection.to_sql(arel_node)
+          assert_queries_match(sql) { assert_equal 3, @connection.select_all(arel_node).length }
         end
 
         def bind_params(ids)
@@ -220,14 +271,14 @@ if ActiveRecord::Base.connection.prepared_statements
         end
 
         def cached_statement(klass, key)
-          cache = klass.send(:cached_find_by_statement, key) do
+          cache = klass.send(:cached_find_by_statement, @connection, key) do
             raise "#{klass} has no cached statement by #{key.inspect}"
           end
-          cache.send(:query_builder).instance_variable_get(:@sql)
+          cache.instance_variable_get(:@query_builder).instance_variable_get(:@sql)
         end
 
         def statement_cache
-          @connection.instance_variable_get(:@statements).send(:cache)
+          main_ractor_connection(@connection).instance_variable_get(:@statements).send(:cache)
         end
 
         def assert_logs_binds(binds)
@@ -245,21 +296,58 @@ if ActiveRecord::Base.connection.prepared_statements
             123,
             payload)
 
-          logger = Class.new(ActiveRecord::LogSubscriber) {
-            attr_reader :debugs
+          old_logger = ActiveRecord::LogSubscriber.logger
+          ActiveRecord::LogSubscriber.logger = logger = ActiveSupport::LogSubscriber::TestHelper::MockLogger.new
+          StructuredEventSubscriber.new.sql(event)
+          assert_match %r(\[\["id", 10\]\]\z), logger.logged(:debug).last
+        ensure
+          ActiveRecord::LogSubscriber.logger = old_logger
+        end
 
-            def initialize
-              super
-              @debugs = []
-            end
+        def assert_logs_unnamed_binds(binds)
+          payload = {
+            name: "SQL",
+            sql: "select * from topics where title = $1",
+            binds: binds,
+            type_casted_binds: @connection.send(:type_casted_binds, binds)
+          }
 
-            def debug(str)
-              @debugs << str
-            end
-          }.new
+          event = ActiveSupport::Notifications::Event.new(
+            "foo",
+            Time.now,
+            Time.now,
+            123,
+            payload)
 
-          logger.sql(event)
-          assert_match %r(\[\["id", 10\]\]\z), logger.debugs.first
+          old_logger = ActiveRecord::LogSubscriber.logger
+          ActiveRecord::LogSubscriber.logger = logger = ActiveSupport::LogSubscriber::TestHelper::MockLogger.new
+          StructuredEventSubscriber.new.sql(event)
+          assert_match %r(\[\["\$1", "abcd"\]\]\z), logger.logged(:debug).last
+        ensure
+          ActiveRecord::LogSubscriber.logger = old_logger
+        end
+
+        def assert_filtered_log_binds(binds)
+          payload = {
+            name: "SQL",
+            sql: "select * from users where auth_token = ?",
+            binds: binds,
+            type_casted_binds: @connection.send(:type_casted_binds, binds)
+          }
+
+          event = ActiveSupport::Notifications::Event.new(
+            "foo",
+            Time.now,
+            Time.now,
+            123,
+            payload)
+
+          old_logger = ActiveRecord::LogSubscriber.logger
+          ActiveRecord::LogSubscriber.logger = logger = ActiveSupport::LogSubscriber::TestHelper::MockLogger.new
+          StructuredEventSubscriber.new.sql(event)
+          assert_match %r/#{Regexp.escape '[["auth_token", "[FILTERED]"]]'}/, logger.logged(:debug).last
+        ensure
+          ActiveRecord::LogSubscriber.logger = old_logger
         end
     end
   end

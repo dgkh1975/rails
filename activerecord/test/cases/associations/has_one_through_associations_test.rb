@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "cases/helper"
+require "support/deprecated_associations_test_helpers"
 require "models/club"
 require "models/member_type"
 require "models/member"
@@ -22,6 +23,8 @@ require "models/customer"
 require "models/carrier"
 require "models/shop_account"
 require "models/customer_carrier"
+require "models/cpk"
+require "models/dats"
 
 class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   fixtures :member_types, :members, :clubs, :memberships, :sponsors, :organizations, :minivans,
@@ -37,7 +40,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
 
   def test_has_one_through_executes_limited_query
     boring_club = clubs(:boring_club)
-    assert_sql(/LIMIT|ROWNUM <=|FETCH FIRST/) do
+    assert_queries_match(/LIMIT|ROWNUM <=|FETCH FIRST/) do
       assert_equal boring_club, @member.general_club
     end
   end
@@ -99,6 +102,14 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
     assert_predicate member_detail_with_two_associations.member, :new_record?
   end
 
+  def test_building_works_with_has_one_through_belongs_to
+    new_member = Member.create!(name: "Joe")
+    new_member.create_current_membership!
+    new_club = new_member.build_club
+
+    assert_equal(new_member.club, new_club)
+  end
+
   def test_creating_multiple_associations_creates_through_record
     member_type = MemberType.create!
     member = Member.create!
@@ -156,7 +167,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_through_eager_loading
-    members = assert_queries(3) do # base table, through table, clubs table
+    members = assert_queries_count(3) do # base table, through table, clubs table
       Member.all.merge!(includes: :club, where: ["name = ?", "Groucho Marx"]).to_a
     end
     assert_equal 1, members.size
@@ -164,7 +175,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_through_eager_loading_through_polymorphic
-    members = assert_queries(3) do # base table, through table, clubs table
+    members = assert_queries_count(3) do # base table, through table, clubs table
       Member.all.merge!(includes: :sponsor_club, where: ["name = ?", "Groucho Marx"]).to_a
     end
     assert_equal 1, members.size
@@ -173,9 +184,9 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
 
   def test_has_one_through_with_conditions_eager_loading
     # conditions on the through table
-    assert_equal clubs(:moustache_club), Member.all.merge!(includes: :favourite_club).find(@member.id).favourite_club
-    memberships(:membership_of_favourite_club).update_columns(favourite: false)
-    assert_nil Member.all.merge!(includes: :favourite_club).find(@member.id).reload.favourite_club
+    assert_equal clubs(:moustache_club), Member.all.merge!(includes: :favorite_club).find(@member.id).favorite_club
+    memberships(:membership_of_favorite_club).update_columns(favorite: false)
+    assert_nil Member.all.merge!(includes: :favorite_club).find(@member.id).reload.favorite_club
 
     # conditions on the source table
     assert_equal clubs(:moustache_club), Member.all.merge!(includes: :hairy_club).find(@member.id).hairy_club
@@ -194,7 +205,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_through_nonpreload_eagerloading
-    members = assert_queries(1) do
+    members = assert_queries_count(1) do
       Member.all.merge!(includes: :club, where: ["members.name = ?", "Groucho Marx"], order: "clubs.name").to_a # force fallback
     end
     assert_equal 1, members.size
@@ -202,7 +213,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_through_nonpreload_eager_loading_through_polymorphic
-    members = assert_queries(1) do
+    members = assert_queries_count(1) do
       Member.all.merge!(includes: :sponsor_club, where: ["members.name = ?", "Groucho Marx"], order: "clubs.name").to_a # force fallback
     end
     assert_equal 1, members.size
@@ -210,13 +221,13 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_through_nonpreload_eager_loading_through_polymorphic_with_more_than_one_through_record
-    Sponsor.new(sponsor_club: clubs(:crazy_club), sponsorable: members(:groucho)).save!
-    members = assert_queries(1) do
+    Sponsor.new(sponsor_club: clubs(:outrageous_club), sponsorable: members(:groucho)).save!
+    members = assert_queries_count(1) do
       Member.all.merge!(includes: :sponsor_club, where: ["members.name = ?", "Groucho Marx"], order: "clubs.name DESC").to_a # force fallback
     end
     assert_equal 1, members.size
     assert_not_nil assert_no_queries { members[0].sponsor_club }
-    assert_equal clubs(:crazy_club), members[0].sponsor_club
+    assert_equal clubs(:outrageous_club), members[0].sponsor_club
   end
 
   def test_uninitialized_has_one_through_should_return_nil_for_unsaved_record
@@ -236,7 +247,9 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
 
   def test_has_one_through_proxy_should_respond_to_private_methods_via_send
     clubs(:moustache_club).send(:private_method)
-    @member.club.send(:private_method)
+    assert_nothing_raised do
+      @member.club.send(:private_method)
+    end
   end
 
   def test_assigning_to_has_one_through_preserves_decorated_join_record
@@ -281,7 +294,7 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
     @member_detail = MemberDetail.new
     @member.member_detail = @member_detail
     @member.organization = @organization
-    @member_details = assert_queries(3) do
+    @member_details = assert_queries_count(3) do
       MemberDetail.all.merge!(includes: :member_type).to_a
     end
     @new_detail = @member_details[0]
@@ -313,13 +326,13 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
 
     assert_not_nil @member_detail.member_type
     @member_detail.destroy
-    assert_queries(1) do
+    assert_queries_count(1) do
       @member_detail.association(:member_type).reload
       assert_not_nil @member_detail.member_type
     end
 
     @member_detail.member.destroy
-    assert_queries(1) do
+    assert_queries_count(1) do
       @member_detail.association(:member_type).reload
       assert_nil @member_detail.member_type
     end
@@ -444,5 +457,99 @@ class HasOneThroughAssociationsTest < ActiveRecord::TestCase
     assert_equal other_carrier, account_carrier
   ensure
     CustomerCarrier.current_customer = nil
+  end
+
+  def test_loading_cpk_association_with_unpersisted_owner
+    order = Cpk::Order.create!(shop_id: 1)
+    book = Cpk::BookWithOrderAgreements.new(id: [1, 2], order: order)
+    order_agreement = Cpk::OrderAgreement.create!(order: order)
+
+    assert_equal(order_agreement, book.order_agreement)
+  end
+
+  def test_cpk_stale_target
+    order = Cpk::Order.create!(shop_id: 1)
+    book = Cpk::BookWithOrderAgreements.create!(id: [1, 2], order: order)
+    Cpk::OrderAgreement.create!(order: order)
+
+    book.order_agreement
+    book.order = Cpk::Order.new
+
+    assert_predicate(book.association(:order_agreement), :stale_target?)
+  end
+
+  class SelfReferencingCompany < ActiveRecord::Base
+    self.table_name = "companies"
+    self.inheritance_column = nil
+
+    belongs_to :parent, class_name: name, foreign_key: :firm_id, optional: true
+    belongs_to :mentor, class_name: name, foreign_key: :client_of, optional: true
+    has_one :scoped_parents_mentor, ->(owner) { where.not(name: owner.name) }, through: :parent, source: :mentor
+  end
+
+  def test_preloading_has_one_through_for_a_subclass_of_the_owner
+    owner_class = Class.new(SelfReferencingCompany) do
+      def self.name; "InheritedSelfReferencingCompany"; end
+    end
+    mentor = SelfReferencingCompany.create!(name: "Mentor")
+    parent = SelfReferencingCompany.create!(name: "Parent", mentor: mentor)
+    owner = owner_class.create!(name: "Owner", parent: parent)
+
+    ActiveRecord::Associations::Preloader.new(records: [owner], associations: :scoped_parents_mentor).call
+
+    assert_equal mentor, owner.scoped_parents_mentor
+  end
+end
+
+class DeprecatedHasOneThroughAssociationsTest < ActiveRecord::TestCase
+  include DeprecatedAssociationsTestHelpers
+
+  fixtures :authors, :author_addresses
+
+  setup do
+    @model = DATS::Author
+    @author = @model.new
+  end
+
+  test "the has_one itself is deprecated" do
+    assert_not_deprecated_association(:comment) do
+      @author.comment
+    end
+
+    assert_deprecated_association(:deprecated_has_one_through, context: context_for_method(:deprecated_has_one_through)) do
+      @author.deprecated_has_one_through
+    end
+  end
+
+  test "the through association is deprecated" do
+    assert_deprecated_association(:deprecated_post, context: context_for_through(:deprecated_through1)) do
+      @author.deprecated_through1
+    end
+  end
+
+  test "the source association is deprecated" do
+    assert_deprecated_association(:deprecated_comment, model: DATS::Post, context: context_for_through(:deprecated_source1)) do
+      @author.deprecated_source1
+    end
+  end
+
+  test "all deprecated" do
+    assert_deprecated_association(:deprecated_all1, context: context_for_method(:deprecated_all1)) do
+      @author.deprecated_all1
+    end
+
+    assert_deprecated_association(:deprecated_post, context: context_for_through(:deprecated_all1)) do
+      @author.deprecated_all1
+    end
+
+    assert_deprecated_association(:deprecated_comment, model: DATS::Post, context: context_for_through(:deprecated_all1)) do
+      @author.deprecated_all1
+    end
+  end
+
+  test "deprecated nested association" do
+    assert_deprecated_association(:deprecated_author_favorite, context: context_for_through(:deprecated_nested1)) do
+      @author.deprecated_nested1
+    end
   end
 end

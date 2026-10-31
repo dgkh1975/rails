@@ -8,7 +8,7 @@ class UnloggedTablesTest < ActiveRecord::PostgreSQLTestCase
 
   TABLE_NAME = "things"
   LOGGED_FIELD = "relpersistence"
-  LOGGED_QUERY = "SELECT #{LOGGED_FIELD} FROM pg_class WHERE relname = '#{TABLE_NAME}'"
+  LOGGED_QUERY = "SELECT #{LOGGED_FIELD} FROM pg_class WHERE relname = '#{TABLE_NAME}'".freeze
   LOGGED = "p"
   UNLOGGED = "u"
   TEMPORARY = "t"
@@ -18,13 +18,14 @@ class UnloggedTablesTest < ActiveRecord::PostgreSQLTestCase
   end
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @previous_unlogged_tables = ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.create_unlogged_tables
+    @connection = ActiveRecord::Base.lease_connection
     ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.create_unlogged_tables = false
   end
 
   teardown do
     @connection.drop_table TABLE_NAME, if_exists: true
-    ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.create_unlogged_tables = false
+    ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.create_unlogged_tables = @previous_unlogged_tables
   end
 
   def test_logged_by_default

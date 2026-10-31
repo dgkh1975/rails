@@ -4,7 +4,8 @@ require "cases/helper"
 require "models/author"
 require "models/categorization"
 require "models/post"
-require "models/citation"
+require "models/book"
+require "models/paragraph"
 
 module ActiveRecord
   class OrTest < ActiveRecord::TestCase
@@ -12,7 +13,7 @@ module ActiveRecord
 
     def test_or_with_relation
       expected = Post.where("id = 1 or id = 2").to_a
-      assert_equal expected, Post.where("id = 1").or(Post.where("id = 2")).to_a
+      assert_equal_unordered expected, Post.where("id = 1").or(Post.where("id = 2")).to_a
     end
 
     def test_or_identity
@@ -37,6 +38,13 @@ module ActiveRecord
 
     def test_or_with_bind_params
       assert_equal Post.find([1, 2]).sort_by(&:id), Post.where(id: 1).or(Post.where(id: 2)).sort_by(&:id)
+    end
+
+    def test_or_keeps_matches_differing_only_in_escape
+      title = Post.arel_table[:title]
+      relation = Post.where(title.matches("Welcome%", "!")).or(Post.where(title.matches("Welcome%")))
+
+      assert_match(/LIKE .+ ESCAPE .+ OR .+LIKE/, relation.to_sql)
     end
 
     def test_or_with_null_both
@@ -78,15 +86,15 @@ module ActiveRecord
     end
 
     def test_or_with_unscope_where
-      expected = Post.where("id = 1 or id = 2")
+      expected = Post.where("id = 1 or id = 2").sort_by(&:id)
       partial = Post.where("id = 1 and id != 2")
-      assert_equal expected, partial.or(partial.unscope(:where).where("id = 2")).to_a
+      assert_equal expected, partial.or(partial.unscope(:where).where("id = 2")).sort_by(&:id)
     end
 
     def test_or_with_unscope_where_column
-      expected = Post.where("id = 1 or id = 2")
+      expected = Post.where("id = 1 or id = 2").sort_by(&:id)
       partial = Post.where(id: 1).where.not(id: 2)
-      assert_equal expected, partial.or(partial.unscope(where: :id).where("id = 2")).to_a
+      assert_equal expected, partial.or(partial.unscope(where: :id).where("id = 2")).sort_by(&:id)
     end
 
     def test_or_with_unscope_order
@@ -111,7 +119,7 @@ module ActiveRecord
 
     def test_or_with_named_scope
       expected = Post.where("id = 1 or body LIKE '\%a\%'").to_a
-      assert_equal expected, Post.where("id = 1").or(Post.containing_the_letter_a)
+      assert_equal_unordered expected, Post.where("id = 1").or(Post.containing_the_letter_a)
     end
 
     def test_or_inside_named_scope
@@ -129,13 +137,15 @@ module ActiveRecord
       p = Post.where("id = 1")
       p.load
       assert_equal true, p.loaded?
-      assert_equal expected, p.or(Post.where("id = 2")).to_a
+      assert_equal_unordered expected, p.or(Post.where("id = 2")).to_a
     end
 
     def test_or_with_non_relation_object_raises_error
-      assert_raises ArgumentError do
+      error = assert_raises ArgumentError do
         Post.where(id: [1, 2, 3]).or(title: "Rails")
       end
+
+      assert_equal "You have passed Hash object to #or. Pass an ActiveRecord::Relation object instead.", error.message
     end
 
     def test_or_with_references_inequality
@@ -176,16 +186,16 @@ module ActiveRecord
 
   # The maximum expression tree depth is 1000 by default for SQLite3.
   # https://www.sqlite.org/limits.html#max_expr_depth
-  unless current_adapter?(:SQLite3Adapter)
-    class TooManyOrTest < ActiveRecord::TestCase
-      fixtures :citations
+  class TooManyOrTest < ActiveRecord::TestCase
+    unless current_adapter?(:SQLite3Adapter)
+      fixtures :paragraphs
 
       def test_too_many_or
-        citations = 6000.times.map do |i|
-          Citation.where(id: i, book2_id: i * i)
+        paragraphs = 1001.times.map do |i|
+          Paragraph.where(id: i, book_id: i * i)
         end
 
-        assert_equal 6000, citations.inject(&:or).count
+        assert_equal 1001, paragraphs.inject(&:or).count
       end
     end
   end

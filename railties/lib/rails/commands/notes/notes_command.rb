@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/source_annotation_extractor"
 
 module Rails
@@ -7,8 +8,9 @@ module Rails
     class NotesCommand < Base # :nodoc:
       class_option :annotations, aliases: "-a", desc: "Filter by specific annotations, e.g. Foobar TODO", type: :array
 
+      desc "notes", "Show comments in your code annotated with FIXME, OPTIMIZE, and TODO"
       def perform(*)
-        require_application_and_environment!
+        boot_application!
 
         display_annotations
       end

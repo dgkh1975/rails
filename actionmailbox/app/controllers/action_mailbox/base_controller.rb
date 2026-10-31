@@ -3,7 +3,7 @@
 module ActionMailbox
   # The base class for all Action Mailbox ingress controllers.
   class BaseController < ActionController::Base
-    skip_forgery_protection if default_protect_from_forgery
+    skip_forgery_protection
 
     before_action :ensure_configured
 
@@ -28,7 +28,7 @@ module ActionMailbox
       end
 
       def password
-        Rails.application.credentials.dig(:action_mailbox, :ingress_password) || ENV["RAILS_INBOUND_EMAIL_PASSWORD"]
+        Rails.app.credentials.dig(:action_mailbox, :ingress_password) || ENV["RAILS_INBOUND_EMAIL_PASSWORD"]
       end
   end
 end

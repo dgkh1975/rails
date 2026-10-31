@@ -1,88 +1,256 @@
-*   Remove legacy default `media=screen` from `stylesheet_link_tag`.
+*   Treat `alpha`, `headingreset`, `shadowrootclonable`,
+    `shadowrootcustomelementregistry`, `shadowrootdelegatesfocus` and
+    `shadowrootserializable` as boolean attributes in the tag helpers.
 
-    *André Luis Leal Cardoso Junior*
+    `tag.template(shadowrootmode: "open", shadowrootdelegatesfocus: false)` used
+    to render `shadowrootdelegatesfocus="false"`, which turns the attribute on.
+    `false` and `nil` now omit these attributes, like the other boolean
+    attributes.
 
-*   Change `ActionView::Helpers::FormBuilder#button` to transform `formmethod`
-    attributes into `_method="$VERB"` Form Data to enable varied same-form actions:
+    *Wleeaf*
 
-        <%= form_with model: post, method: :put do %>
-          <%= form.button "Update" %>
-          <%= form.button "Delete", formmethod: :delete %>
-        <% end %>
-        <%# => <form action="posts/1">
-            =>   <input type="hidden" name="_method" value="put">
-            =>   <button type="submit">Update</button>
-            =>   <button type="submit" formmethod="post" name="_method" value="delete">Delete</button>
-            => </form>
-        %>
+*   Render a string or symbol value of the `hidden` attribute as is, so
+    `tag.div(hidden: "until-found")` produces `hidden="until-found"` instead of
+    `hidden="hidden"`. `true` and `false` still render `hidden="hidden"` and no
+    attribute.
+
+    *Wleeaf*
+
+*   Fix the debug page for errors raised in view templates on Ruby 4.1.
+
+    Ruby 4.1 builds prism into the interpreter as `Ruby::Prism`, and
+    error_highlight accepts only its nodes. `ActionView::Template#spot` now
+    uses `Ruby::Prism` when it is available instead of the prism gem.
+
+    *Yasuo Honda*
+
+*   Allow setting `config.action_view.erb_implementation` to `:herb` to
+    compile HTML+ERB templates through Herb.
+
+    With `config.load_defaults 8.2`, templates with the HTML format compile
+    through Herb, an ERB implementation that parses HTML+ERB and reports
+    structural problems, such as an unclosed tag, at compile time with their
+    template location. Valid templates render the same output as with Erubi.
+    All other template formats keep compiling through Erubi.
+
+    Set `config.action_view.erb_implementation` to `:erubi` to continue to
+    compile every template through Erubi.
+
+    *Marco Roth*
+
+*   Add a `herb:check` rake task to verify that the application's HTML+ERB
+    templates compile through Herb.
+
+    The task lists every template Herb rejects with its path and error, and
+    exits with a non-zero status when there are any.
+
+    *Marco Roth*
+
+*   Allow `translate`'s (and `t`'s) `scope:` option to be resolved relative to
+    the current template when it starts with a period, mirroring the existing
+    behavior for the key argument.
+
+    Calling `translate("bar", scope: ".foo")` from `posts/index.html.erb` is
+    now equivalent to calling `translate("posts.index.foo.bar")`.
+
+    *Ben Sheldon*
+
+*   Join an Array `:accept` option with commas in `file_field_tag`.
+
+    Previously, passing `accept: ["image/png", "image/gif"]` rendered
+    `accept="image/png image/gif"`, while the HTML `accept` attribute is a
+    comma-separated list. It now renders `accept="image/png,image/gif"`,
+    matching the object-based `file_field`.
+
+    *Kenta Ishizaki*
+
+*   `current_page?` matches HTTP QUERY requests
+    ([RFC 10008](https://www.rfc-editor.org/rfc/rfc10008)) with
+    `method: :query`. The default `method: :get` deliberately does not match
+    QUERY.
+
+    *Jeremy Daer*
+
+*   Configuring ERB options is now to be made on the ActionView::Base class.
+
+    The `ActionView::Template::Handlers::ERB` class is now private API. Applications
+    that used to configure ERB options such as `escape_ignore_list` now need
+    to do this on the `ActionView::Base` class or on the railtie `config.action_view`
+    configuration.
+
+    ```ruby
+    ActionView::Base.erb_trim_mode = nil
+    ActionView::Base.erb_implementation = ERB
+    ActionView::Base.escape_ignore_list = ["text/csv"]
+    ActionView::Base.strip_trailing_newlines = false
+    ```
+
+    *Edouard Chin*
+
+*   Fix `search_field` raising `NameError` when passed `autosave: true`.
+
+    *Hammad Khan*
+
+*   Deprecate registering dependency trackers after application initialization.
+
+    Calling `ActionView::DependencyTracker.register_tracker` after application initialization will
+    raise a FrozenError in the next version of Rails.
+
+    Instead, register trackers during application initialization, wrapped in a call to
+    `ActiveSupport.on_load(:action_view)` to wait until Action View is available.
+
+    *Étienne Barrié*
+
+*   Extract `current_page?`, `button_to`, and `link_to` methods to
+    `ActionView::Helpers::NavigationHelper`
 
     *Sean Doyle*
 
-*   Change `ActionView::Helpers::UrlHelper#button_to` to *always* render a
-    `<button>` element, regardless of whether or not the content is passed as
-    the first argument or as a block.
+*   Accept `Date` and `Numeric` inputs in `relative_time_in_words`.
 
-        <%= button_to "Delete", post_path(@post), method: :delete %>
-        <%# => <form action="/posts/1"><input type="hidden" name="_method" value="delete"><button type="submit">Delete</button></form>
+    Passing a `Date` or a `Numeric` raised `ArgumentError` instead of returning
+    a distance string, unlike `distance_of_time_in_words` which accepts them.
 
-        <%= button_to post_path(@post), method: :delete do %>
-          Delete
-        <% end %>
-        <%# => <form action="/posts/1"><input type="hidden" name="_method" value="delete"><button type="submit">Delete</button></form>
+    *Kenta Ishizaki*
 
-    *Sean Doyle*, *Dusan Orlovic*
+*   Support endless and beginless ranges in `number_field_tag` and
+    `range_field_tag`.
 
-*   Add `config.action_view.preload_links_header` to allow disabling of
-    the `Link` header being added by default when using `stylesheet_link_tag`
-    and `javascript_include_tag`.
+    Previously, passing an endless (`18..`) or beginless (`..10`) range as the
+    `:in`/`:within` option raised `RangeError`. Now an endless range renders
+    `min` without `max`, and a beginless range renders `max` without `min`,
+    matching `number_field` and `range_field`.
 
-    *Andrew White*
+    *Kenta Ishizaki*
 
-*   The `translate` helper now resolves `default` values when a `nil` key is
-    specified, instead of always returning `nil`.
+*   Honor an explicit `value:` option in `color_field`, including `nil`.
 
-    *Jonathan Hefner*
+    Previously, passing `value: nil` was ignored and the field still pre-filled
+    from the model's stored color. Now an explicitly provided `value:` is
+    honored, and the stored color is only used when no `value:` option is given.
 
-*   Add `config.action_view.image_loading` to configure the default value of
-    the `image_tag` `:loading` option.
+    *Kenta Ishizaki*
 
-    By setting `config.action_view.image_loading = "lazy"`, an application can opt in to
-    lazy loading images sitewide, without changing view code.
+*   Calling `safe_join` in a view no longer fallbacks to the `$,` global variable.
 
-    *Jonathan Hefner*
+    Previously, calling `safe_join` would use `$,` by default to separate elements.
+    Ruby has deprecated the usage of setting `$,` for more than 10 years and its usage
+    in `safe_join` was never documented.
 
-*   `ActionView::Helpers::FormBuilder#id` returns the value
-    of the `<form>` element's `id` attribute. With a `method` argument, returns
-    the `id` attribute for a form field with that name.
+    If your application relied on this behaviour, make sure to explicitly pass the separator
+    to `safe_join` as the default is now `nil` (no separation).
 
-        <%= form_for @post do |f| %>
-          <%# ... %>
+    *Edouard Chin*
 
-          <% content_for :sticky_footer do %>
-            <%= form.button(form: f.id) %>
-          <% end %>
-        <% end %>
+*   Fix `ActionView::TestCase#render` to reset `rendered`.
+    The behavior was changed when memoization was added in #51093. Now it once again conforms to the documentation.
+
+    *Jeroen Versteeg*
+
+*   Fix `FormBuilder#to_partial_path` returning `nil` for subclasses whose
+    name does not end in `Builder`.
+
+    *Kenta Ishizaki*
+
+*   Fix `collection_radio_buttons` and `collection_check_boxes` generating
+    a label `for` attribute that does not match the input `id` when a
+    collection value is `nil`.
+
+    *Kenta Ishizaki*
+
+*   Pass render options and block to calls to `#render_in`
+
+    ```ruby
+    class Greeting
+      def render_in(view_context, **)
+        if block_given?
+          view_context.render(html: yield)
+        else
+          view_context.render(inline: <<~ERB.strip, **)
+            Hello <%= local_assigns[:name] || "World" %>
+          ERB
+        end
+      end
+    end
+
+    render(Greeting.new)                                        # => "Hello, World"
+    render(Greeting.new, name: "Local")                         # => "Hello, Local"
+    render(renderable: Greeting.new, locals: { name: "Local" }) # => "Hello, Local"
+    render(Greeting.new) { "Hello, Block" }                     # => "Hello, Block"
+    ```
 
     *Sean Doyle*
 
-*   `ActionView::Helpers::FormBuilder#field_id` returns the value generated by
-    the FormBuilder for the given attribute name.
+*   Add `f.datalist` to `FormBuilder`
 
-        <%= form_for @post do |f| %>
-          <%= f.label :title %>
-          <%= f.text_field :title, aria: { describedby: f.field_id(:title, :error) } %>
-          <%= tag.span("is blank", id: f.field_id(:title, :error) %>
+    Example:
+
+        <%= form_with model: @post do |f| %>
+           <%# Wire the input to the datalist using the same derived id: %>
+           <%= f.text_field :country, list: f.field_id(:country, :datalist) %>
+           <%= f.datalist  :country, ["Argentina", "Brazil", "Chile"] %>
         <% end %>
 
+          Produces:
+          <input list="post_country_datalist" type="text"
+                 name="post[country]" id="post_country" />
+          <datalist id="post_country_datalist">
+            <option value="Argentina">Argentina</option>
+            <option value="Brazil">Brazil</option>
+            <option value="Chile">Chile</option>
+          </datalist>
+
+      *Tahsin Hasan*
+
+*   Add `datalist_tag` to create `datalist` form elements.
+
+    Example:
+
+        datalist_tag('countries_datalist', ['Argentina', ['Brazil', { class: 'brazilian_option' }],
+                     ['Chile', 'CL', { disabled: true }]], { class: 'sa-countries-sample' })
+        => <datalist id="countries_datalist" class="sa-countries-sample">
+             <option value="Argentina">Argentina</option>
+             <option value="Brazil" class="brazilian_option">Brazil</option>
+             <option value="CL" disabled="disabled">Chile</option>
+           </datalist>
+
+    *Willian Gustavo Veiga*
+
+*   Render `Hash` and keyword options as dasherized HTML attributes
+
+    ```ruby
+    tag.button "POST to /clicked", hx: { post: "/clicked", swap: :outerHTML, data: { json: true } }
+
+    # => <button hx-post="/clicked" hx-swap="outerHTML" hx-data="{&quot;json&quot;:true}">POST to /clicked</button>
+    ```
+
     *Sean Doyle*
 
-*   Add `tag.attributes` to transform a Hash into HTML Attributes, ready to be
-    interpolated into ERB.
+*   `ViewReloader#deactivate` removes the `file_system_resolver_hooks` callback
+    so forked processes that clear reloaders no longer trigger filesystem scans
+    on every `prepend_view_path`.
 
-        <input <%= tag.attributes(type: :text, aria: { label: "Search" }) %> >
-        # => <input type="text" aria-label="Search">
+    *Dave Ariens*
 
-    *Sean Doyle*
+*   Defer the View watcher build until view paths are actually registered.
 
+    *Hugo Vacher*
 
-Please check [6-1-stable](https://github.com/rails/rails/blob/6-1-stable/actionview/CHANGELOG.md) for previous changes.
+*   Skip blank attribute names in tag helpers to avoid generating invalid HTML.
+
+    *Mike Dalessio*
+
+*   Fix tag parameter content being overwritten instead of combined with tag block content.
+    Before `tag.div("Hello ") { "World" }` would just return `<div>World</div>`, now it returns `<div>Hello World</div>`.
+
+    *DHH*
+
+*   Add ability to pass a block when rendering collection. The block will be executed for each rendered element in the collection.
+
+    *Vincent Robert*
+
+*   Add `key:` and `expires_in:` options under `cached:` to `render` when used with `collection:`
+
+    *Jarrett Lusso*
+
+Please check [8-1-stable](https://github.com/rails/rails/blob/8-1-stable/actionview/CHANGELOG.md) for previous changes.

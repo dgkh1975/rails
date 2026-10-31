@@ -1,30 +1,39 @@
+# :markup: markdown
 # frozen_string_literal: true
 
-require "active_support/core_ext/symbol/starts_ends_with"
-
 module ActiveSupport
+  # \String Inquirer
+  # ================
+  #
   # Wrapping a string in this class gives you a prettier way to test
-  # for equality. The value returned by <tt>Rails.env</tt> is wrapped
+  # for equality. The value returned by `Rails.env` is wrapped
   # in a StringInquirer object, so instead of calling this:
   #
-  #   Rails.env == 'production'
+  # ```
+  # Rails.env == 'production'
+  # ```
   #
   # you can call this:
   #
-  #   Rails.env.production?
+  # ```
+  # Rails.env.production?
+  # ```
   #
-  # == Instantiating a new StringInquirer
+  # Instantiating a new \StringInquirer
+  # -----------------------------------
   #
-  #   vehicle = ActiveSupport::StringInquirer.new('car')
-  #   vehicle.car?   # => true
-  #   vehicle.bike?  # => false
+  # ```
+  # vehicle = ActiveSupport::StringInquirer.new('car')
+  # vehicle.car?   # => true
+  # vehicle.bike?  # => false
+  # ```
   class StringInquirer < String
     private
       def respond_to_missing?(method_name, include_private = false)
         method_name.end_with?("?") || super
       end
 
-      def method_missing(method_name, *arguments)
+      def method_missing(method_name, ...)
         if method_name.end_with?("?")
           self == method_name[0..-2]
         else

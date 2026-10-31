@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+# :markup: rdoc
+
 module ActionMailbox
   # Ingests inbound emails from Mailgun. Requires the following parameters:
   #
@@ -37,22 +39,46 @@ module ActionMailbox
   #        # config/environments/production.rb
   #        config.action_mailbox.ingress = :mailgun
   #
-  # 3. {Configure Mailgun}[https://documentation.mailgun.com/en/latest/user_manual.html#receiving-forwarding-and-storing-messages]
+  # 3. {Configure Mailgun}[https://documentation.mailgun.com/docs/mailgun/user-manual/receive-forward-store/receive-http]
   #    to forward inbound emails to +/rails/action_mailbox/mailgun/inbound_emails/mime+.
   #
   #    If your application lived at <tt>https://example.com</tt>, you would specify the fully-qualified URL
   #    <tt>https://example.com/rails/action_mailbox/mailgun/inbound_emails/mime</tt>.
   class Ingresses::Mailgun::InboundEmailsController < ActionMailbox::BaseController
     before_action :authenticate
+    param_encoding :create, "body-mime", Encoding::ASCII_8BIT
 
     def create
       ActionMailbox::InboundEmail.create_and_extract_message_id! mail
+    rescue MalformedEmailError, MalformedRecipientError => error
+      logger.error error.message
+      head ActionDispatch::Constants::UNPROCESSABLE_CONTENT
     end
 
     private
+      class MalformedEmailError < StandardError
+        def initialize(message = "Malformed Mailgun raw email")
+          super
+        end
+      end
+
+      class MalformedRecipientError < StandardError
+        def initialize(message = "Malformed Mailgun recipient")
+          super
+        end
+      end
+
       def mail
         params.require("body-mime").tap do |raw_email|
-          raw_email.prepend("X-Original-To: ", params.require(:recipient), "\n") if params.key?(:recipient)
+          raise MalformedEmailError unless raw_email.is_a?(String)
+
+          raw_email.prepend("X-Original-To: ", recipient, "\n") if params.key?(:recipient)
+        end
+      end
+
+      def recipient
+        params.require(:recipient).tap do |recipient|
+          raise MalformedRecipientError unless recipient.is_a?(String)
         end
       end
 
@@ -77,28 +103,15 @@ module ActionMailbox
       end
 
       def key
-        if Rails.application.credentials.dig(:action_mailbox, :mailgun_api_key)
-          ActiveSupport::Deprecation.warn(<<-MSG.squish)
-            Rails.application.credentials.action_mailbox.api_key is deprecated and will be ignored in Rails 7.0.
-            Use Rails.application.credentials.action_mailbox.signing_key instead.
-          MSG
-          Rails.application.credentials.dig(:action_mailbox, :mailgun_api_key)
-        elsif ENV["MAILGUN_INGRESS_API_KEY"]
-          ActiveSupport::Deprecation.warn(<<-MSG.squish)
-            The MAILGUN_INGRESS_API_KEY environment variable is deprecated and will be ignored in Rails 7.0.
-            Use MAILGUN_INGRESS_SIGNING_KEY instead.
-          MSG
-          ENV["MAILGUN_INGRESS_API_KEY"]
-        else
-          Rails.application.credentials.dig(:action_mailbox, :mailgun_signing_key) || ENV["MAILGUN_INGRESS_SIGNING_KEY"]
-        end
+        Rails.app.credentials.dig(:action_mailbox, :mailgun_signing_key) || ENV["MAILGUN_INGRESS_SIGNING_KEY"]
       end
 
       class Authenticator
         attr_reader :key, :timestamp, :token, :signature
 
         def initialize(key:, timestamp:, token:, signature:)
-          @key, @timestamp, @token, @signature = key, Integer(timestamp), token, signature
+          @key, @timestamp, @token, @signature = key, timestamp.to_s, token, signature
+          @parsed_timestamp = Integer(timestamp, exception: false)
         end
 
         def authenticated?
@@ -107,12 +120,12 @@ module ActionMailbox
 
         private
           def signed?
-            ActiveSupport::SecurityUtils.secure_compare signature, expected_signature
+            signature.is_a?(String) && ActiveSupport::SecurityUtils.secure_compare(signature, expected_signature)
           end
 
           # Allow for 2 minutes of drift between Mailgun time and local server time.
           def recent?
-            Time.at(timestamp) >= 2.minutes.ago
+            @parsed_timestamp && Time.at(@parsed_timestamp) >= 2.minutes.ago
           end
 
           def expected_signature

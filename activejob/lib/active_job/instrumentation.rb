@@ -1,7 +1,20 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveJob
-  module Instrumentation #:nodoc:
+  class << self
+    private
+      def instrument_enqueue_all(queue_adapter, jobs)
+        payload = { adapter: queue_adapter, jobs: jobs }
+        ActiveSupport::Notifications.instrument("enqueue_all.active_job", payload) do
+          result = yield payload
+          payload[:enqueued_count] = result
+          result
+        end
+      end
+  end
+
+  module Instrumentation # :nodoc:
     extend ActiveSupport::Concern
 
     included do
@@ -14,26 +27,22 @@ module ActiveJob
       instrument(:perform) { super }
     end
 
+    def instrument(operation, payload = {}, &block) # :nodoc:
+      payload[:job] = self
+      payload[:adapter] = queue_adapter
+
+      ActiveSupport::Notifications.instrument("#{operation}.active_job", payload) do |payload|
+        value = block.call(payload) if block
+        payload[:aborted] = true if @_halted_callback_hook_called
+        @_halted_callback_hook_called = nil
+        value
+      end
+    end
+
     private
       def _perform_job
         instrument(:perform_start)
         super
-      end
-
-      def instrument(operation, payload = {}, &block)
-        enhanced_block = ->(event_payload) do
-          value = block.call if block
-
-          if defined?(@_halted_callback_hook_called) && @_halted_callback_hook_called
-            event_payload[:aborted] = true
-            @_halted_callback_hook_called = nil
-          end
-
-          value
-        end
-
-        ActiveSupport::Notifications.instrument \
-          "#{operation}.active_job", payload.merge(adapter: queue_adapter, job: self), &enhanced_block
       end
 
       def halted_callback_hook(*)

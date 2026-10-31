@@ -5,8 +5,8 @@ module ActionView
     module Tags # :nodoc:
       class WeekField < DatetimeField # :nodoc:
         private
-          def format_date(value)
-            value&.strftime("%Y-W%V")
+          def format_datetime(value)
+            value&.strftime("%G-W%V")
           end
       end
     end

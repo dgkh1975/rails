@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   class Migration
     module Compatibility # :nodoc: all
@@ -13,64 +14,211 @@ module ActiveRecord
         const_get(name)
       end
 
-      V7_0 = Current
-
-      class V6_1 < V7_0
+      def self.version_classes
+        @version_classes ||= constants.grep(/\AV\d+_\d+\z/).map { |name| const_get(name) }
       end
 
-      class V6_0 < V6_1
-        class ReferenceDefinition < ConnectionAdapters::ReferenceDefinition
-          def index_options(table_name)
-            as_options(index)
+      # This file exists to ensure that old migrations run the same way they did before a Rails upgrade.
+      # e.g. if you write a migration on Rails 6.1, then upgrade to Rails 7, the migration should do the same thing to your
+      # database as it did when you were running Rails 6.1
+      #
+      # "Current" is an alias for \`ActiveRecord::Migration\`, it represents the current Rails version.
+      # New migration functionality that will never be backward compatible should be added directly to \`ActiveRecord::Migration\`.
+      #
+      # There are classes for each prior Rails version. Each class descends from the **next** Rails version, so:
+      # 5.2 < 6.0 < 6.1 < 7.0 < 7.1 < 7.2 < 8.0 < 8.1 < 8.2
+      #
+      # If you are introducing new migration functionality that should only apply from Rails 7 onward, then you should
+      # find the class that immediately precedes it (6.1), and override the relevant migration methods to undo your changes.
+      #
+      # For example, Rails 6 added a default value for the \`precision\` option on datetime columns. So in this file, the \`V5_2\`
+      # class sets the value of \`precision\` to \`nil\` if it's not explicitly provided. This way, the default value will not apply
+      # for migrations written for 5.2, but will for migrations written for 6.0.
+      V8_2 = Current
+
+      class V8_1 < V8_2
+      end
+
+      class V8_0 < V8_1
+        module RemoveForeignKeyColumnMatch
+          def remove_foreign_key(*args, **options)
+            options[:_skip_column_match] = true
+            super
           end
         end
 
         module TableDefinition
-          def references(*args, **options)
-            args.each do |ref_name|
-              ReferenceDefinition.new(ref_name, **options).add_to(self)
+          def remove_foreign_key(to_table = nil, **options)
+            options[:_skip_column_match] = true
+            super
+          end
+        end
+
+        include RemoveForeignKeyColumnMatch
+      end
+
+      class V7_2 < V8_0
+      end
+
+      class V7_1 < V7_2
+      end
+
+      class V7_0 < V7_1
+        module LegacyIndexName
+          private
+            def legacy_index_name(table_name, options)
+              if Hash === options
+                if options[:column]
+                  "index_#{table_name}_on_#{Array(options[:column]) * '_and_'}"
+                elsif options[:name]
+                  options[:name]
+                else
+                  raise ArgumentError, "You must specify the index name"
+                end
+              else
+                legacy_index_name(table_name, index_name_options(options))
+              end
             end
-          end
-          alias :belongs_to :references
+
+            def index_name_options(column_names)
+              if expression_column_name?(column_names)
+                column_names = column_names.scan(/\w+/).join("_")
+              end
+
+              { column: column_names }
+            end
+
+            def expression_column_name?(column_name)
+              column_name.is_a?(String) && /\W/.match?(column_name)
+            end
         end
 
-        def create_table(table_name, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
+        module TableDefinition
+          include LegacyIndexName
+
+          def column(name, type, **options)
+            options[:_skip_validate_options] = true
             super
           end
+
+          def change(name, type, **options)
+            options[:_skip_validate_options] = true
+            super
+          end
+
+          def index(column_name, **options)
+            options[:name] = legacy_index_name(name, column_name) if options[:name].nil?
+            super
+          end
+
+          def references(*args, **options)
+            options[:_skip_validate_options] = true
+            super
+          end
+
+          private
+            def raise_on_if_exist_options(options)
+            end
         end
 
-        def change_table(table_name, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
-            super
-          end
+        include LegacyIndexName
+
+        def add_column(table_name, column_name, type, **options)
+          options[:_skip_validate_options] = true
+          super
         end
 
-        def create_join_table(table_1, table_2, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
-            super
-          end
+        def add_index(table_name, column_name, **options)
+          options[:name] = legacy_index_name(table_name, column_name) if options[:name].nil?
+          super
         end
 
         def add_reference(table_name, ref_name, **options)
-          ReferenceDefinition.new(ref_name, **options)
-            .add_to(connection.update_table_definition(table_name, self))
+          options[:_skip_validate_options] = true
+          super
         end
         alias :add_belongs_to :add_reference
 
-        private
-          def compatible_table_definition(t)
-            class << t
-              prepend TableDefinition
-            end
-            t
+        def create_table(table_name, **options)
+          options[:_uses_legacy_table_name] = true
+          options[:_skip_validate_options] = true
+
+          super
+        end
+
+        def rename_table(table_name, new_name, **options)
+          options[:_uses_legacy_table_name] = true
+          options[:_uses_legacy_index_name] = true
+          super
+        end
+
+        def change_column(table_name, column_name, type, **options)
+          options[:_skip_validate_options] = true
+          super
+        end
+
+        def change_column_null(table_name, column_name, null, default = nil)
+          super(table_name, column_name, !!null, default)
+        end
+      end
+
+      class V6_1 < V7_0
+        def add_column(table_name, column_name, type, **options)
+          if type == :datetime
+            options[:precision] ||= nil
           end
+
+          super
+        end
+
+        def change_column(table_name, column_name, type, **options)
+          if type == :datetime
+            options[:precision] ||= nil
+          end
+
+          super
+        end
+
+        module TableDefinition
+          def change(name, type, index: nil, **options)
+            options[:precision] ||= nil
+            super
+          end
+
+          def column(name, type, index: nil, **options)
+            options[:precision] ||= nil
+            super
+          end
+
+          private
+            def raise_on_if_exist_options(options)
+            end
+        end
+      end
+
+      class V6_0 < V6_1
+        module TableDefinition
+          def references(*args, **options)
+            options[:_uses_legacy_reference_index_name] = true
+            super
+          end
+          alias :belongs_to :references
+
+          def column(name, type, index: nil, **options)
+            options[:precision] ||= nil
+            super
+          end
+
+          private
+            def raise_on_if_exist_options(options)
+            end
+        end
+
+        def add_reference(table_name, ref_name, **options)
+          options[:_uses_legacy_reference_index_name] = true
+          super
+        end
+        alias :add_belongs_to :add_reference
       end
 
       class V5_2 < V6_0
@@ -79,43 +227,31 @@ module ActiveRecord
             options[:precision] ||= nil
             super
           end
+
+          def column(name, type, index: nil, **options)
+            options[:precision] ||= nil
+            super
+          end
+
+          private
+            def raise_on_if_exist_options(options)
+            end
+
+            def raise_on_duplicate_column(name)
+            end
         end
 
         module CommandRecorder
-          def invert_transaction(args, &block)
-            [:transaction, args, block]
+          def invert_transaction(args, kwargs, &block)
+            [:transaction, args, kwargs, block]
           end
 
-          def invert_change_column_comment(args)
-            [:change_column_comment, args]
+          def invert_change_column_comment(args, kwargs)
+            [:change_column_comment, args, kwargs]
           end
 
-          def invert_change_table_comment(args)
-            [:change_table_comment, args]
-          end
-        end
-
-        def create_table(table_name, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
-            super
-          end
-        end
-
-        def change_table(table_name, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
-            super
-          end
-        end
-
-        def create_join_table(table_1, table_2, **options)
-          if block_given?
-            super { |t| yield compatible_table_definition(t) }
-          else
-            super
+          def invert_change_table_comment(args, kwargs)
+            [:change_table_comment, args, kwargs]
           end
         end
 
@@ -125,41 +261,14 @@ module ActiveRecord
         end
 
         private
-          def compatible_table_definition(t)
-            class << t
-              prepend TableDefinition
-            end
-            t
-          end
-
           def command_recorder
             recorder = super
-            class << recorder
-              prepend CommandRecorder
-            end
+            recorder.singleton_class.prepend(CommandRecorder)
             recorder
           end
       end
 
       class V5_1 < V5_2
-        def change_column(table_name, column_name, type, **options)
-          if connection.adapter_name == "PostgreSQL"
-            super(table_name, column_name, type, **options.except(:default, :null, :comment))
-            connection.change_column_default(table_name, column_name, options[:default]) if options.key?(:default)
-            connection.change_column_null(table_name, column_name, options[:null], options[:default]) if options.key?(:null)
-            connection.change_column_comment(table_name, column_name, options[:comment]) if options.key?(:comment)
-          else
-            super
-          end
-        end
-
-        def create_table(table_name, **options)
-          if connection.adapter_name == "Mysql2"
-            super(table_name, options: "ENGINE=InnoDB", **options)
-          else
-            super
-          end
-        end
       end
 
       class V5_0 < V5_1
@@ -173,19 +282,18 @@ module ActiveRecord
             super(*args, type: :integer, **options)
           end
           alias :belongs_to :references
+
+          private
+            def raise_on_if_exist_options(options)
+            end
         end
 
         def create_table(table_name, **options)
-          if connection.adapter_name == "PostgreSQL"
-            if options[:id] == :uuid && !options.key?(:default)
-              options[:default] = "uuid_generate_v4()"
-            end
-          end
-
-          unless connection.adapter_name == "Mysql2" && options[:id] == :bigint
-            if [:integer, :bigint].include?(options[:id]) && !options.key?(:default)
-              options[:default] = nil
-            end
+          # Since 5.1 an integer-like primary key is autoincrement unless it has
+          # an explicit default. Setting one keeps it the plain integer column it
+          # was before 5.1.
+          if !options.key?(:default) && connection.inject_legacy_primary_key_default?(options[:id])
+            options[:default] = nil
           end
 
           # Since 5.1 PostgreSQL adapter uses bigserial type for primary
@@ -207,6 +315,8 @@ module ActiveRecord
           if type == :primary_key
             type = :integer
             options[:primary_key] = true
+          elsif type == :datetime
+            options[:precision] ||= nil
           end
           super
         end
@@ -215,14 +325,6 @@ module ActiveRecord
           super(table_name, ref_name, type: :integer, **options)
         end
         alias :add_belongs_to :add_reference
-
-        private
-          def compatible_table_definition(t)
-            class << t
-              prepend TableDefinition
-            end
-            super
-          end
       end
 
       class V4_2 < V5_0
@@ -237,6 +339,10 @@ module ActiveRecord
             options[:null] = true if options[:null].nil?
             super
           end
+
+          private
+            def raise_on_if_exist_options(options)
+            end
         end
 
         def add_reference(table_name, ref_name, **options)
@@ -250,30 +356,23 @@ module ActiveRecord
           super
         end
 
-        def index_exists?(table_name, column_name, **options)
+        def index_exists?(table_name, column_name = nil, **options)
           column_names = Array(column_name).map(&:to_s)
           options[:name] =
             if options[:name].present?
               options[:name].to_s
             else
-              connection.index_name(table_name, column: column_names)
+              connection.index_name(proper_table_name(table_name, table_name_options), column: column_names)
             end
           super
         end
 
         def remove_index(table_name, column_name = nil, **options)
-          options[:name] = index_name_for_remove(table_name, column_name, options)
+          options[:name] = index_name_for_remove(proper_table_name(table_name, table_name_options), column_name, options)
           super
         end
 
         private
-          def compatible_table_definition(t)
-            class << t
-              prepend TableDefinition
-            end
-            super
-          end
-
           def index_name_for_remove(table_name, column_name, options)
             index_name = connection.index_name(table_name, column_name || options)
 

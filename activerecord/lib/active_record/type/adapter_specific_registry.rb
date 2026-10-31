@@ -1,19 +1,39 @@
 # frozen_string_literal: true
 
-require "active_model/type/registry"
-
+# :markup: markdown
 module ActiveRecord
   # :stopdoc:
   module Type
-    class AdapterSpecificRegistry < ActiveModel::Type::Registry
+    class AdapterSpecificRegistry # :nodoc:
+      def initialize
+        @registrations = []
+      end
+
+      def initialize_copy(other)
+        @registrations = @registrations.dup
+      end
+
       def add_modifier(options, klass, **args)
         registrations << DecorationRegistration.new(options, klass, **args)
       end
 
-      private
-        def registration_klass
-          Registration
+      def register(type_name, klass = nil, **options, &block)
+        block ||= proc { |_, *args, **kwargs| klass.new(*args, **kwargs) }
+        registrations << Registration.new(type_name, block, **options)
+      end
+
+      def lookup(symbol, *args, **kwargs)
+        registration = find_registration(symbol, *args, **kwargs)
+
+        if registration
+          registration.call(self, symbol, *args, **kwargs)
+        else
+          raise ArgumentError, "Unknown type #{symbol.inspect}"
         end
+      end
+
+      private
+        attr_reader :registrations
 
         def find_registration(symbol, *args, **kwargs)
           registrations
@@ -22,7 +42,7 @@ module ActiveRecord
         end
     end
 
-    class Registration
+    class Registration # :nodoc:
       def initialize(name, block, adapter: nil, override: nil)
         @name = name
         @block = block
@@ -31,11 +51,7 @@ module ActiveRecord
       end
 
       def call(_registry, *args, adapter: nil, **kwargs)
-        if kwargs.any? # https://bugs.ruby-lang.org/issues/10856
-          block.call(*args, **kwargs)
-        else
-          block.call(*args)
-        end
+        block.call(*args, **kwargs)
       end
 
       def matches?(type_name, *args, **kwargs)
@@ -89,7 +105,7 @@ module ActiveRecord
         end
     end
 
-    class DecorationRegistration < Registration
+    class DecorationRegistration < Registration # :nodoc:
       def initialize(options, klass, adapter: nil)
         @options = options
         @klass = klass
@@ -120,7 +136,7 @@ module ActiveRecord
     end
   end
 
-  class TypeConflictError < StandardError
+  class TypeConflictError < StandardError # :nodoc:
   end
   # :startdoc:
 end

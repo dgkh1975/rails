@@ -27,9 +27,7 @@ end
 class ActionMailerI18nWithControllerTest < ActionDispatch::IntegrationTest
   Routes = ActionDispatch::Routing::RouteSet.new
   Routes.draw do
-    ActiveSupport::Deprecation.silence do
-      get ":controller(/:action(/:id))"
-    end
+    get "test/send_mail", to: "test#send_mail"
   end
 
   class RoutedRackApp

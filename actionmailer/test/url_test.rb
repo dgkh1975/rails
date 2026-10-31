@@ -18,7 +18,9 @@ end
 class UrlTestMailer < ActionMailer::Base
   include AppRoutes.url_helpers
 
-  default_url_options[:host] = "www.basecamphq.com"
+  def default_url_options
+    { host: "www.basecamphq.com" }
+  end
 
   configure do |c|
     c.assets_dir = "" # To get the tests to pass
@@ -41,7 +43,7 @@ end
 class ActionMailerUrlTest < ActionMailer::TestCase
   class DummyModel
     def self.model_name
-      OpenStruct.new(route_key: "dummy_model")
+      Struct.new(:route_key, :name).new("dummy_model", nil)
     end
 
     def persisted?

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   module Validations
     class AbsenceValidator < ActiveModel::Validations::AbsenceValidator # :nodoc:
@@ -14,7 +15,7 @@ module ActiveRecord
     module ClassMethods
       # Validates that the specified attributes are not present (as defined by
       # Object#present?). If the attribute is an association, the associated object
-      # is considered absent if it was marked for destruction.
+      # is also considered not present if it is marked for destruction.
       #
       # See ActiveModel::Validations::HelperMethods.validates_absence_of for more information.
       def validates_absence_of(*attr_names)

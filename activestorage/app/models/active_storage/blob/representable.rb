@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
-require "mimemagic"
+# :markup: rdoc
+
+require "marcel"
 
 module ActiveStorage::Blob::Representable
   extend ActiveSupport::Concern
@@ -12,8 +14,8 @@ module ActiveStorage::Blob::Representable
     has_one_attached :preview_image
   end
 
-  # Returns an ActiveStorage::Variant instance with the set of +transformations+ provided. This is only relevant for image
-  # files, and it allows any image to be transformed for size, colors, and the like. Example:
+  # Returns an ActiveStorage::Variant or ActiveStorage::VariantWithRecord instance with the set of +transformations+ provided.
+  # This is only relevant for image files, and it allows any image to be transformed for size, colors, and the like. Example:
   #
   #   avatar.variant(resize_to_limit: [100, 100]).processed.url
   #
@@ -25,20 +27,88 @@ module ActiveStorage::Blob::Representable
   #
   #   <%= image_tag Current.user.avatar.variant(resize_to_limit: [100, 100]) %>
   #
-  # This will create a URL for that specific blob with that specific variant, which the ActiveStorage::RepresentationsController
-  # can then produce on-demand.
+  # This will create a URL for that specific blob with that specific variant, which the ActiveStorage::Representations::ProxyController
+  # or ActiveStorage::Representations::RedirectController can then produce on-demand.
   #
-  # Raises ActiveStorage::InvariableError if ImageMagick cannot transform the blob. To determine whether a blob is
-  # variable, call ActiveStorage::Blob#variable?.
+  # Raises ActiveStorage::InvariableError if the variant processor cannot
+  # transform the blob. To determine whether a blob is variable, call
+  # ActiveStorage::Blob#variable?.
+  #
+  # ==== Options
+  #
+  # Options are defined by the {image_processing gem}[https://github.com/janko/image_processing],
+  # and depend on which variant processor you are using:
+  # {Vips}[https://github.com/janko/image_processing/blob/master/doc/vips.md] or
+  # {MiniMagick}[https://github.com/janko/image_processing/blob/master/doc/minimagick.md].
+  # However, both variant processors support the following options:
+  #
+  # [+:resize_to_limit+]
+  #   Downsizes the image to fit within the specified dimensions while retaining
+  #   the original aspect ratio. Will only resize the image if it's larger than
+  #   the specified dimensions.
+  #
+  #       user.avatar.variant(resize_to_limit: [100, 100])
+  #
+  # [+:resize_to_fit+]
+  #   Resizes the image to fit within the specified dimensions while retaining
+  #   the original aspect ratio. Will downsize the image if it's larger than the
+  #   specified dimensions or upsize if it's smaller.
+  #
+  #       user.avatar.variant(resize_to_fit: [100, 100])
+  #
+  # [+:resize_to_fill+]
+  #   Resizes the image to fill the specified dimensions while retaining the
+  #   original aspect ratio. If necessary, will crop the image in the larger
+  #   dimension.
+  #
+  #       user.avatar.variant(resize_to_fill: [100, 100])
+  #
+  # [+:resize_and_pad+]
+  #   Resizes the image to fit within the specified dimensions while retaining
+  #   the original aspect ratio. If necessary, will pad the remaining area with
+  #   transparent color if source image has alpha channel, black otherwise.
+  #
+  #       user.avatar.variant(resize_and_pad: [100, 100])
+  #
+  # [+:crop+]
+  #   Extracts an area from an image. The first two arguments are the left and
+  #   top edges of area to extract, while the last two arguments are the width
+  #   and height of the area to extract.
+  #
+  #       user.avatar.variant(crop: [20, 50, 300, 300])
+  #
+  # [+:rotate+]
+  #   Rotates the image by the specified angle.
+  #
+  #       user.avatar.variant(rotate: 90)
+  #
+  # Some options, including those listed above, can accept additional
+  # processor-specific values which can be passed as a trailing hash:
+  #
+  #     <!-- Vips supports configuring `crop` for many of its transformations -->
+  #     <%= image_tag user.avatar.variant(resize_to_fill: [100, 100, { crop: :centre }]) %>
+  #
+  # If migrating an existing application between MiniMagick and Vips, you will
+  # need to update processor-specific options:
+  #
+  #     <!-- MiniMagick -->
+  #     <%= image_tag user.avatar.variant(resize_to_limit: [100, 100], format: :jpeg,
+  #           sampling_factor: "4:2:0", strip: true, interlace: "JPEG", colorspace: "sRGB", quality: 80) %>
+  #
+  #     <!-- Vips -->
+  #     <%= image_tag user.avatar.variant(resize_to_limit: [100, 100], format: :jpeg,
+  #           saver: { subsample_mode: "on", strip: true, interlace: true, quality: 80 }) %>
+  #
   def variant(transformations)
     if variable?
       variant_class.new(self, ActiveStorage::Variation.wrap(transformations).default_to(default_variant_transformations))
     else
-      raise ActiveStorage::InvariableError
+      raise ActiveStorage::InvariableError, "Can't transform blob with ID=#{id} and content_type=#{content_type}"
     end
   end
 
-  # Returns true if ImageMagick can transform the blob (its content type is in +ActiveStorage.variable_content_types+).
+  # Returns true if the variant processor can transform the blob (its content
+  # type is in +ActiveStorage.variable_content_types+).
   def variable?
     ActiveStorage.variable_content_types.include?(content_type)
   end
@@ -62,7 +132,7 @@ module ActiveStorage::Blob::Representable
     if previewable?
       ActiveStorage::Preview.new(self, transformations)
     else
-      raise ActiveStorage::UnpreviewableError
+      raise ActiveStorage::UnpreviewableError, "No previewer found for blob with ID=#{id} and content_type=#{content_type}"
     end
   end
 
@@ -87,7 +157,7 @@ module ActiveStorage::Blob::Representable
     when variable?
       variant transformations
     else
-      raise ActiveStorage::UnrepresentableError
+      raise ActiveStorage::UnrepresentableError, "No previewer found and can't transform blob with ID=#{id} and content_type=#{content_type}"
     end
   end
 
@@ -110,10 +180,10 @@ module ActiveStorage::Blob::Representable
     end
 
     def format
-      if filename.extension.present? && MimeMagic.by_extension(filename.extension)&.to_s == content_type
+      if filename.extension.present? && Marcel::MimeType.for(extension: filename.extension) == content_type
         filename.extension
       else
-        MimeMagic.new(content_type).extensions.first
+        Marcel::Magic.new(content_type.to_s).extensions.first
       end
     end
 

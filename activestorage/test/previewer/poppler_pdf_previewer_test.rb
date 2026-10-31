@@ -31,4 +31,25 @@ class ActiveStorage::Previewer::PopplerPDFPreviewerTest < ActiveSupport::TestCas
       assert_equal 145, image.height
     end
   end
+
+  test "previewing an Illustrator document that's a PDF subtype" do
+    blob = create_file_blob(fixture: "report.pdf", filename: "file.ai", content_type: "application/illustrator")
+
+    ActiveStorage::Previewer::PopplerPDFPreviewer.new(blob).preview do |attachable|
+      assert_equal "image/png", attachable[:content_type]
+      assert_equal "file.png", attachable[:filename]
+
+      image = MiniMagick::Image.read(attachable[:io])
+      assert_equal 612, image.width
+      assert_equal 792, image.height
+    end
+  end
+
+  test "previewing a PDF that can't be previewed" do
+    blob = create_file_blob(filename: "video.mp4", content_type: "application/pdf")
+
+    assert_raises ActiveStorage::PreviewError do
+      ActiveStorage::Previewer::PopplerPDFPreviewer.new(blob).preview
+    end
+  end
 end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "active_support/core_ext/object/with"
 require "active_support/log_subscriber/test_helper"
 
 class RespondToController < ActionController::Base
@@ -335,6 +336,7 @@ class RespondToControllerTest < ActionController::TestCase
     Mime::Type.register("text/x-mobile", :mobile)
     Mime::Type.register("application/fancy-xml", :fancy_xml)
     Mime::Type.register("text/html; fragment", :html_fragment)
+    ActionView::LookupContext::DetailsKey.clear
   end
 
   def teardown
@@ -343,6 +345,7 @@ class RespondToControllerTest < ActionController::TestCase
     Mime::Type.unregister(:mobile)
     Mime::Type.unregister(:fancy_xml)
     Mime::Type.unregister(:html_fragment)
+    ActionView::LookupContext::DetailsKey.clear
   end
 
   def test_html_fragment
@@ -604,6 +607,15 @@ class RespondToControllerTest < ActionController::TestCase
     @request.accept = "application/json, application/xml, */*"
     get :json_xml_or_html
     assert_equal "HTML", @response.body
+
+    ActionDispatch::Request.with(strict_accept_header: true) do
+      get :json_xml_or_html
+      assert_equal "JSON", @response.body
+
+      @request.accept = "application/xml, */*"
+      get :json_xml_or_html
+      assert_equal "XML", @response.body
+    end
   end
 
   def test_handle_any_with_template

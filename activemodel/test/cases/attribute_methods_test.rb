@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "cases/helper"
+require "active_support/testing/ractors_assertions"
 
 class ModelWithAttributes
   include ActiveModel::AttributeMethods
@@ -101,13 +102,22 @@ class ModelWithoutAttributesMethod
 end
 
 class AttributeMethodsTest < ActiveModel::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   test "method missing works correctly even if attributes method is not defined" do
     assert_raises(NoMethodError) { ModelWithoutAttributesMethod.new.foo }
   end
 
   test "unrelated classes should not share attribute method matchers" do
-    assert_not_equal ModelWithAttributes.public_send(:attribute_method_matchers),
-                     ModelWithAttributes2.public_send(:attribute_method_matchers)
+    assert_not_equal ModelWithAttributes.public_send(:attribute_method_patterns),
+                     ModelWithAttributes2.public_send(:attribute_method_patterns)
+  end
+
+  test "attribute method patterns are enumerable and respond to map" do
+    patterns = ModelWithAttributes2.attribute_method_patterns
+
+    assert_kind_of Enumerable, patterns
+    assert_equal ["foo", "foo_test", "foo_kw"], patterns.map { |pattern| pattern.method_name("foo") }
   end
 
   test "#define_attribute_method generates attribute method" do
@@ -117,6 +127,34 @@ class AttributeMethodsTest < ActiveModel::TestCase
     assert_equal "value of foo", ModelWithAttributes.new.foo
   ensure
     ModelWithAttributes.undefine_attribute_methods
+  end
+
+  test "#define_attribute_methods defines alias attribute methods after undefining" do
+    topic_class = Class.new do
+      include ActiveModel::AttributeMethods
+      define_attribute_methods :title
+      alias_attribute :aliased_title_to_be_redefined, :title
+
+      def attributes
+        { title: "Active Model Topic" }
+      end
+
+      private
+        def attribute(name)
+          attributes[name.to_sym]
+        end
+    end
+
+    topic = topic_class.new
+    assert_equal("Active Model Topic", topic.aliased_title_to_be_redefined)
+    topic_class.undefine_attribute_methods
+
+    assert_not_respond_to topic, :aliased_title_to_be_redefined
+
+    topic_class.define_attribute_methods :title
+
+    assert_respond_to topic, :aliased_title_to_be_redefined
+    assert_equal "Active Model Topic", topic.aliased_title_to_be_redefined
   end
 
   test "#define_attribute_method does not generate attribute method if already defined in attribute module" do
@@ -178,6 +216,18 @@ class AttributeMethodsTest < ActiveModel::TestCase
     assert_equal({ "bar" => "foo" }, klass.attribute_aliases)
   end
 
+  test "#alias_attribute is idempotent when called multiple times with the same arguments" do
+    klass = Class.new(ModelWithAttributes) do
+      define_attribute_methods :foo
+      alias_attribute :bar, :foo
+      alias_attribute :bar, :foo
+      alias_attribute :bar, :foo
+    end
+
+    assert_equal({ "bar" => "foo" }, klass.attribute_aliases)
+    assert_equal ["bar"], klass.send(:aliases_by_attribute_name)["foo"]
+  end
+
   test "#define_attribute_methods generates attribute methods with spaces in their names" do
     ModelWithAttributesWithSpaces.define_attribute_methods(:'foo bar')
 
@@ -213,6 +263,30 @@ class AttributeMethodsTest < ActiveModel::TestCase
 
     assert_not_respond_to ModelWithAttributes.new, :foo
     assert_raises(NoMethodError) { ModelWithAttributes.new.foo }
+  end
+
+  test "#undefine_attribute_methods undefines alias attribute methods" do
+    topic_class = Class.new do
+      include ActiveModel::AttributeMethods
+      define_attribute_methods :title
+      alias_attribute :subject_to_be_undefined, :title
+
+      def attributes
+        { title: "Active Model Topic" }
+      end
+
+      private
+        def attribute(name)
+          attributes[name.to_sym]
+        end
+    end
+
+    assert_equal("Active Model Topic", topic_class.new.subject_to_be_undefined)
+    topic_class.undefine_attribute_methods
+
+    assert_raises(NoMethodError, match: /undefined method [`']subject_to_be_undefined'/) do
+      topic_class.new.subject_to_be_undefined
+    end
   end
 
   test "accessing a suffixed attribute" do
@@ -286,6 +360,103 @@ class AttributeMethodsTest < ActiveModel::TestCase
     match = m.foo_test
 
     assert_equal "foo",            match.attr_name
-    assert_equal "attribute_test", match.target
+    assert_equal "attribute_test", match.proxy_target
+  end
+
+  module NameClash
+    class Model1
+      include ActiveModel::AttributeMethods
+      attribute_method_suffix "_changed?"
+      define_attribute_methods :x
+      attr_accessor :x
+
+      private
+        def attribute_changed?(name)
+          :model_1
+        end
+    end
+
+    class Model2
+      include ActiveModel::AttributeMethods
+      attribute_method_suffix "?"
+      define_attribute_methods :x_changed
+      attr_accessor :x_changed
+
+      private
+        def attribute?(name)
+          :model_2
+        end
+    end
+  end
+
+  test "name clashes are handled" do
+    assert_equal :model_1, NameClash::Model1.new.x_changed?
+    assert_equal :model_2, NameClash::Model2.new.x_changed?
+  end
+
+  test "alias attribute respects user defined method" do
+    model = Class.new do
+      include ActiveModel::AttributeMethods
+
+      attr_accessor :name
+      define_attribute_methods :name
+
+      alias_attribute :nickname, :name
+
+      def initialize(name)
+        @name = name
+      end
+    end
+
+    instance = model.new("George")
+    assert_equal "George", instance.name
+    assert_equal "George", instance.nickname
+  end
+
+  test "alias attribute respects user defined method in parent classes" do
+    model = Class.new do
+      include ActiveModel::AttributeMethods
+
+      attr_accessor :name
+      define_attribute_methods :name
+
+      def initialize(name)
+        @name = name
+      end
+    end
+
+    subclass = Class.new(model) do
+      alias_attribute :nickname, :name
+    end
+
+    instance = subclass.new("George")
+    assert_equal "George", instance.name
+    assert_equal "George", instance.nickname
+  end
+
+  test "alias attributes are ractor safe" do
+    model = Class.new do
+      include ActiveModel::AttributeMethods
+
+      attr_accessor :name
+      define_attribute_methods :name
+
+      alias_attribute :fullname, :name
+    end
+
+    assert_ractor_shareable model.aliases_by_attribute_name
+    assert_ractor_shareable model.attribute_aliases
+  end
+
+  test "attribute method affixes are ractor safe" do
+    model = Class.new do
+      include ActiveModel::AttributeMethods
+
+      attribute_method_affix prefix: "before_", suffix: "after_"
+      attribute_method_prefix "before_", parameters: "foo"
+      attribute_method_suffix(+"after_", parameters: +"bar")
+    end
+
+    assert_ractor_shareable model.attribute_method_patterns
   end
 end

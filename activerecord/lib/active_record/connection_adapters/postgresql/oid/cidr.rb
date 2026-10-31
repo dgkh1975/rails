@@ -12,8 +12,8 @@ module ActiveRecord
           end
 
           def type_cast_for_schema(value)
-            # If the subnet mask is equal to /32, don't output it
-            if value.prefix == 32
+            # If the subnet mask covers the full address, don't output it
+            if value.prefix == (value.ipv6? ? 128 : 32)
               "\"#{value}\""
             else
               "\"#{value}/#{value.prefix}\""
@@ -26,6 +26,12 @@ module ActiveRecord
             else
               value
             end
+          end
+
+          # TODO: Remove when IPAddr#== compares IPAddr#prefix. See
+          # https://github.com/ruby/ipaddr/issues/21
+          def changed?(old_value, new_value, _new_value_before_type_cast)
+            !old_value.eql?(new_value) || !old_value.nil? && old_value.prefix != new_value.prefix
           end
 
           def cast_value(value)

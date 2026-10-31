@@ -1,6 +1,10 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
+  # Active Storage \Previewer
+  # =========================
+  #
   # This is an abstract base class for previewers, which generate images from blobs. See
   # ActiveStorage::Previewer::MuPDFPreviewer and ActiveStorage::Previewer::VideoPreviewer for
   # examples of concrete subclasses.
@@ -25,26 +29,28 @@ module ActiveStorage
     end
 
     private
-      # Downloads the blob to a tempfile on disk. Yields the tempfile.
-      def download_blob_to_tempfile(&block) #:doc:
+      # Downloads the blob to a tempfile on disk. See ActiveStorage::Blob#open for details.
+      def download_blob_to_tempfile(&block) # :doc:
         blob.open tmpdir: tmpdir, &block
       end
 
       # Executes a system command, capturing its binary output in a tempfile. Yields the tempfile.
       #
       # Use this method to shell out to a system library (e.g. muPDF or FFmpeg) for preview image
-      # generation. The resulting tempfile can be used as the +:io+ value in an attachable Hash:
+      # generation. The resulting tempfile can be used as the `:io` value in an attachable Hash:
       #
-      #   def preview
-      #     download_blob_to_tempfile do |input|
-      #       draw "my-drawing-command", input.path, "--format", "png", "-" do |output|
-      #         yield io: output, filename: "#{blob.filename.base}.png", content_type: "image/png"
-      #       end
+      # ```
+      # def preview
+      #   download_blob_to_tempfile do |input|
+      #     draw "my-drawing-command", input.path, "--format", "png", "-" do |output|
+      #       yield io: output, filename: "#{blob.filename.base}.png", content_type: "image/png"
       #     end
       #   end
+      # end
+      # ```
       #
       # The output tempfile is opened in the directory returned by #tmpdir.
-      def draw(*argv) #:doc:
+      def draw(*argv) # :doc:
         open_tempfile do |file|
           instrument :preview, key: blob.key do
             capture(*argv, to: file)
@@ -65,20 +71,34 @@ module ActiveStorage
       end
 
       def instrument(operation, payload = {}, &block)
-        ActiveSupport::Notifications.instrument "#{operation}.active_storage", payload, &block
+        ActiveSupport::Notifications.instrument "#{operation}.active_storage", payload.merge(service: service_name), &block
+      end
+
+      def service_name
+        # ActiveStorage::Service::DiskService => Disk
+        blob.service.class.to_s.split("::").third.remove("Service")
       end
 
       def capture(*argv, to:)
         to.binmode
-        IO.popen(argv, err: File::NULL) { |out| IO.copy_stream(out, to) }
+
+        open_tempfile do |err|
+          IO.popen(argv, in: IO::NULL, err: err) { |out| IO.copy_stream(out, to) }
+          err.rewind
+
+          unless $?.success?
+            raise PreviewError, "#{argv.first} failed (status #{$?.exitstatus}): #{err.read.to_s.chomp}"
+          end
+        end
+
         to.rewind
       end
 
-      def logger #:doc:
+      def logger # :doc:
         ActiveStorage.logger
       end
 
-      def tmpdir #:doc:
+      def tmpdir # :doc:
         Dir.tmpdir
       end
   end

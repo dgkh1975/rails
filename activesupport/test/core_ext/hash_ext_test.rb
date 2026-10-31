@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 require_relative "../abstract_unit"
-require "active_support/core_ext/hash"
 require "bigdecimal"
+require "yaml"
+require "active_support/core_ext/hash"
 require "active_support/core_ext/string/access"
-require "active_support/ordered_hash"
 require "active_support/core_ext/object/conversions"
 require "active_support/core_ext/date/conversions"
 require "active_support/core_ext/object/deep_dup"
@@ -46,7 +46,6 @@ class HashExtTest < ActiveSupport::TestCase
     assert_respond_to h, :deep_stringify_keys!
     assert_respond_to h, :to_options
     assert_respond_to h, :to_options!
-    assert_respond_to h, :except
     assert_respond_to h, :except!
   end
 
@@ -338,6 +337,32 @@ class HashExtTest < ActiveSupport::TestCase
     assert_equal expected, merged
   end
 
+  def test_reverse_merge_takes_default_from_other_hash
+    hash = { a: 1 }.reverse_merge(Hash.new(0))
+
+    assert_equal 0, hash[:missing]
+  end
+
+  def test_reverse_merge_takes_default_proc_from_other_hash
+    hash = { a: 1 }.reverse_merge(Hash.new { |h, k| h[k] = [] })
+
+    assert_equal [], hash[:missing]
+  end
+
+  def test_reverse_merge_bang_takes_default_from_other_hash
+    hash = { a: 1 }
+    hash.reverse_merge!(Hash.new(0))
+
+    assert_equal 0, hash[:missing]
+  end
+
+  def test_reverse_merge_bang_takes_default_proc_from_other_hash
+    hash = { a: 1 }
+    hash.reverse_merge!(Hash.new { |h, k| h[k] = [] })
+
+    assert_equal [], hash[:missing]
+  end
+
   def test_slice_inplace
     original = { a: "x", b: "y", c: 10 }
     expected_return = { c: 10 }
@@ -401,10 +426,6 @@ class HashExtTest < ActiveSupport::TestCase
     original = { a: "x", b: "y", c: 10 }
     expected = { a: "x", b: "y" }
 
-    # Should return a new hash without the given keys.
-    assert_equal expected, original.except(:c)
-    assert_not_equal expected, original
-
     # Should replace the hash without the given keys.
     assert_equal expected, original.except!(:c)
     assert_equal expected, original
@@ -414,8 +435,6 @@ class HashExtTest < ActiveSupport::TestCase
     original = { a: "x", b: "y", c: 10 }
     expected = { a: "x" }
 
-    assert_equal expected, original.except(:b, :c)
-
     assert_equal expected, original.except!(:b, :c)
     assert_equal expected, original
   end
@@ -423,16 +442,7 @@ class HashExtTest < ActiveSupport::TestCase
   def test_except_with_original_frozen
     original = { a: "x", b: "y" }
     original.freeze
-    assert_nothing_raised { original.except(:a) }
-
     assert_raise(FrozenError) { original.except!(:a) }
-  end
-
-  def test_except_does_not_delete_values_in_original
-    original = { a: "x", b: "y" }
-    assert_not_called(original, :delete) do
-      original.except(:a)
-    end
   end
 end
 
@@ -582,15 +592,6 @@ class HashToXmlTest < ActiveSupport::TestCase
   def test_three_levels_with_array
     xml = { name: "David", addresses: [{ streets: [ { name: "Paulina" }, { name: "Paulina" } ] } ] }.to_xml(@xml_options)
     assert_includes xml, %(<addresses type="array"><address><streets type="array"><street><name>)
-  end
-
-  def test_timezoned_attributes
-    xml = {
-      created_at: Time.utc(1999, 2, 2),
-      local_created_at: Time.utc(1999, 2, 2).in_time_zone("Eastern Time (US & Canada)")
-    }.to_xml(@xml_options)
-    assert_match %r{<created-at type="dateTime">1999-02-02T00:00:00Z</created-at>}, xml
-    assert_match %r{<local-created-at type="dateTime">1999-02-01T19:00:00-05:00</local-created-at>}, xml
   end
 
   def test_multiple_records_from_xml_with_attributes_other_than_type_ignores_them_without_exploding
@@ -903,6 +904,18 @@ class HashToXmlTest < ActiveSupport::TestCase
     }.stringify_keys
 
     assert_equal expected_bacon_hash, Hash.from_xml(bacon_xml)["bacon"]
+  end
+
+  def test_date_type_from_xml_with_surrounding_whitespace
+    xml = <<-EOT
+    <event>
+      <starts-on type="date">
+        2020-01-01
+      </starts-on>
+    </event>
+    EOT
+
+    assert_equal({ "starts_on" => Date.new(2020, 1, 1) }, Hash.from_xml(xml)["event"])
   end
 
   def test_type_trickles_through_when_unknown

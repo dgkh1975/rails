@@ -7,7 +7,7 @@ module ActionText
         case fragment_or_html
         when self
           fragment_or_html
-        when Nokogiri::HTML::DocumentFragment
+        when Nokogiri::XML::DocumentFragment # base class for all fragments
           new(fragment_or_html)
         else
           from_html(fragment_or_html)
@@ -21,6 +21,8 @@ module ActionText
 
     attr_reader :source
 
+    delegate :deconstruct, to: "source.elements"
+
     def initialize(source)
       @source = source
     end
@@ -30,20 +32,27 @@ module ActionText
     end
 
     def update
-      yield source = self.source.clone
+      yield source = self.source.dup
       self.class.new(source)
     end
 
     def replace(selector)
       update do |source|
         source.css(selector).each do |node|
-          node.replace(yield(node).to_s)
+          replacement_node = yield(node)
+          node.replace(replacement_node.to_s) if node != replacement_node
         end
       end
     end
 
     def to_plain_text
       @plain_text ||= PlainTextConversion.node_to_plain_text(source)
+    end
+
+    # NOTE: this does not canonicalize, so it is not safe for untrusted content. See the
+    # note on ActionText::MarkdownConversion.node_to_markdown.
+    def to_markdown
+      @markdown ||= MarkdownConversion.node_to_markdown(source)
     end
 
     def to_html

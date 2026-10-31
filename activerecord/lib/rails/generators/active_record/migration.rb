@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/generators/migration"
 
 module ActiveRecord
@@ -41,11 +42,13 @@ module ActiveRecord
 
         def configured_migrate_path
           return unless database = options[:database]
+
           config = ActiveRecord::Base.configurations.configs_for(
             env_name: Rails.env,
             name: database
           )
-          config&.migrations_paths
+
+          Array(config&.migrations_paths).first
         end
     end
   end

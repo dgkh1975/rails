@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "active_support/testing/ractors_assertions"
 require "cases/helper"
 require "support/schema_dumping_helper"
 require "models/topic"
@@ -10,9 +11,25 @@ require "models/keyboard"
 require "models/mixed_case_monkey"
 require "models/dashboard"
 require "models/non_primary_key"
+require "models/cpk"
 
 class PrimaryKeysTest < ActiveRecord::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   fixtures :topics, :subscribers, :movies, :mixed_case_monkeys
+
+  def test_query_constraints_list_is_ractor_shareable
+    assert_ractor_shareable Topic.query_constraints_list
+  end
+
+  def test_cpk_query_constraints_list_is_ractor_shareable
+    assert_ractor_shareable Cpk::Order.query_constraints_list
+  end
+
+  def test_returning_columns_for_insert_is_ractor_shareable
+    columns = Topic._returning_columns_for_insert(ActiveRecord::Base.lease_connection)
+    assert_ractor_shareable columns
+  end
 
   def test_to_key_with_default_primary_key
     topic = Topic.new
@@ -28,15 +45,88 @@ class PrimaryKeysTest < ActiveRecord::TestCase
     assert_equal keyboard.to_key, [keyboard.id]
   end
 
-  def test_read_attribute_with_custom_primary_key
+  def test_to_key_with_composite_primary_key
+    order = Cpk::Order.new
+    assert_equal [nil, nil], order.to_key
+    order.id = [1, 2]
+    assert_equal [1, 2], order.to_key
+  end
+
+  def test_read_attribute_id
+    topic = Topic.find(1)
+    id = assert_not_deprecated(ActiveRecord.deprecator) do
+      topic.read_attribute(:id)
+    end
+
+    assert_equal 1, id
+  end
+
+  def test_read_attribute_with_custom_primary_key_does_not_return_it_when_reading_the_id_attribute
     keyboard = Keyboard.create!
-    assert_equal keyboard.key_number, keyboard.read_attribute(:id)
+    id = keyboard.read_attribute(:id)
+
+    assert_nil id
+  end
+
+  def test_read_attribute_with_composite_primary_key
+    book = Cpk::Book.new(id: [1, 2])
+    id = assert_not_deprecated(ActiveRecord.deprecator) do
+      book.read_attribute(:id)
+    end
+
+    assert_equal 2, id
+  end
+
+  def test_write_attribute_id
+    topic = Topic.find(1)
+    assert_not_deprecated(ActiveRecord.deprecator) do
+      topic.write_attribute(:id, 2)
+    end
+
+    assert_equal 2, topic.id
+  end
+
+  def test_write_attribute_with_custom_primary_key
+    keyboard = Keyboard.create!
+    msg = "Using write_attribute(:id, value) to write the primary key value is deprecated and will be removed in Rails 9.0. Use #id= instead."
+    assert_deprecated(msg, ActiveRecord.deprecator) do
+      keyboard.write_attribute(:id, 42)
+    end
+
+    assert_equal 42, keyboard.key_number
+  end
+
+  def test_write_attribute_with_composite_primary_key
+    book = Cpk::Book.new
+    assert_not_deprecated(ActiveRecord.deprecator) do
+      book.write_attribute(:id, 42)
+    end
+
+    assert_equal 42, book.read_attribute(:id)
   end
 
   def test_to_key_with_primary_key_after_destroy
     topic = Topic.find(1)
     topic.destroy
     assert_equal [1], topic.to_key
+  end
+
+  def test_id_was
+    topic = Topic.find(1)
+    assert_equal 1, topic.id
+
+    topic.id = 3
+
+    assert_equal 1, topic.id_was
+    assert_equal 3, topic.id
+  end
+
+  def test_id?
+    topic = Topic.find(1)
+
+    assert_changes("topic.id?", from: true, to: false) do
+      topic.id = nil
+    end
   end
 
   def test_integer_key
@@ -174,9 +264,94 @@ class PrimaryKeysTest < ActiveRecord::TestCase
 
   def test_quoted_primary_key_after_set_primary_key
     k = Class.new(ActiveRecord::Base)
-    assert_equal k.connection.quote_column_name("id"), k.quoted_primary_key
+    k.table_name = "bar"
+    assert_equal k.lease_connection.quote_column_name("id"), k.quoted_primary_key
     k.primary_key = "foo"
-    assert_equal k.connection.quote_column_name("foo"), k.quoted_primary_key
+    assert_equal k.lease_connection.quote_column_name("foo"), k.quoted_primary_key
+  end
+
+  def test_primary_key_inherited
+    k = Class.new(ActiveRecord::Base)
+    k.primary_key = "foo"
+    subclass = Class.new(k)
+
+    assert_equal "foo", k.primary_key
+    assert_equal "foo", subclass.primary_key
+  end
+
+  def test_primary_key_inherited_when_assigned_after_subclass_is_defined
+    k = Class.new(ActiveRecord::Base) { self.table_name = "topics" }
+    subclass = Class.new(k)
+    assert_equal "id", subclass.primary_key
+
+    k.primary_key = "title"
+    assert_equal "title", subclass.primary_key
+  end
+
+  def test_primary_key_assigned_on_subclass_is_not_overridden_by_parent
+    k = Class.new(ActiveRecord::Base) { self.table_name = "topics" }
+    subclass = Class.new(k) { self.primary_key = "title" }
+
+    k.primary_key = "author_name"
+    assert_equal "author_name", k.primary_key
+    assert_equal "title", subclass.primary_key
+  end
+
+  def test_primary_key_assignment_reloads_schema
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "topics"
+    end
+    context = klass.schema_context
+
+    klass.primary_key = ["title", "id"]
+
+    assert_not_same context, klass.schema_context
+    assert_equal ["title", "id"], klass.query_constraints_list
+    assert_equal ["title", "id"], klass.composite_query_constraints_list
+  end
+
+  def test_primary_key_assignment_reloads_descendant_schema
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "topics"
+      self.primary_key = "id"
+    end
+    child = Class.new(klass)
+    context = child.schema_context
+
+    klass.primary_key = ["title", "id"]
+
+    assert_not_same context, child.schema_context
+    assert_equal ["title", "id"], child.query_constraints_list
+    assert_equal ["title", "id"], child.composite_query_constraints_list
+  end
+
+  def test_attributes_builder_is_reused_until_the_schema_is_reloaded
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "topics"
+    end
+    builder = klass.attributes_builder
+
+    assert_same builder, klass.attributes_builder
+    assert builder.default_keys.include?("id")
+    assert_not builder.default_keys.include?("title")
+
+    klass.reset_column_information
+
+    assert_not_same builder, klass.attributes_builder
+  end
+
+  def test_primary_key_assignment_rebuilds_the_attributes_builder
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "topics"
+    end
+    child = Class.new(klass)
+    builder = child.attributes_builder
+
+    klass.primary_key = "title"
+
+    assert_not_same builder, child.attributes_builder
+    assert child.attributes_builder.default_keys.include?("title")
+    assert_not child.attributes_builder.default_keys.include?("id")
   end
 
   def test_auto_detect_primary_key_from_schema
@@ -194,13 +369,11 @@ class PrimaryKeysTest < ActiveRecord::TestCase
   end
 
   def test_create_without_primary_key_no_extra_query
-    skip if current_adapter?(:OracleAdapter)
-
     klass = Class.new(ActiveRecord::Base) do
       self.table_name = "dashboards"
     end
     klass.create! # warmup schema cache
-    assert_queries(3, ignore_none: true) { klass.create! }
+    assert_queries_count(3, include_schema: true) { klass.create! }
   end
 
   def test_assign_id_raises_error_if_primary_key_doesnt_exist
@@ -209,6 +382,28 @@ class PrimaryKeysTest < ActiveRecord::TestCase
     end
     dashboard = klass.new
     assert_raises(ActiveModel::MissingAttributeError) { dashboard.id = "1" }
+  end
+
+  def test_reconfiguring_primary_key_resets_composite_primary_key
+    klass = Class.new(ActiveRecord::Base) do
+      self.table_name = "cpk_books"
+    end
+
+    assert_predicate klass, :composite_primary_key?
+
+    klass.primary_key = :id
+    assert_not_predicate klass, :composite_primary_key?
+  end
+
+  def test_composite_primary_key_is_false_for_a_non_cpk_model
+    assert_not_predicate Dashboard, :composite_primary_key?
+  end
+
+  def test_primary_key_values_present
+    assert_predicate Topic.new(id: 1), :primary_key_values_present?
+
+    assert_not_predicate Topic.new, :primary_key_values_present?
+    assert_not_predicate Topic.new(title: "Topic A"), :primary_key_values_present?
   end
 
   if current_adapter?(:PostgreSQLAdapter)
@@ -224,35 +419,44 @@ class PrimaryKeysTest < ActiveRecord::TestCase
       assert_predicate column, :serial?
     end
   end
-end
 
-class PrimaryKeyWithNoConnectionTest < ActiveRecord::TestCase
-  self.use_transactional_tests = false
+  if RUBY_VERSION >= "4.0" && !in_memory_db?
+    class PrimaryKeysRactorTest < ActiveRecord::TestCase
+      include ActiveSupport::Testing::Isolation
+      include ActiveSupport::Testing::RactorsAssertions
 
-  unless in_memory_db?
-    def test_set_primary_key_with_no_connection
-      connection = ActiveRecord::Base.remove_connection
+      def test_primary_key_can_be_read_from_a_ractor_when_single
+        Topic.primary_key
+        assert_equal "id", on_ractor { Topic.primary_key }
+      end
 
-      model = Class.new(ActiveRecord::Base)
-      model.primary_key = "foo"
+      def test_primary_key_can_be_read_from_a_ractor_when_composite
+        Cpk::Order.primary_key
+        assert_equal ["shop_id", "id"], on_ractor { Cpk::Order.primary_key }
+      end
 
-      assert_equal "foo", model.primary_key
+      def test_primary_key_can_be_read_from_a_ractor_when_absent
+        NonPrimaryKey.primary_key
+        assert_nil on_ractor { NonPrimaryKey.primary_key }
+      end
 
-      ActiveRecord::Base.establish_connection(connection)
-
-      assert_equal "foo", model.primary_key
+      def test_primary_key_can_be_reset_from_a_ractor
+        assert_equal "id", on_ractor { Topic.reset_primary_key }
+      end
     end
   end
 end
 
 class PrimaryKeyWithAutoIncrementTest < ActiveRecord::TestCase
+  skip_under_ractor_proxy
+
   self.use_transactional_tests = false
 
   class AutoIncrement < ActiveRecord::Base
   end
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
   end
 
   def teardown
@@ -283,15 +487,15 @@ class PrimaryKeyWithAutoIncrementTest < ActiveRecord::TestCase
 end
 
 class PrimaryKeyAnyTypeTest < ActiveRecord::TestCase
-  include SchemaDumpingHelper
+  skip_under_ractor_proxy
 
-  self.use_transactional_tests = false
+  include SchemaDumpingHelper
 
   class Barcode < ActiveRecord::Base
   end
 
   setup do
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
     @connection.create_table(:barcodes, primary_key: "code", id: :string, limit: 42, force: true)
   end
 
@@ -316,23 +520,27 @@ class PrimaryKeyAnyTypeTest < ActiveRecord::TestCase
     assert_no_match %r{t\.index \["code"\]}, schema
   end
 
-  if current_adapter?(:Mysql2Adapter) && supports_datetime_with_precision?
+  if current_adapter?(:Mysql2Adapter, :TrilogyAdapter)
     test "schema typed primary key column" do
       @connection.create_table(:scheduled_logs, id: :timestamp, precision: 6, force: true)
       schema = dump_table_schema("scheduled_logs")
-      assert_match %r/create_table "scheduled_logs", id: { type: :timestamp, precision: 6.* }/, schema
+      assert_match %r/create_table "scheduled_logs", id: :timestamp.*/, schema
     end
   end
 end
 
 class CompositePrimaryKeyTest < ActiveRecord::TestCase
+  skip_under_ractor_proxy
+
   include SchemaDumpingHelper
 
   self.use_transactional_tests = false
 
+  fixtures :cpk_books, :cpk_orders
+
   def setup
-    @connection = ActiveRecord::Base.connection
-    @connection.schema_cache.clear!
+    ActiveRecord::Base.schema_cache.clear!
+    @connection = ActiveRecord::Base.lease_connection
     @connection.create_table(:uber_barcodes, primary_key: ["region", "code"], force: true) do |t|
       t.string :region
       t.integer :code
@@ -365,16 +573,73 @@ class CompositePrimaryKeyTest < ActiveRecord::TestCase
     assert_equal ["code", "region"], @connection.primary_keys("barcodes_reverse")
   end
 
-  def test_primary_key_issues_warning
+  def test_assigning_a_composite_primary_key
+    book = Cpk::Book.new
+    book.id = [1, 2]
+    book.save!
+
+    assert_equal [1, 2], book.id
+  ensure
+    Cpk::Book.delete_all
+  end
+
+  def test_reading_composite_primary_key_after_partial_select_returns_nil
+    book = Cpk::Book.select(:title).first
+
+    assert_nil book.author_id
+    assert_equal [nil, nil], book.id
+  end
+
+  def test_assigning_a_non_array_value_to_model_with_composite_primary_key_raises
+    book = Cpk::Book.new
+
+    error = assert_raises(TypeError) do
+      book.id = 1
+    end
+
+    assert_equal("Expected value matching [\"author_id\", \"id\"], got 1.", error.message)
+  end
+
+  def test_id_was_composite
+    book = cpk_books(:cpk_great_author_first_book)
+    book_id = book.id
+
+    assert_not_equal [42, 42], book_id
+
+    book.id = [42, 42]
+
+    assert_equal book_id, book.id_was
+    assert_equal [42, 42], book.id
+  end
+
+  def test_id_predicate_composite
+    book = cpk_books(:cpk_great_author_first_book)
+
+    valid_id = [42, 42]
+
+    invalid_ids = [
+      [42, nil],
+      [nil, 42],
+      [nil, nil],
+    ]
+
+    invalid_ids.each do |invalid_id|
+      book.id = valid_id
+
+      assert_changes("book.id?", from: true, to: false) do
+        book.id = invalid_id
+      end
+    end
+  end
+
+  def test_derives_composite_primary_key
     model = Class.new(ActiveRecord::Base) do
       def self.table_name
         "uber_barcodes"
       end
     end
-    warning = capture(:stderr) do
-      assert_nil model.primary_key
-    end
-    assert_match(/WARNING: Active Record does not support composite primary key\./, warning)
+
+    assert_equal ["region", "code"], model.primary_key
   end
 
   def test_collectly_dump_composite_primary_key
@@ -386,15 +651,34 @@ class CompositePrimaryKeyTest < ActiveRecord::TestCase
     schema = dump_table_schema "barcodes_reverse"
     assert_match %r{create_table "barcodes_reverse", primary_key: \["code", "region"\]}, schema
   end
+
+  def test_model_with_a_composite_primary_key
+    assert_equal(["author_id", "id"], Cpk::Book.primary_key)
+    assert_equal(["shop_id", "id"], Cpk::Order.primary_key)
+  end
+
+  def test_composite_primary_key_is_true_for_a_cpk_model
+    assert_predicate Cpk::Book, :composite_primary_key?
+  end
+
+  def test_primary_key_values_present_for_a_composite_pk_model
+    assert_predicate Cpk::Book.new(id: [1, 1]), :primary_key_values_present?
+
+    assert_not_predicate Cpk::Book.new, :primary_key_values_present?
+    assert_not_predicate Cpk::Book.new(author_id: 1), :primary_key_values_present?
+    assert_not_predicate Cpk::Book.new(id: [nil, 1]), :primary_key_values_present?
+    assert_not_predicate Cpk::Book.new(title: "Book A"), :primary_key_values_present?
+    assert_not_predicate Cpk::Book.new(author_id: 1, title: "Book A"), :primary_key_values_present?
+  end
 end
 
 class PrimaryKeyIntegerNilDefaultTest < ActiveRecord::TestCase
+  skip_under_ractor_proxy
+
   include SchemaDumpingHelper
 
-  self.use_transactional_tests = false
-
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
   end
 
   def teardown
@@ -402,7 +686,6 @@ class PrimaryKeyIntegerNilDefaultTest < ActiveRecord::TestCase
   end
 
   def test_schema_dump_primary_key_integer_with_default_nil
-    skip if current_adapter?(:SQLite3Adapter)
     @connection.create_table(:int_defaults, id: :integer, default: nil, force: true)
     schema = dump_table_schema "int_defaults"
     assert_match %r{create_table "int_defaults", id: :integer, default: nil}, schema
@@ -415,8 +698,8 @@ class PrimaryKeyIntegerNilDefaultTest < ActiveRecord::TestCase
   end
 end
 
-if current_adapter?(:PostgreSQLAdapter, :Mysql2Adapter)
-  class PrimaryKeyIntegerTest < ActiveRecord::TestCase
+class PrimaryKeyIntegerTest < ActiveRecord::TestCase
+  if current_adapter?(:PostgreSQLAdapter, :Mysql2Adapter, :TrilogyAdapter)
     include SchemaDumpingHelper
 
     self.use_transactional_tests = false
@@ -425,7 +708,7 @@ if current_adapter?(:PostgreSQLAdapter, :Mysql2Adapter)
     end
 
     setup do
-      @connection = ActiveRecord::Base.connection
+      @connection = ActiveRecord::Base.lease_connection
       @pk_type = current_adapter?(:PostgreSQLAdapter) ? :serial : :integer
     end
 
@@ -452,7 +735,7 @@ if current_adapter?(:PostgreSQLAdapter, :Mysql2Adapter)
       assert_match %r{create_table "widgets", id: :#{@pk_type}, }, schema
     end
 
-    if current_adapter?(:Mysql2Adapter)
+    if current_adapter?(:Mysql2Adapter, :TrilogyAdapter)
       test "primary key column type with options" do
         @connection.create_table(:widgets, id: :primary_key, limit: 4, unsigned: true, force: true)
         column = @connection.columns(:widgets).find { |c| c.name == "id" }

@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "active_support/testing/ractors_assertions"
 
 class TestCustomUrlHelpers < ActionDispatch::IntegrationTest
+  include ActiveSupport::Testing::RactorsAssertions
+
   class Linkable
     attr_reader :id
 
@@ -299,6 +302,29 @@ class TestCustomUrlHelpers < ActionDispatch::IntegrationTest
 
     assert_equal "http://www.example.com/manufacturers/apple", polymorphic_url(@manufacturer)
     assert_equal "http://www.example.com/manufacturers/apple", Routes.url_helpers.polymorphic_url(@manufacturer)
+  end
+
+  def test_polymorphic_cache_is_ractor_shareable
+    assert_ractor_shareable(ActionDispatch::Routing::PolymorphicRoutes::HelperMethodBuilder::CACHE)
+
+    Model.model_name
+
+    values = on_ractor do
+      ActionDispatch::Routing::PolymorphicRoutes::HelperMethodBuilder.url.handle_class(Model)
+    end
+
+    assert_equal("test_custom_url_helpers_models_url", values[0])
+  end
+
+  def test_url_helpers_module_can_be_included_directly_in_an_active_support_concern
+    concern = Module.new do
+      extend ActiveSupport::Concern
+      include Routes.url_helpers
+    end
+
+    concerned = Class.new { include concern }.new
+
+    assert_equal "http://www.example.com/", concerned.root_url
   end
 
   def test_defining_direct_inside_a_scope_raises_runtime_error

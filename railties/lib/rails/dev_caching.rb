@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "fileutils"
 
 module Rails
@@ -12,10 +13,10 @@ module Rails
 
         if File.exist?(FILE)
           delete_cache_file
-          puts "Development mode is no longer being cached."
+          puts "Action Controller caching disabled for development mode."
         else
           create_cache_file
-          puts "Development mode is now being cached."
+          puts "Action Controller caching enabled for development mode."
         end
 
         FileUtils.touch "tmp/restart.txt"

@@ -1,18 +1,50 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "active_support/testing/ractors_assertions"
 require "active_support/ordered_options"
 
 require "action_dispatch"
-ActionView::Template::Types.delegate_to Mime
+ActionView::Template.mime_types_implementation = Mime
+
+module AssetTagHelperTestHelpers
+  def with_preload_links_header(new_preload_links_header = true)
+    original_preload_links_header = ActionView::Helpers::AssetTagHelper.preload_links_header
+    ActionView::Helpers::AssetTagHelper.preload_links_header = new_preload_links_header
+
+    yield
+  ensure
+    ActionView::Helpers::AssetTagHelper.preload_links_header = original_preload_links_header
+  end
+
+  def with_auto_include_nonce_for_scripts(new_auto_include_nonce_for_scripts = true)
+    original_auto_include_nonce_for_scripts = ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_scripts
+    ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_scripts = new_auto_include_nonce_for_scripts
+
+    yield
+  ensure
+    ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_scripts = original_auto_include_nonce_for_scripts
+  end
+
+  def with_auto_include_nonce_for_styles(new_auto_include_nonce_for_styles = true)
+    original_auto_include_nonce_for_styles = ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_styles
+    ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_styles = new_auto_include_nonce_for_styles
+
+    yield
+  ensure
+    ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_styles = original_auto_include_nonce_for_styles
+  end
+end
 
 class AssetTagHelperTest < ActionView::TestCase
   tests ActionView::Helpers::AssetTagHelper
 
+  include AssetTagHelperTestHelpers
+
   attr_reader :request, :response
 
   class FakeRequest
-    attr_accessor :script_name
+    attr_accessor :script_name, :content_security_policy_nonce_directives
     def protocol() "http://" end
     def ssl?() false end
     def host_with_port() "localhost" end
@@ -24,6 +56,7 @@ class AssetTagHelperTest < ActionView::TestCase
     def headers
       @headers ||= {}
     end
+    def sending?; false; end
   end
 
   def setup
@@ -67,7 +100,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(asset_path("style", type: :stylesheet)) => %(/stylesheets/style.css),
     %(asset_path("xmlhr", type: :javascript)) => %(/javascripts/xmlhr.js),
     %(asset_path("xml.png", type: :image))    => %(/images/xml.png)
-  }
+  }.freeze
 
   AutoDiscoveryToTag = {
     %(auto_discovery_link_tag) => %(<link href="http://www.example.com" rel="alternate" title="RSS" type="application/rss+xml" />),
@@ -83,7 +116,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(auto_discovery_link_tag(nil, {}, {:title => "No stream.. really", :type => "text/html"})) => %(<link href="http://www.example.com" rel="alternate" title="No stream.. really" type="text/html" />),
     %(auto_discovery_link_tag(:rss, {}, {:title => "My RSS", :type => "text/html"})) => %(<link href="http://www.example.com" rel="alternate" title="My RSS" type="text/html" />),
     %(auto_discovery_link_tag(:atom, {}, {:rel => "Not so alternate"})) => %(<link href="http://www.example.com" rel="Not so alternate" title="ATOM" type="application/atom+xml" />),
-  }
+  }.freeze
 
   JavascriptPathToTag = {
     %(javascript_path("xmlhr")) => %(/javascripts/xmlhr.js),
@@ -96,25 +129,25 @@ class AssetTagHelperTest < ActionView::TestCase
     %(javascript_path("xmlhr.js?body=1")) => %(/javascripts/xmlhr.js?body=1),
     %(javascript_path("xmlhr.js#hash")) => %(/javascripts/xmlhr.js#hash),
     %(javascript_path("xmlhr.js?123#hash")) => %(/javascripts/xmlhr.js?123#hash)
-  }
+  }.freeze
 
   PathToJavascriptToTag = {
     %(path_to_javascript("xmlhr")) => %(/javascripts/xmlhr.js),
     %(path_to_javascript("super/xmlhr")) => %(/javascripts/super/xmlhr.js),
     %(path_to_javascript("/super/xmlhr.js")) => %(/super/xmlhr.js)
-  }
+  }.freeze
 
   JavascriptUrlToTag = {
     %(javascript_url("xmlhr")) => %(http://www.example.com/javascripts/xmlhr.js),
     %(javascript_url("super/xmlhr")) => %(http://www.example.com/javascripts/super/xmlhr.js),
     %(javascript_url("/super/xmlhr.js")) => %(http://www.example.com/super/xmlhr.js)
-  }
+  }.freeze
 
   UrlToJavascriptToTag = {
     %(url_to_javascript("xmlhr")) => %(http://www.example.com/javascripts/xmlhr.js),
     %(url_to_javascript("super/xmlhr")) => %(http://www.example.com/javascripts/super/xmlhr.js),
     %(url_to_javascript("/super/xmlhr.js")) => %(http://www.example.com/super/xmlhr.js)
-  }
+  }.freeze
 
   JavascriptIncludeToTag = {
     %(javascript_include_tag("bank")) => %(<script src="/javascripts/bank.js" ></script>),
@@ -125,7 +158,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(javascript_include_tag("http://example.com/all")) => %(<script src="http://example.com/all"></script>),
     %(javascript_include_tag("http://example.com/all.js")) => %(<script src="http://example.com/all.js"></script>),
     %(javascript_include_tag("//example.com/all.js")) => %(<script src="//example.com/all.js"></script>),
-  }
+  }.freeze
 
   StylePathToTag = {
     %(stylesheet_path("bank")) => %(/stylesheets/bank.css),
@@ -134,7 +167,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(stylesheet_path('/subdir/subdir.css')) => %(/subdir/subdir.css),
     %(stylesheet_path("style.min")) => %(/stylesheets/style.min.css),
     %(stylesheet_path("style.min.css")) => %(/stylesheets/style.min.css)
-  }
+  }.freeze
 
   PathToStyleToTag = {
     %(path_to_stylesheet("style")) => %(/stylesheets/style.css),
@@ -142,14 +175,14 @@ class AssetTagHelperTest < ActionView::TestCase
     %(path_to_stylesheet('dir/file')) => %(/stylesheets/dir/file.css),
     %(path_to_stylesheet('/dir/file.rcss', :extname => false)) => %(/dir/file.rcss),
     %(path_to_stylesheet('/dir/file', :extname => '.rcss')) => %(/dir/file.rcss)
-  }
+  }.freeze
 
   StyleUrlToTag = {
     %(stylesheet_url("bank")) => %(http://www.example.com/stylesheets/bank.css),
     %(stylesheet_url("bank.css")) => %(http://www.example.com/stylesheets/bank.css),
     %(stylesheet_url('subdir/subdir')) => %(http://www.example.com/stylesheets/subdir/subdir.css),
     %(stylesheet_url('/subdir/subdir.css')) => %(http://www.example.com/subdir/subdir.css)
-  }
+  }.freeze
 
   UrlToStyleToTag = {
     %(url_to_stylesheet("style")) => %(http://www.example.com/stylesheets/style.css),
@@ -157,7 +190,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(url_to_stylesheet('dir/file')) => %(http://www.example.com/stylesheets/dir/file.css),
     %(url_to_stylesheet('/dir/file.rcss', :extname => false)) => %(http://www.example.com/dir/file.rcss),
     %(url_to_stylesheet('/dir/file', :extname => '.rcss')) => %(http://www.example.com/dir/file.rcss)
-  }
+  }.freeze
 
   StyleLinkToTag = {
     %(stylesheet_link_tag("bank")) => %(<link href="/stylesheets/bank.css" rel="stylesheet" />),
@@ -170,44 +203,54 @@ class AssetTagHelperTest < ActionView::TestCase
     %(stylesheet_link_tag("http://www.example.com/styles/style")) => %(<link href="http://www.example.com/styles/style" rel="stylesheet" />),
     %(stylesheet_link_tag("http://www.example.com/styles/style.css")) => %(<link href="http://www.example.com/styles/style.css" rel="stylesheet" />),
     %(stylesheet_link_tag("//www.example.com/styles/style.css")) => %(<link href="//www.example.com/styles/style.css" rel="stylesheet" />),
-  }
+  }.freeze
 
   ImagePathToTag = {
     %(image_path("xml"))          => %(/images/xml),
     %(image_path("xml.png"))      => %(/images/xml.png),
     %(image_path("dir/xml.png"))  => %(/images/dir/xml.png),
     %(image_path("/dir/xml.png")) => %(/dir/xml.png)
-  }
+  }.freeze
 
   PathToImageToTag = {
     %(path_to_image("xml"))          => %(/images/xml),
     %(path_to_image("xml.png"))      => %(/images/xml.png),
     %(path_to_image("dir/xml.png"))  => %(/images/dir/xml.png),
     %(path_to_image("/dir/xml.png")) => %(/dir/xml.png)
-  }
+  }.freeze
 
   ImageUrlToTag = {
     %(image_url("xml"))          => %(http://www.example.com/images/xml),
     %(image_url("xml.png"))      => %(http://www.example.com/images/xml.png),
     %(image_url("dir/xml.png"))  => %(http://www.example.com/images/dir/xml.png),
     %(image_url("/dir/xml.png")) => %(http://www.example.com/dir/xml.png)
-  }
+  }.freeze
 
   UrlToImageToTag = {
     %(url_to_image("xml"))          => %(http://www.example.com/images/xml),
     %(url_to_image("xml.png"))      => %(http://www.example.com/images/xml.png),
     %(url_to_image("dir/xml.png"))  => %(http://www.example.com/images/dir/xml.png),
     %(url_to_image("/dir/xml.png")) => %(http://www.example.com/dir/xml.png)
-  }
+  }.freeze
 
   ImageLinkToTag = {
     %(image_tag("xml.png")) => %(<img src="/images/xml.png" />),
-    %(image_tag("rss.gif", :alt => "rss syndication")) => %(<img alt="rss syndication" src="/images/rss.gif" />),
+    %(image_tag("rss.gif", :alt => "RSS syndication")) => %(<img alt="RSS syndication" src="/images/rss.gif" />),
     %(image_tag("gold.png", :size => "20")) => %(<img height="20" src="/images/gold.png" width="20" />),
     %(image_tag("gold.png", :size => 20)) => %(<img height="20" src="/images/gold.png" width="20" />),
+    %(image_tag("silver.png", :size => "90.9")) => %(<img height="90.9" src="/images/silver.png" width="90.9" />),
+    %(image_tag("silver.png", :size => 90.9)) => %(<img height="90.9" src="/images/silver.png" width="90.9" />),
     %(image_tag("gold.png", :size => "45x70")) => %(<img height="70" src="/images/gold.png" width="45" />),
     %(image_tag("gold.png", "size" => "45x70")) => %(<img height="70" src="/images/gold.png" width="45" />),
+    %(image_tag("silver.png", :size => "67.12x74.09")) => %(<img height="74.09" src="/images/silver.png" width="67.12" />),
+    %(image_tag("silver.png", "size" => "67.12x74.09")) => %(<img height="74.09" src="/images/silver.png" width="67.12" />),
+    %(image_tag("bronze.png", :size => "10x15.7")) => %(<img height="15.7" src="/images/bronze.png" width="10" />),
+    %(image_tag("bronze.png", "size" => "10x15.7")) => %(<img height="15.7" src="/images/bronze.png" width="10" />),
+    %(image_tag("platinum.png", :size => "4.9x20")) => %(<img height="20" src="/images/platinum.png" width="4.9" />),
+    %(image_tag("platinum.png", "size" => "4.9x20")) => %(<img height="20" src="/images/platinum.png" width="4.9" />),
     %(image_tag("error.png", "size" => "45 x 70")) => %(<img src="/images/error.png" />),
+    %(image_tag("error.png", "size" => "1,024x768")) => %(<img src="/images/error.png" />),
+    %(image_tag("error.png", "size" => "768x1,024")) => %(<img src="/images/error.png" />),
     %(image_tag("error.png", "size" => "x")) => %(<img src="/images/error.png" />),
     %(image_tag("google.com.png")) => %(<img src="/images/google.com.png" />),
     %(image_tag("slash..png")) => %(<img src="/images/slash..png" />),
@@ -221,17 +264,81 @@ class AssetTagHelperTest < ActionView::TestCase
     %(image_tag("rss.gif", srcset: "/assets/pic_640.jpg 640w, /assets/pic_1024.jpg 1024w")) => %(<img srcset="/assets/pic_640.jpg 640w, /assets/pic_1024.jpg 1024w" src="/images/rss.gif" />),
     %(image_tag("rss.gif", srcset: { "pic_640.jpg" => "640w", "pic_1024.jpg" => "1024w" })) => %(<img srcset="/images/pic_640.jpg 640w, /images/pic_1024.jpg 1024w" src="/images/rss.gif" />),
     %(image_tag("rss.gif", srcset: [["pic_640.jpg", "640w"], ["pic_1024.jpg", "1024w"]])) => %(<img srcset="/images/pic_640.jpg 640w, /images/pic_1024.jpg 1024w" src="/images/rss.gif" />)
-  }
+  }.freeze
+
+  PicturePathToTag = {
+    %(image_path("xml"))           => %(/images/xml),
+    %(image_path("xml.webp"))      => %(/images/xml.webp),
+    %(image_path("dir/xml.webp"))  => %(/images/dir/xml.webp),
+    %(image_path("/dir/xml.webp")) => %(/dir/xml.webp)
+  }.freeze
+
+  PathToPictureToTag = {
+    %(path_to_image("xml"))           => %(/images/xml),
+    %(path_to_image("xml.webp"))      => %(/images/xml.webp),
+    %(path_to_image("dir/xml.webp"))  => %(/images/dir/xml.webp),
+    %(path_to_image("/dir/xml.webp")) => %(/dir/xml.webp)
+  }.freeze
+
+  PictureUrlToTag = {
+    %(image_url("xml"))           => %(http://www.example.com/images/xml),
+    %(image_url("xml.webp"))      => %(http://www.example.com/images/xml.webp),
+    %(image_url("dir/xml.webp"))  => %(http://www.example.com/images/dir/xml.webp),
+    %(image_url("/dir/xml.webp")) => %(http://www.example.com/dir/xml.webp)
+  }.freeze
+
+  UrlToPictureToTag = {
+    %(url_to_image("xml"))           => %(http://www.example.com/images/xml),
+    %(url_to_image("xml.webp"))      => %(http://www.example.com/images/xml.webp),
+    %(url_to_image("dir/xml.webp"))  => %(http://www.example.com/images/dir/xml.webp),
+    %(url_to_image("/dir/xml.webp")) => %(http://www.example.com/dir/xml.webp)
+  }.freeze
+
+  PictureLinkToTag = {
+    %(picture_tag("picture.webp")) => %(<picture><img src="/images/picture.webp" /></picture>),
+    %(picture_tag("gold.png", :image => { :size => "20" })) => %(<picture><img height="20" src="/images/gold.png" width="20" /></picture>),
+    %(picture_tag("gold.png", :image => { :size => 20 })) => %(<picture><img height="20" src="/images/gold.png" width="20" /></picture>),
+    %(picture_tag("silver.png", :image => { :size => "90.9" })) => %(<picture><img height="90.9" src="/images/silver.png" width="90.9" /></picture>),
+    %(picture_tag("silver.png", :image => { :size => 90.9 })) => %(<picture><img height="90.9" src="/images/silver.png" width="90.9" /></picture>),
+    %(picture_tag("gold.png", :image => { :size => "45x70" })) => %(<picture><img height="70" src="/images/gold.png" width="45" /></picture>),
+    %(picture_tag("gold.png", :image => { "size" => "45x70" })) => %(<picture><img height="70" src="/images/gold.png" width="45" /></picture>),
+    %(picture_tag("silver.png", :image => { :size => "67.12x74.09" })) => %(<picture><img height="74.09" src="/images/silver.png" width="67.12" /></picture>),
+    %(picture_tag("silver.png", :image => { "size" => "67.12x74.09" })) => %(<picture><img height="74.09" src="/images/silver.png" width="67.12" /></picture>),
+    %(picture_tag("bronze.png", :image => { :size => "10x15.7" })) => %(<picture><img height="15.7" src="/images/bronze.png" width="10" /></picture>),
+    %(picture_tag("bronze.png", :image => { "size" => "10x15.7" })) => %(<picture><img height="15.7" src="/images/bronze.png" width="10" /></picture>),
+    %(picture_tag("platinum.png", :image => { :size => "4.9x20" })) => %(<picture><img height="20" src="/images/platinum.png" width="4.9" /></picture>),
+    %(picture_tag("platinum.png", :image => { "size" => "4.9x20" })) => %(<picture><img height="20" src="/images/platinum.png" width="4.9" /></picture>),
+    %(picture_tag("error.png", :image => { "size" => "45 x 70" })) => %(<picture><img src="/images/error.png" /></picture>),
+    %(picture_tag("error.png", :image => { "size" => "1,024x768" })) => %(<picture><img src="/images/error.png" /></picture>),
+    %(picture_tag("error.png", :image => { "size" => "768x1,024" })) => %(<picture><img src="/images/error.png" /></picture>),
+    %(picture_tag("error.png", :image => { "size" => "x" })) => %(<picture><img src="/images/error.png" /></picture>),
+    %(picture_tag("google.com.png")) => %(<picture><img src="/images/google.com.png" /></picture>),
+    %(picture_tag("slash..png")) => %(<picture><img src="/images/slash..png" /></picture>),
+    %(picture_tag(".pdf.png")) => %(<picture><img src="/images/.pdf.png" /></picture>),
+    %(picture_tag("http://www.rubyonrails.com/images/rails.png")) => %(<picture><img src="http://www.rubyonrails.com/images/rails.png" /></picture>),
+    %(picture_tag("//www.rubyonrails.com/images/rails.png")) => %(<picture><img src="//www.rubyonrails.com/images/rails.png" /></picture>),
+    %(picture_tag("mouse.png", :image => { :alt => nil })) => %(<picture><img src="/images/mouse.png" /></picture>),
+    %(picture_tag("data:image/gif;base64,R0lGODlhAQABAID/AMDAwAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", :image => { :alt => nil })) => %(<picture><img src="data:image/gif;base64,R0lGODlhAQABAID/AMDAwAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" /></picture>),
+    %(picture_tag("")) => %(<picture><img src="" /></picture>),
+    %(picture_tag("picture.webp", "picture.png")) => %(<picture><source srcset="/images/picture.webp" type="image/webp" /><source srcset="/images/picture.png" type="image/png" /><img src="/images/picture.png" /></picture>),
+    %(picture_tag("picture.webp", "picture.png", :class => "my-class")) => %(<picture class="my-class"><source srcset="/images/picture.webp" type="image/webp" /><source srcset="/images/picture.png" type="image/png" /><img src="/images/picture.png" /></picture>),
+    %(picture_tag("picture.webp", "picture.png", :image => { alt: "Image" })) => %(<picture><source srcset="/images/picture.webp" type="image/webp" /><source srcset="/images/picture.png" type="image/png" /><img alt="Image" src="/images/picture.png" /></picture>),
+    %(picture_tag(["picture.webp", "picture.png"], :image => { alt: "Image" })) => %(<picture><source srcset="/images/picture.webp" type="image/webp" /><source srcset="/images/picture.png" type="image/png" /><img alt="Image" src="/images/picture.png" /></picture>),
+    %(picture_tag(:class => "my-class") { tag(:source, :srcset => image_path("picture.webp")) + image_tag("picture.png", :alt => "Image") }) => %(<picture class="my-class"><source srcset="/images/picture.webp" /><img alt="Image" src="/images/picture.png" /></picture>),
+    %(picture_tag { tag(:source, :srcset => image_path("picture-small.webp"), :media => "(min-width: 600px)") + tag(:source, :srcset => image_path("picture-big.webp")) + image_tag("picture.png", :alt => "Image") }) => %(<picture><source srcset="/images/picture-small.webp" media="(min-width: 600px)" /><source srcset="/images/picture-big.webp" /><img alt="Image" src="/images/picture.png" /></picture>),
+  }.freeze
 
   FaviconLinkToTag = {
-    %(favicon_link_tag) => %(<link href="/images/favicon.ico" rel="shortcut icon" type="image/x-icon" />),
-    %(favicon_link_tag 'favicon.ico') => %(<link href="/images/favicon.ico" rel="shortcut icon" type="image/x-icon" />),
+    %(favicon_link_tag) => %(<link href="/images/favicon.ico" rel="icon" type="image/x-icon" />),
+    %(favicon_link_tag 'favicon.ico') => %(<link href="/images/favicon.ico" rel="icon" type="image/x-icon" />),
     %(favicon_link_tag 'favicon.ico', :rel => 'foo') => %(<link href="/images/favicon.ico" rel="foo" type="image/x-icon" />),
     %(favicon_link_tag 'favicon.ico', :rel => 'foo', :type => 'bar') => %(<link href="/images/favicon.ico" rel="foo" type="bar" />),
     %(favicon_link_tag 'mb-icon.png', :rel => 'apple-touch-icon', :type => 'image/png') => %(<link href="/images/mb-icon.png" rel="apple-touch-icon" type="image/png" />)
-  }
+  }.freeze
 
   PreloadLinkToTag = {
+    %(preload_link_tag '/application.js', type: 'module') => %(<link rel="modulepreload" href="/application.js" as="script" type="module" >),
+    %(preload_link_tag '/application.js', type: :module) => %(<link rel="modulepreload" href="/application.js" as="script" type="module" >),
     %(preload_link_tag '/styles/custom_theme.css') => %(<link rel="preload" href="/styles/custom_theme.css" as="style" type="text/css" />),
     %(preload_link_tag '/videos/video.webm') => %(<link rel="preload" href="/videos/video.webm" as="video" type="video/webm" />),
     %(preload_link_tag '/posts.json', as: 'fetch') => %(<link rel="preload" href="/posts.json" as="fetch" type="application/json" />),
@@ -241,35 +348,40 @@ class AssetTagHelperTest < ActionView::TestCase
     %(preload_link_tag '//example.com/font.woff2', crossorigin: 'use-credentials') => %(<link rel="preload" href="//example.com/font.woff2" as="font" type="font/woff2" crossorigin="use-credentials" />),
     %(preload_link_tag '/media/audio.ogg', nopush: true) => %(<link rel="preload" href="/media/audio.ogg" as="audio" type="audio/ogg" />),
     %(preload_link_tag '/style.css', integrity: 'sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs') => %(<link rel="preload" href="/style.css" as="style" type="text/css" integrity="sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs">),
-  }
+    %(preload_link_tag '/sprite.svg') => %(<link rel="preload" href="/sprite.svg" as="image" type="image/svg+xml">),
+    %(preload_link_tag '/mb-icon.png') => %(<link rel="preload" href="/mb-icon.png" as="image" type="image/png">),
+    %(preload_link_tag '/hero-image.jpg', fetchpriority: 'high') => %(<link rel="preload" href="/hero-image.jpg" as="image" type="image/jpeg" fetchpriority="high">),
+    %(preload_link_tag '/critical.css', fetchpriority: 'high') => %(<link rel="preload" href="/critical.css" as="style" type="text/css" fetchpriority="high">),
+    %(preload_link_tag '/background.png', fetchpriority: 'low') => %(<link rel="preload" href="/background.png" as="image" type="image/png" fetchpriority="low">)
+  }.freeze
 
   VideoPathToTag = {
     %(video_path("xml"))          => %(/videos/xml),
     %(video_path("xml.ogg"))      => %(/videos/xml.ogg),
     %(video_path("dir/xml.ogg"))  => %(/videos/dir/xml.ogg),
     %(video_path("/dir/xml.ogg")) => %(/dir/xml.ogg)
-  }
+  }.freeze
 
   PathToVideoToTag = {
     %(path_to_video("xml"))          => %(/videos/xml),
     %(path_to_video("xml.ogg"))      => %(/videos/xml.ogg),
     %(path_to_video("dir/xml.ogg"))  => %(/videos/dir/xml.ogg),
     %(path_to_video("/dir/xml.ogg")) => %(/dir/xml.ogg)
-  }
+  }.freeze
 
   VideoUrlToTag = {
     %(video_url("xml"))          => %(http://www.example.com/videos/xml),
     %(video_url("xml.ogg"))      => %(http://www.example.com/videos/xml.ogg),
     %(video_url("dir/xml.ogg"))  => %(http://www.example.com/videos/dir/xml.ogg),
     %(video_url("/dir/xml.ogg")) => %(http://www.example.com/dir/xml.ogg)
-  }
+  }.freeze
 
   UrlToVideoToTag = {
     %(url_to_video("xml"))          => %(http://www.example.com/videos/xml),
     %(url_to_video("xml.ogg"))      => %(http://www.example.com/videos/xml.ogg),
     %(url_to_video("dir/xml.ogg"))  => %(http://www.example.com/videos/dir/xml.ogg),
     %(url_to_video("/dir/xml.ogg")) => %(http://www.example.com/dir/xml.ogg)
-  }
+  }.freeze
 
   VideoLinkToTag = {
     %(video_tag("xml.ogg")) => %(<video src="/videos/xml.ogg"></video>),
@@ -277,45 +389,53 @@ class AssetTagHelperTest < ActionView::TestCase
     %(video_tag("rss.m4v", :preload => 'none')) => %(<video preload="none" src="/videos/rss.m4v"></video>),
     %(video_tag("gold.m4v", :size => "160x120")) => %(<video height="120" src="/videos/gold.m4v" width="160"></video>),
     %(video_tag("gold.m4v", "size" => "320x240")) => %(<video height="240" src="/videos/gold.m4v" width="320"></video>),
+    %(video_tag("silver.m4v", :size => "100.3x200.6")) => %(<video height="200.6" src="/videos/silver.m4v" width="100.3"></video>),
+    %(video_tag("silver.m4v", "size" => "100.3x200.6")) => %(<video height="200.6" src="/videos/silver.m4v" width="100.3"></video>),
+    %(video_tag("bronze.m4v", :size => "50x12.7")) => %(<video height="12.7" src="/videos/bronze.m4v" width="50"></video>),
+    %(video_tag("bronze.m4v", "size" => "50x12.7")) => %(<video height="12.7" src="/videos/bronze.m4v" width="50"></video>),
+    %(video_tag("platinum.m4v", :size => "10.1x24")) => %(<video height="24" src="/videos/platinum.m4v" width="10.1"></video>),
+    %(video_tag("platinum.m4v", "size" => "10.1x24")) => %(<video height="24" src="/videos/platinum.m4v" width="10.1"></video>),
     %(video_tag("trailer.ogg", :poster => "screenshot.png")) => %(<video poster="/images/screenshot.png" src="/videos/trailer.ogg"></video>),
     %(video_tag("error.avi", "size" => "100")) => %(<video height="100" src="/videos/error.avi" width="100"></video>),
     %(video_tag("error.avi", "size" => 100)) => %(<video height="100" src="/videos/error.avi" width="100"></video>),
     %(video_tag("error.avi", "size" => "100 x 100")) => %(<video src="/videos/error.avi"></video>),
+    %(video_tag("error.avi", "size" => "1,024x768")) => %(<video src="/videos/error.avi"></video>),
+    %(video_tag("error.avi", "size" => "768x1,024")) => %(<video src="/videos/error.avi"></video>),
     %(video_tag("error.avi", "size" => "x")) => %(<video src="/videos/error.avi"></video>),
     %(video_tag("http://media.rubyonrails.org/video/rails_blog_2.mov")) => %(<video src="http://media.rubyonrails.org/video/rails_blog_2.mov"></video>),
     %(video_tag("//media.rubyonrails.org/video/rails_blog_2.mov")) => %(<video src="//media.rubyonrails.org/video/rails_blog_2.mov"></video>),
     %(video_tag("multiple.ogg", "multiple.avi")) => %(<video><source src="/videos/multiple.ogg" /><source src="/videos/multiple.avi" /></video>),
     %(video_tag(["multiple.ogg", "multiple.avi"])) => %(<video><source src="/videos/multiple.ogg" /><source src="/videos/multiple.avi" /></video>),
     %(video_tag(["multiple.ogg", "multiple.avi"], :size => "160x120", :controls => true)) => %(<video controls="controls" height="120" width="160"><source src="/videos/multiple.ogg" /><source src="/videos/multiple.avi" /></video>)
-  }
+  }.freeze
 
   AudioPathToTag = {
     %(audio_path("xml"))          => %(/audios/xml),
     %(audio_path("xml.wav"))      => %(/audios/xml.wav),
     %(audio_path("dir/xml.wav"))  => %(/audios/dir/xml.wav),
     %(audio_path("/dir/xml.wav")) => %(/dir/xml.wav)
-  }
+  }.freeze
 
   PathToAudioToTag = {
     %(path_to_audio("xml"))          => %(/audios/xml),
     %(path_to_audio("xml.wav"))      => %(/audios/xml.wav),
     %(path_to_audio("dir/xml.wav"))  => %(/audios/dir/xml.wav),
     %(path_to_audio("/dir/xml.wav")) => %(/dir/xml.wav)
-  }
+  }.freeze
 
   AudioUrlToTag = {
     %(audio_url("xml"))          => %(http://www.example.com/audios/xml),
     %(audio_url("xml.wav"))      => %(http://www.example.com/audios/xml.wav),
     %(audio_url("dir/xml.wav"))  => %(http://www.example.com/audios/dir/xml.wav),
     %(audio_url("/dir/xml.wav")) => %(http://www.example.com/dir/xml.wav)
-  }
+  }.freeze
 
   UrlToAudioToTag = {
     %(url_to_audio("xml"))          => %(http://www.example.com/audios/xml),
     %(url_to_audio("xml.wav"))      => %(http://www.example.com/audios/xml.wav),
     %(url_to_audio("dir/xml.wav"))  => %(http://www.example.com/audios/dir/xml.wav),
     %(url_to_audio("/dir/xml.wav")) => %(http://www.example.com/dir/xml.wav)
-  }
+  }.freeze
 
   AudioLinkToTag = {
     %(audio_tag("xml.wav")) => %(<audio src="/audios/xml.wav"></audio>),
@@ -325,7 +445,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(audio_tag("audio.mp3", "audio.ogg")) => %(<audio><source src="/audios/audio.mp3" /><source src="/audios/audio.ogg" /></audio>),
     %(audio_tag(["audio.mp3", "audio.ogg"])) => %(<audio><source src="/audios/audio.mp3" /><source src="/audios/audio.ogg" /></audio>),
     %(audio_tag(["audio.mp3", "audio.ogg"], :preload => 'none', :controls => true)) => %(<audio preload="none" controls="controls"><source src="/audios/audio.mp3" /><source src="/audios/audio.ogg" /></audio>)
-  }
+  }.freeze
 
   FontPathToTag = {
     %(font_path("font.eot")) => %(/fonts/font.eot),
@@ -333,7 +453,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(font_path("font.woff")) => %(/fonts/font.woff),
     %(font_path("font.ttf")) => %(/fonts/font.ttf),
     %(font_path("font.ttf?123")) => %(/fonts/font.ttf?123)
-  }
+  }.freeze
 
   FontUrlToTag = {
     %(font_url("font.eot")) => %(http://www.example.com/fonts/font.eot),
@@ -342,7 +462,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(font_url("font.ttf")) => %(http://www.example.com/fonts/font.ttf),
     %(font_url("font.ttf?123")) => %(http://www.example.com/fonts/font.ttf?123),
     %(font_url("font.ttf", host: "http://assets.example.com")) => %(http://assets.example.com/fonts/font.ttf)
-  }
+  }.freeze
 
   UrlToFontToTag = {
     %(url_to_font("font.eot")) => %(http://www.example.com/fonts/font.eot),
@@ -351,7 +471,7 @@ class AssetTagHelperTest < ActionView::TestCase
     %(url_to_font("font.ttf")) => %(http://www.example.com/fonts/font.ttf),
     %(url_to_font("font.ttf?123")) => %(http://www.example.com/fonts/font.ttf?123),
     %(url_to_font("font.ttf", host: "http://assets.example.com")) => %(http://assets.example.com/fonts/font.ttf)
-  }
+  }.freeze
 
   def test_autodiscovery_link_tag_with_unknown_type_but_not_pass_type_option_key
     assert_raise(ArgumentError) do
@@ -443,6 +563,16 @@ class AssetTagHelperTest < ActionView::TestCase
     assert_dom_equal %(<script src="/javascripts/bank.js" nonce="iyhD0Yc0W+c="></script>), javascript_include_tag("bank", nonce: true)
   end
 
+  def test_javascript_include_tag_nonce_with_auto_nonce
+    with_auto_include_nonce_for_scripts do
+      assert_dom_equal %(<script src="/javascripts/bank.js" nonce="iyhD0Yc0W+c="></script>), javascript_include_tag("bank")
+    end
+  end
+
+  def test_javascript_include_tag_nonce_false
+    assert_dom_equal %(<script src="/javascripts/bank.js"></script>), javascript_include_tag("bank", nonce: false)
+  end
+
   def test_stylesheet_path
     StylePathToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
   end
@@ -461,6 +591,20 @@ class AssetTagHelperTest < ActionView::TestCase
 
   def test_stylesheet_link_tag
     StyleLinkToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_stylesheet_link_tag_nonce
+    assert_dom_equal %(<link rel="stylesheet" href="/stylesheets/foo.css" nonce="iyhD0Yc0W+c="></link>), stylesheet_link_tag("foo.css", nonce: true)
+  end
+
+  def test_stylesheet_link_tag_nonce_with_auto_nonce
+    with_auto_include_nonce_for_styles do
+      assert_dom_equal %(<link rel="stylesheet" href="/stylesheets/foo.css" nonce="iyhD0Yc0W+c="></link>), stylesheet_link_tag("foo.css")
+    end
+  end
+
+  def test_stylesheet_link_tag_nonce_false
+    assert_dom_equal %(<link rel="stylesheet" href="/stylesheets/foo.css"></link>), stylesheet_link_tag("foo.css", nonce: false)
   end
 
   def test_stylesheet_link_tag_with_missing_source
@@ -515,6 +659,14 @@ class AssetTagHelperTest < ActionView::TestCase
     ActionView::Helpers::AssetTagHelper.apply_stylesheet_media_default = original_default_media
   end
 
+  def test_stylesheet_link_tag_without_default_extension_applied
+    assert_dom_equal %(<link href="/stylesheets/wellington.less" rel="stylesheet" />), stylesheet_link_tag("wellington.less", extname: false)
+  end
+
+  def test_javascript_include_tag_without_default_extension_applied
+    assert_dom_equal %(<script src="/javascripts/foo.jsx"></script>), javascript_include_tag("foo.jsx", extname: false)
+  end
+
   def test_javascript_include_tag_without_request
     @request = nil
     assert_dom_equal %(<script src="/javascripts/foo.js"></script>), javascript_include_tag("foo.js")
@@ -525,14 +677,50 @@ class AssetTagHelperTest < ActionView::TestCase
       stylesheet_link_tag("http://example.com/style.css")
       javascript_include_tag("http://example.com/all.js")
       expected = "<http://example.com/style.css>; rel=preload; as=style; nopush,<http://example.com/all.js>; rel=preload; as=script; nopush"
-      assert_equal expected, @response.headers["Link"]
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_should_not_set_preload_links_for_data_url
+    with_preload_links_header do
+      stylesheet_link_tag("data:text/css;base64,YWxlcnQoIkhlbGxvIik7")
+      javascript_include_tag("data:text/javascript;base64,YWxlcnQoIkhlbGxvIik7")
+      assert_nil @response.headers["link"]
+    end
+  end
+
+  def test_should_not_set_preload_links_if_opted_out_at_invokation
+    with_preload_links_header do
+      stylesheet_link_tag("http://example.com/style.css", preload_links_header: false)
+      javascript_include_tag("http://example.com/all.js", preload_links_header: false)
+      assert_nil @response.headers["link"]
+    end
+  end
+
+  def test_should_set_preload_links_if_opted_in_at_invokation
+    with_preload_links_header(false) do
+      stylesheet_link_tag("http://example.com/style.css", preload_links_header: true)
+      javascript_include_tag("http://example.com/all.js", preload_links_header: true)
+      expected = "<http://example.com/style.css>; rel=preload; as=style; nopush,<http://example.com/all.js>; rel=preload; as=script; nopush"
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_should_generate_links_under_the_max_size
+    with_preload_links_header do
+      100.times do |i|
+        stylesheet_link_tag("http://example.com/style.css?#{i}")
+        javascript_include_tag("http://example.com/all.js?#{i}")
+      end
+      links = @response.headers["link"].count(",")
+      assert_equal 14, links
     end
   end
 
   def test_should_not_preload_links_with_defer
     with_preload_links_header do
       javascript_include_tag("http://example.com/all.js", defer: true)
-      assert_equal "", @response.headers["Link"]
+      assert_nil @response.headers["link"]
     end
   end
 
@@ -541,7 +729,7 @@ class AssetTagHelperTest < ActionView::TestCase
       stylesheet_link_tag("http://example.com/style.css", nopush: false)
       javascript_include_tag("http://example.com/all.js", nopush: false)
       expected = "<http://example.com/style.css>; rel=preload; as=style,<http://example.com/all.js>; rel=preload; as=script"
-      assert_equal expected, @response.headers["Link"]
+      assert_equal expected, @response.headers["link"]
     end
   end
 
@@ -550,7 +738,23 @@ class AssetTagHelperTest < ActionView::TestCase
       stylesheet_link_tag("http://example.com/style.css", crossorigin: "use-credentials")
       javascript_include_tag("http://example.com/all.js", crossorigin: true)
       expected = "<http://example.com/style.css>; rel=preload; as=style; crossorigin=use-credentials; nopush,<http://example.com/all.js>; rel=preload; as=script; crossorigin=anonymous; nopush"
-      assert_equal expected, @response.headers["Link"]
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_should_set_preload_links_with_rel_modulepreload
+    with_preload_links_header do
+      javascript_include_tag("http://example.com/all.js", type: "module")
+      expected = "<http://example.com/all.js>; rel=modulepreload; as=script; nopush"
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_should_set_preload_early_hints_with_rel_modulepreload
+    with_preload_links_header do
+      preload_link_tag("http://example.com/all.js", type: "module")
+      expected = "<http://example.com/all.js>; rel=modulepreload; as=script; type=module"
+      assert_equal expected, @response.headers["link"]
     end
   end
 
@@ -559,15 +763,56 @@ class AssetTagHelperTest < ActionView::TestCase
       stylesheet_link_tag("http://example.com/style.css", integrity: "sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs")
       javascript_include_tag("http://example.com/all.js", integrity: "sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs")
       expected = "<http://example.com/style.css>; rel=preload; as=style; integrity=sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs; nopush,<http://example.com/all.js>; rel=preload; as=script; integrity=sha256-AbpHGcgLb+kRsJGnwFEktk7uzpZOCcBY74+YBdrKVGs; nopush"
-      assert_equal expected, @response.headers["Link"]
+      assert_equal expected, @response.headers["link"]
     end
+  end
+
+  def test_should_set_preload_links_with_nonce
+    @request.content_security_policy_nonce_directives = %w(script-src)
+    with_preload_links_header do
+      preload_link_tag("http://example.com/preload.js")
+      stylesheet_link_tag("http://example.com/style.css", nonce: true)
+      javascript_include_tag("http://example.com/all.js", nonce: true)
+      expected = "<http://example.com/preload.js>; rel=preload; as=script; type=text/javascript; nonce=iyhD0Yc0W+c=,<http://example.com/style.css>; rel=preload; as=style; nonce=iyhD0Yc0W+c=; nopush,<http://example.com/all.js>; rel=preload; as=script; nonce=iyhD0Yc0W+c=; nopush"
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_should_set_preload_link_tag_nonce_if_listed_in_csp_directives
+    @request.content_security_policy_nonce_directives = %w(script-src)
+    assert_equal %(<link rel="preload" href="/application.js" as="script" type="text/javascript" nonce="iyhD0Yc0W+c=">), preload_link_tag("/application.js")
+    assert_equal %(<link rel="preload" href="/style.css" as="style" type="text/css">), preload_link_tag("/style.css")
+
+    @request.content_security_policy_nonce_directives = %w(style-src)
+    assert_equal %(<link rel="preload" href="/application.js" as="script" type="text/javascript">), preload_link_tag("/application.js")
+    assert_equal %(<link rel="preload" href="/style.css" as="style" type="text/css" nonce="iyhD0Yc0W+c=">), preload_link_tag("/style.css")
   end
 
   def test_should_not_preload_links_when_disabled
     with_preload_links_header(false) do
       stylesheet_link_tag("http://example.com/style.css")
       javascript_include_tag("http://example.com/all.js")
-      assert_nil @response.headers["Link"]
+      assert_nil @response.headers["link"]
+    end
+  end
+
+  def test_should_set_preload_links_with_fetchpriority
+    with_preload_links_header do
+      preload_link_tag("http://example.com/hero.jpg", fetchpriority: "high")
+      preload_link_tag("http://example.com/background.png", fetchpriority: "low")
+      expected = "<http://example.com/hero.jpg>; rel=preload; as=image; type=image/jpeg; fetchpriority=high,<http://example.com/background.png>; rel=preload; as=image; type=image/png; fetchpriority=low"
+      assert_equal expected, @response.headers["link"]
+    end
+  end
+
+  def test_preload_link_tag_fetchpriority_html_and_header_consistency
+    with_preload_links_header do
+      html_tag = preload_link_tag("http://example.com/critical.css", fetchpriority: "high")
+      # Verify HTML tag includes fetchpriority
+      assert_match(/fetchpriority="high"/, html_tag)
+
+      expected_header = "<http://example.com/critical.css>; rel=preload; as=style; type=text/css; fetchpriority=high"
+      assert_equal expected_header, @response.headers["link"]
     end
   end
 
@@ -631,6 +876,26 @@ class AssetTagHelperTest < ActionView::TestCase
 
   def test_preload_link_tag
     PreloadLinkToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_picture_path
+    PicturePathToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_path_to_picture_alias_for_picture_path
+    PathToPictureToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_picture_url
+    PictureUrlToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_url_to_picture_alias_for_picture_url
+    UrlToPictureToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
+  end
+
+  def test_picture_tag
+    PictureLinkToTag.each { |method, tag| assert_dom_equal(tag, eval(method)) }
   end
 
   def test_video_path
@@ -753,16 +1018,6 @@ class AssetTagHelperTest < ActionView::TestCase
       assert_equal "http://localhost/images/xml.png", image_path("xml.png")
     end
   end
-
-  private
-    def with_preload_links_header(new_preload_links_header = true)
-      original_preload_links_header = ActionView::Helpers::AssetTagHelper.preload_links_header
-      ActionView::Helpers::AssetTagHelper.preload_links_header = new_preload_links_header
-
-      yield
-    ensure
-      ActionView::Helpers::AssetTagHelper.preload_links_header = original_preload_links_header
-    end
 end
 
 class AssetTagHelperNonVhostTest < ActionView::TestCase
@@ -916,6 +1171,32 @@ class AssetTagHelperWithoutRequestTest < ActionView::TestCase
   end
 end
 
+class AssetTagHelperWithStreamingRequest < ActionView::TestCase
+  tests ActionView::Helpers::AssetTagHelper
+
+  include AssetTagHelperTestHelpers
+
+  def setup
+    super
+    response.sending!
+  end
+
+  def test_stylesheet_link_tag_with_streaming
+    with_preload_links_header do
+      assert_dom_equal(
+        %(<link rel="stylesheet" href="/stylesheets/foo.css" />),
+        stylesheet_link_tag("foo.css")
+      )
+    end
+  end
+
+  def test_javascript_include_tag_with_streaming
+    with_preload_links_header do
+      assert_dom_equal %(<script src="/javascripts/foo.js"></script>), javascript_include_tag("foo.js")
+    end
+  end
+end
+
 class AssetUrlHelperControllerTest < ActionView::TestCase
   tests ActionView::Helpers::AssetUrlHelper
 
@@ -994,5 +1275,32 @@ class AssetUrlHelperEmptyModuleTest < ActionView::TestCase
 
     assert @module.config.asset_host
     assert_equal "http://custom.example.com/foo", @module.asset_url("foo", host: "http://custom.example.com")
+  end
+end
+
+class AssetTagHelperSettingsRactorTest < ActiveSupport::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
+  test "the settings are readable from a non-main Ractor" do
+    expected = [
+      ActionView::Helpers::AssetTagHelper.image_loading,
+      ActionView::Helpers::AssetTagHelper.image_decoding,
+      ActionView::Helpers::AssetTagHelper.preload_links_header,
+      ActionView::Helpers::AssetTagHelper.apply_stylesheet_media_default,
+      ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_scripts,
+      ActionView::Helpers::AssetTagHelper.auto_include_nonce_for_styles,
+    ]
+
+    assert_equal expected, on_ractor {
+      helper = ActionView::Helpers::AssetTagHelper
+      [
+        helper.image_loading,
+        helper.image_decoding,
+        helper.preload_links_header,
+        helper.apply_stylesheet_media_default,
+        helper.auto_include_nonce_for_scripts,
+        helper.auto_include_nonce_for_styles,
+      ]
+    }
   end
 end

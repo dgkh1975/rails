@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Rails
   class Application
     class DefaultMiddlewareStack
@@ -13,14 +14,25 @@ module Rails
 
       def build_stack
         ActionDispatch::MiddlewareStack.new do |middleware|
-          middleware.use ::ActionDispatch::HostAuthorization, config.hosts, config.action_dispatch.hosts_response_app, **config.host_authorization
-
-          if config.force_ssl
-            middleware.use ::ActionDispatch::SSL, **config.ssl_options,
-              ssl_default_redirect_status: config.action_dispatch.ssl_default_redirect_status
+          unless Array(config.hosts).empty?
+            middleware.use ::ActionDispatch::HostAuthorization, config.hosts, **config.host_authorization
           end
 
-          middleware.use ::Rack::Sendfile, config.action_dispatch.x_sendfile_header
+          if config.assume_ssl
+            middleware.use ::ActionDispatch::AssumeSSL
+          end
+
+          if config.force_ssl
+            ssl_options = config.ssl_options
+            unless config.action_dispatch.ssl_default_redirect_status == 308
+              ssl_options = ssl_options.merge(ssl_default_redirect_status: config.action_dispatch.ssl_default_redirect_status)
+            end
+            middleware.use ::ActionDispatch::SSL, **ssl_options
+          end
+
+          if config.action_dispatch.x_sendfile_header
+            middleware.use ::Rack::Sendfile, config.action_dispatch.x_sendfile_header
+          end
 
           if config.public_file_server.enabled
             headers = config.public_file_server.headers || {}
@@ -42,10 +54,15 @@ module Rails
 
           middleware.use ::ActionDispatch::Executor, app.executor
 
+          middleware.use ::ActionDispatch::ServerTiming if config.server_timing
           middleware.use ::Rack::Runtime
           middleware.use ::Rack::MethodOverride unless config.api_only
           middleware.use ::ActionDispatch::RequestId, header: config.action_dispatch.request_id_header
           middleware.use ::ActionDispatch::RemoteIp, config.action_dispatch.ip_spoofing_check, config.action_dispatch.trusted_proxies
+
+          if path = config.silence_healthcheck_path
+            middleware.use ::Rails::Rack::SilenceRequest, path: path
+          end
 
           middleware.use ::Rails::Rack::Logger, config.log_tags
           middleware.use ::ActionDispatch::ShowExceptions, show_exceptions_app
@@ -55,7 +72,7 @@ module Rails
             middleware.use ::ActionDispatch::ActionableExceptions
           end
 
-          unless config.cache_classes
+          if config.reloading_enabled?
             middleware.use ::ActionDispatch::Reloader, app.reloader
           end
 
@@ -67,12 +84,12 @@ module Rails
               config.session_options[:secure] = true
             end
             middleware.use config.session_store, config.session_options
-            middleware.use ::ActionDispatch::Flash
           end
 
           unless config.api_only
+            middleware.use ::ActionDispatch::Flash
             middleware.use ::ActionDispatch::ContentSecurityPolicy::Middleware
-            middleware.use ::ActionDispatch::PermissionsPolicy::Middleware
+            middleware.use ::ActionDispatch::PermissionsPolicy::Middleware if config.permissions_policy
           end
 
           middleware.use ::Rack::Head
@@ -80,6 +97,21 @@ module Rails
           middleware.use ::Rack::ETag, "no-cache"
 
           middleware.use ::Rack::TempfileReaper unless config.api_only
+
+          if config.respond_to?(:active_record)
+            if selector_options = config.active_record.database_selector
+              resolver = config.active_record.database_resolver
+              context = config.active_record.database_resolver_context
+
+              middleware.use ::ActiveRecord::Middleware::DatabaseSelector, resolver, context, selector_options
+            end
+
+            if shard_resolver = config.active_record.shard_resolver
+              options = config.active_record.shard_selector || {}
+
+              middleware.use ::ActiveRecord::Middleware::ShardSelector, shard_resolver, options
+            end
+          end
         end
       end
 

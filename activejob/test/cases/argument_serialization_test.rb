@@ -1,11 +1,18 @@
 # frozen_string_literal: true
 
+require "json"
+require "bigdecimal"
 require "helper"
-require "active_job/arguments"
 require "models/person"
 require "active_support/core_ext/hash/indifferent_access"
+require "active_support/core_ext/integer/time"
+require "active_support/duration"
 require "jobs/kwargs_job"
+require "jobs/arguments_round_trip_job"
 require "support/stubs/strong_parameters"
+require "active_support/core_ext/string/output_safety"
+require "active_support/core_ext/object/with"
+require "active_support/testing/ractors_assertions"
 
 class ArgumentSerializationTest < ActiveSupport::TestCase
   module ModuleArgument
@@ -14,8 +21,38 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
 
   class ClassArgument; end
 
+  class MyClassWithPermitted
+    def self.permitted?
+    end
+  end
+
+  class MyString < String
+  end
+
+  class MyStringSerializer < ActiveJob::Serializers::ObjectSerializer
+    def serialize(argument)
+      super({ "value" => argument.to_s })
+    end
+
+    def deserialize(hash)
+      MyString.new(hash["value"])
+    end
+
+    def klass
+      MyString
+    end
+  end
+
+  class StringWithoutSerializer < String
+  end
+
   setup do
     @person = Person.find("5")
+    @original_serializers = ActiveJob::Serializers.serializers
+  end
+
+  teardown do
+    ActiveJob::Serializers.serializers = @original_serializers
   end
 
   [ nil, 1, 1.0, 1_000_000_000_000_000_000_000,
@@ -30,14 +67,27 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
     { "a" => 1 },
     ModuleArgument,
     ModuleArgument::ClassArgument,
-    ClassArgument
+    ClassArgument,
+    1..,
+    1...,
+    1..5,
+    1...5,
+    "a".."z",
+    "A".."Z",
+    Date.new(2001, 2, 3)..,
+    10.days.ago..Date.today,
+    Time.new(2002, 10, 31, 2, 2, 2.123456789r, "+02:00")..,
+    10.hours.ago..Time.current,
+    DateTime.new(2001, 2, 3, 4, 5, 6.123456r, "+03:00")..,
+    (DateTime.current - 4.weeks)..DateTime.current,
+    ActiveSupport::TimeWithZone.new(Time.utc(1999, 12, 31, 23, 59, "59.123456789".to_r), ActiveSupport::TimeZone["UTC"])..,
   ].each do |arg|
     test "serializes #{arg.class} - #{arg.inspect} verbatim" do
       assert_arguments_unchanged arg
     end
   end
 
-  [ Object.new, Person.find("5").to_gid ].each do |arg|
+  [ Object.new, Person.find("5").to_gid, Class.new ].each do |arg|
     test "does not serialize #{arg.class}" do
       assert_raises ActiveJob::SerializationError do
         ActiveJob::Arguments.serialize [ arg ]
@@ -66,13 +116,41 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
     assert_arguments_roundtrip([a: 1, "b" => 2])
   end
 
-  test "serialize a ActionController::Parameters" do
+  test "serialize an ActionController::Parameters" do
+    ActiveJob::Serializers.add_serializers ActiveJob::Serializers::ActionControllerParametersSerializer
+
     parameters = Parameters.new(a: 1)
 
     assert_equal(
       { "a" => 1, "_aj_hash_with_indifferent_access" => true },
       ActiveJob::Arguments.serialize([parameters]).first
     )
+  end
+
+  # Regression test to #48561
+  test "serialize a class with permitted? defined" do
+    assert_arguments_unchanged MyClassWithPermitted
+  end
+
+  test "serialize a String subclass object" do
+    original_serializers = ActiveJob::Serializers.serializers
+    ActiveJob::Serializers.add_serializers(MyStringSerializer)
+
+    my_string = MyString.new("foo")
+    serialized = ActiveJob::Arguments.serialize([my_string])
+    deserialized = ActiveJob::Arguments.deserialize(JSON.load(JSON.dump(serialized))).first
+    assert_instance_of MyString, deserialized
+    assert_equal my_string, deserialized
+  ensure
+    ActiveJob::Serializers.serializers = original_serializers
+  end
+
+  test "serialize a String subclass object without a serializer" do
+    string_without_serializer = StringWithoutSerializer.new("foo")
+    serialized = ActiveJob::Arguments.serialize([string_without_serializer])
+    deserialized = ActiveJob::Arguments.deserialize(JSON.load(JSON.dump(serialized))).first
+    assert_instance_of String, deserialized
+    assert_equal string_without_serializer, deserialized
   end
 
   test "serialize a hash" do
@@ -141,6 +219,12 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
     end
   end
 
+  test "should maintain a functional duration" do
+    duration = perform_round_trip([1.year]).first
+    assert_kind_of Hash, duration.parts
+    assert_equal 2.years, duration + 1.year
+  end
+
   test "should disallow non-string/symbol hash keys" do
     assert_raises ActiveJob::SerializationError do
       ActiveJob::Arguments.serialize [ { 1 => 2 } ]
@@ -185,6 +269,44 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
     assert_match "Unable to serialize Person without an id.", err.message
   end
 
+  test "wraps a missing record referenced by a Global ID in a DeserializationError::RecordNotFound" do
+    serialized = ActiveJob::Arguments.serialize [Person.new(404)]
+
+    error = assert_raises ActiveJob::DeserializationError::RecordNotFound do
+      ActiveJob::Arguments.deserialize serialized
+    end
+    assert_kind_of ActiveJob::DeserializationError, error
+    assert_instance_of GlobalID::Locator::RecordNotFound, error.cause
+  end
+
+  test "wraps other errors raised during deserialization in a plain DeserializationError" do
+    serialized = ActiveJob::Arguments.serialize [Person.new(500)]
+
+    error = assert_raises ActiveJob::DeserializationError do
+      ActiveJob::Arguments.deserialize serialized
+    end
+    assert_instance_of ActiveJob::DeserializationError, error
+    assert_instance_of GlobalID::Locator::RecordUnavailable, error.cause
+  end
+
+  class RactorTest < ActiveSupport::TestCase
+    include ActiveSupport::Testing::Isolation
+    include ActiveSupport::Testing::RactorsAssertions
+
+    test "arguments are serialized and deserialized from a non-main Ractor" do
+      ActiveSupport::Ractors.with(unshareable_proc_action: :raise) { ActiveJob::Serializers.make_shareable! }
+
+      arguments = [
+        :a, 1.day, BigDecimal(5), Date.new(2001, 2, 3), Time.utc(2002, 10, 31, 2, 2, 2), DateTime.new(2001, 2, 3, 4, 5, 6), 1..5,
+        ClassArgument, { a: 1, "b" => 2 }, { "c" => 3 }.with_indifferent_access, "d".html_safe,
+      ]
+      round_tripped = on_ractor(arguments) do |arguments|
+        ActiveJob::Arguments.deserialize(ActiveJob::Arguments.serialize(arguments))
+      end
+      assert_equal arguments, round_tripped
+    end
+  end
+
   private
     def assert_arguments_unchanged(*args)
       assert_arguments_roundtrip args
@@ -195,6 +317,8 @@ class ArgumentSerializationTest < ActiveSupport::TestCase
     end
 
     def perform_round_trip(args)
-      ActiveJob::Arguments.deserialize(ActiveJob::Arguments.serialize(args))
+      ArgumentsRoundTripJob.perform_later(*args) # Actually performed inline
+
+      JobBuffer.last_value
     end
 end

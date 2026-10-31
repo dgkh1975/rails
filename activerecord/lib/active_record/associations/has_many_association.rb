@@ -2,12 +2,14 @@
 
 module ActiveRecord
   module Associations
-    # = Active Record Has Many Association
+    # Active Record Has Many Association
+    # ==================================
+    #
     # This is the proxy that handles a has many association.
     #
-    # If the association has a <tt>:through</tt> option further specialization
+    # If the association has a `:through` option further specialization
     # is provided by its child HasManyThroughAssociation.
-    class HasManyAssociation < CollectionAssociation #:nodoc:
+    class HasManyAssociation < CollectionAssociation # :nodoc:
       include ForeignAssociation
 
       def handle_dependency
@@ -17,8 +19,8 @@ module ActiveRecord
 
         when :restrict_with_error
           unless empty?
-            record = owner.class.human_attribute_name(reflection.name).downcase
-            owner.errors.add(:base, :'restrict_dependent_destroy.has_many', record: record)
+            association_name = owner.class.human_attribute_name(reflection.name)
+            owner.errors.add(:base, :'restrict_dependent_destroy.has_many', record: association_name.downcase, association_name: association_name)
             throw(:abort)
           end
 
@@ -33,20 +35,24 @@ module ActiveRecord
 
           unless target.empty?
             association_class = target.first.class
-            primary_key_column = association_class.primary_key.to_sym
-
-            ids = target.collect do |assoc|
-              assoc.public_send(primary_key_column)
+            if association_class.query_constraints_list
+              primary_key_column = association_class.query_constraints_list
+              ids = target.collect { |assoc| primary_key_column.map { |col| assoc.public_send(col) } }
+            else
+              primary_key_column = association_class.primary_key
+              ids = target.collect { |assoc| assoc.public_send(primary_key_column) }
             end
 
-            enqueue_destroy_association(
-              owner_model_name: owner.class.to_s,
-              owner_id: owner.id,
-              association_class: reflection.klass.to_s,
-              association_ids: ids,
-              association_primary_key_column: primary_key_column,
-              ensuring_owner_was_method: options.fetch(:ensuring_owner_was, nil)
-            )
+            ids.each_slice(owner.class.destroy_association_async_batch_size || ids.size) do |ids_batch|
+              enqueue_destroy_association(
+                owner_model_name: owner.class.to_s,
+                owner_id: owner.id,
+                association_class: reflection.klass.to_s,
+                association_ids: ids_batch,
+                association_primary_key_column: primary_key_column,
+                ensuring_owner_was_method: options.fetch(:ensuring_owner_was, nil)
+              )
+            end
           end
         else
           delete_all
@@ -62,27 +68,30 @@ module ActiveRecord
         # Returns the number of records in this collection.
         #
         # If the association has a counter cache it gets that value. Otherwise
-        # it will attempt to do a count via SQL, bounded to <tt>:limit</tt> if
+        # it will attempt to do a count via SQL, bounded to `:limit` if
         # there's one. Some configuration options like :group make it impossible
         # to do an SQL count, in those cases the array count will be used.
         #
         # That does not depend on whether the collection has already been loaded
-        # or not. The +size+ method is the one that takes the loaded flag into
-        # account and delegates to +count_records+ if needed.
+        # or not. The `size` method is the one that takes the loaded flag into
+        # account and delegates to `count_records` if needed.
         #
         # If the collection is empty the target is set to an empty array and
         # the loaded flag is set to true as well.
         def count_records
-          count = if reflection.has_cached_counter?
-            owner.read_attribute(reflection.counter_cache_column).to_i
+          count = if reflection.has_active_cached_counter?
+            owner.read_attr(reflection.counter_cache_column).to_i
           else
             scope.count(:all)
           end
 
-          # If there's nothing in the database and @target has no new records
-          # we are certain the current target is an empty array. This is a
-          # documented side-effect of the method that may avoid an extra SELECT.
-          loaded! if count == 0
+          # If there's nothing in the database, @target should only contain new
+          # records or be an empty array. This is a documented side-effect of
+          # the method that may avoid an extra SELECT.
+          if count == 0
+            target.select!(&:new_record?)
+            loaded!
+          end
 
           [association_scope.limit_value, count].compact.min
         end
@@ -115,13 +124,15 @@ module ActiveRecord
           count
         end
 
-        # Deletes the records according to the <tt>:dependent</tt> option.
+        # Deletes the records according to the `:dependent` option.
         def delete_records(records, method)
           if method == :destroy
             records.each(&:destroy!)
             update_counter(-records.length) unless reflection.inverse_updates_counter_cache?
           else
-            scope = self.scope.where(reflection.klass.primary_key => records)
+            query_constraints = reflection.klass.composite_query_constraints_list
+            values = records.map { |r| query_constraints.map { |col| r.read_attr(col) } }
+            scope = self.scope.where(query_constraints => values)
             update_counter(-delete_count(method, scope))
           end
         end

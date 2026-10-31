@@ -7,10 +7,13 @@ require "models/project"
 require "models/topic"
 require "models/post"
 require "models/comment"
+require "models/ship"
 
 module ActiveRecord
   class CollectionCacheKeyTest < ActiveRecord::TestCase
     fixtures :developers, :projects, :developers_projects, :topics, :comments, :posts
+
+    skip_under_ractor_proxy :test_insert_all_will_update_cache_key, :test_upsert_all_will_update_cache_key
 
     test "collection_cache_key on model" do
       assert_match(/\Adevelopers\/query-(\h+)-(\d+)-(\d+)\z/, Developer.collection_cache_key)
@@ -26,7 +29,7 @@ module ActiveRecord
 
       assert_equal ActiveSupport::Digest.hexdigest(developers.to_sql), $1
       assert_equal developers.count.to_s, $2
-      assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $3
+      assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $3
     end
 
     test "cache_key for relation with limit" do
@@ -39,7 +42,7 @@ module ActiveRecord
 
       assert_equal ActiveSupport::Digest.hexdigest(developers.to_sql), $1
       assert_equal developers.count.to_s, $2
-      assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $3
+      assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $3
     end
 
     test "cache_key for relation with custom select and limit" do
@@ -53,7 +56,7 @@ module ActiveRecord
 
       assert_equal ActiveSupport::Digest.hexdigest(developers_with_select.to_sql), $1
       assert_equal developers.count.to_s, $2
-      assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $3
+      assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $3
     end
 
     test "cache_key for loaded relation" do
@@ -66,19 +69,23 @@ module ActiveRecord
 
       assert_equal ActiveSupport::Digest.hexdigest(developers.to_sql), $1
       assert_equal developers.count.to_s, $2
-      assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $3
+      assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $3
+    end
+
+    test "cache_key for a loaded relation with a NULL timestamp matches the unloaded key" do
+      with_timestamp = Topic.create!(title: "with timestamp")
+      without_timestamp = Topic.create!(title: "without timestamp")
+      Topic.where(id: without_timestamp.id).update_all(updated_at: nil)
+
+      relation = -> { Topic.where(id: [with_timestamp.id, without_timestamp.id]) }
+
+      assert_equal relation.call.cache_key, relation.call.load.cache_key
     end
 
     test "cache_key for relation with table alias" do
       table_alias = Developer.arel_table.alias("omg_developers")
-      table_metadata = ActiveRecord::TableMetadata.new(Developer, table_alias)
-      predicate_builder = ActiveRecord::PredicateBuilder.new(table_metadata)
 
-      developers = ActiveRecord::Relation.create(
-        Developer,
-        table: table_alias,
-        predicate_builder: predicate_builder
-      )
+      developers = ActiveRecord::Relation.create(Developer, table: table_alias)
       developers = developers.where(salary: 100000).order(updated_at: :desc)
       last_developer_timestamp = developers.first.updated_at
 
@@ -88,7 +95,7 @@ module ActiveRecord
 
       assert_equal ActiveSupport::Digest.hexdigest(developers.to_sql), $1
       assert_equal developers.count.to_s, $2
-      assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $3
+      assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $3
     end
 
     test "cache_key for relation with includes" do
@@ -101,10 +108,77 @@ module ActiveRecord
       assert_match(/\Acomments\/query-(\h+)-(\d+)-(\d+)\z/, comments.cache_key)
     end
 
+    test "insert_all will update cache_key" do
+      skip unless supports_insert_on_duplicate_skip?
+
+      developers = Developer.all
+      cache_key = developers.cache_key
+
+      developers.insert_all([{ name: "Alice" }, { name: "Bob" }])
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "upsert_all will update cache_key" do
+      skip unless supports_insert_on_duplicate_update?
+
+      developers = Developer.all
+      cache_key = developers.cache_key
+
+      developers.upsert_all([{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }])
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "update_all will update cache_key" do
+      developers = Developer.where(name: "David")
+      cache_key = developers.cache_key
+
+      developers.update_all(updated_at: Time.now.utc)
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "update_all with includes will update cache_key" do
+      developers = Developer.includes(:projects).where("projects.name": "Active Record")
+      cache_key = developers.cache_key
+
+      developers.update_all(updated_at: Time.now.utc)
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "delete_all will update cache_key" do
+      developers = Developer.where(name: "David")
+      cache_key = developers.cache_key
+
+      developers.delete_all
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "delete_all with includes will update cache_key" do
+      developers = Developer.includes(:projects).where("projects.name": "Active Record")
+      cache_key = developers.cache_key
+
+      developers.delete_all
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
+    test "destroy_all will update cache_key" do
+      developers = Developer.where(name: "David")
+      cache_key = developers.cache_key
+
+      developers.destroy_all
+
+      assert_not_equal cache_key, developers.cache_key
+    end
+
     test "it triggers at most one query" do
       developers = Developer.where(name: "David")
 
-      assert_queries(1) { developers.cache_key }
+      assert_queries_count(1) { developers.cache_key }
       assert_no_queries { developers.cache_key }
     end
 
@@ -134,7 +208,7 @@ module ActiveRecord
 
     test "cache_key with custom timestamp column" do
       topics = Topic.where("title like ?", "%Topic%")
-      last_topic_timestamp = topics(:fifth).written_on.utc.to_s(:usec)
+      last_topic_timestamp = topics(:fifth).written_on.utc.to_fs(:usec)
       assert_match(last_topic_timestamp, topics.cache_key(:written_on))
     end
 
@@ -171,6 +245,7 @@ module ActiveRecord
       developers = Developer.distinct.order(:salary).limit(5)
 
       assert_match(/\Adevelopers\/query-(\h+)-(\d+)-(\d+)\z/, developers.cache_key)
+      assert_not_predicate developers, :loaded?
     end
 
     test "cache_key with a relation having custom select and order" do
@@ -201,7 +276,20 @@ module ActiveRecord
         /(\d+)-(\d+)\z/ =~ developers.cache_version
 
         assert_equal developers.count.to_s, $1
-        assert_equal last_developer_timestamp.to_s(ActiveRecord::Base.cache_timestamp_format), $2
+        assert_equal last_developer_timestamp.to_fs(ActiveRecord::Base.cache_timestamp_format), $2
+      end
+    end
+
+    test "reset will reset cache_version" do
+      with_collection_cache_versioning do
+        developers = Developer.all
+
+        assert_equal Developer.all.cache_version, developers.cache_version
+
+        Developer.update_all(updated_at: Time.now.utc + 1.second)
+        developers.reset
+
+        assert_equal Developer.all.cache_version, developers.cache_version
       end
     end
 

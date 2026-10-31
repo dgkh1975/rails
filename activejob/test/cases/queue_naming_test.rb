@@ -1,12 +1,18 @@
 # frozen_string_literal: true
 
 require "helper"
+require "jobs/configuration_job"
 require "jobs/hello_job"
 require "jobs/prefixed_job"
 require "jobs/logging_job"
 require "jobs/nested_job"
+require "active_support/testing/ractors_assertions"
 
 class QueueNamingTest < ActiveSupport::TestCase
+  setup do
+    JobBuffer.clear
+  end
+
   test "name derived from base" do
     assert_equal "default", HelloJob.new.queue_name
   end
@@ -143,8 +149,33 @@ class QueueNamingTest < ActiveSupport::TestCase
     end
   end
 
-  test "uses queue passed to #set" do
-    job = HelloJob.set(queue: :some_queue).perform_later
+  test "is assigned when perform_now" do
+    ConfigurationJob.set(queue: :some_queue).perform_now
+    job = JobBuffer.last_value
     assert_equal "some_queue", job.queue_name
+  end
+
+  test "is assigned when perform_later" do
+    ConfigurationJob.set(queue: :some_queue).perform_later
+    job = JobBuffer.last_value
+    assert_equal "some_queue", job.queue_name
+  end
+end
+
+class QueueNamingRactorTest < ActiveSupport::TestCase
+  include ActiveSupport::Testing::Isolation
+  include ActiveSupport::Testing::RactorsAssertions
+
+  test "queue name resolves from a non-main Ractor" do
+    assert_equal "default", on_ractor { HelloJob.new.queue_name }
+    assert_equal "default", on_ractor { HelloJob.default_queue_name }
+  end
+
+  test "prefixed queue name resolves from a non-main Ractor" do
+    ActiveJob::Base.queue_name_prefix = +"aj"
+    ActiveJob::Base.queue_name_delimiter = +"."
+
+    assert_equal "aj.default", on_ractor { HelloJob.new.queue_name }
+    assert_equal "aj.low", on_ractor { HelloJob.new.set(queue: :low).queue_name }
   end
 end

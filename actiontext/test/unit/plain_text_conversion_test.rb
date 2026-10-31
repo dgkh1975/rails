@@ -17,6 +17,20 @@ class ActionText::PlainTextConversionTest < ActiveSupport::TestCase
     )
   end
 
+  test "<blockquote> tag with whitespace" do
+    assert_converted_to(
+      "   “Hello world!” ",
+      "<blockquote>   Hello world! </blockquote>"
+    )
+  end
+
+  test "<blockquote> tag with only whitespace" do
+    assert_converted_to(
+      "“”",
+      "<blockquote> </blockquote>"
+    )
+  end
+
   test "<ol> tags are separated by two new lines" do
     assert_converted_to(
       "Hello world!\n\n1. list1\n\n1. list2\n\nHow are you?",
@@ -38,6 +52,15 @@ class ActionText::PlainTextConversionTest < ActiveSupport::TestCase
     )
   end
 
+  test "<h2> through <h6> tags are separated by two new lines" do
+    (2..6).each do |level|
+      assert_converted_to(
+        "Hello world!\n\nHow are you?",
+        "<h#{level}>Hello world!</h#{level}><div>How are you?</div>"
+      )
+    end
+  end
+
   test "<li> tags are separated by one new line" do
     assert_converted_to(
       "• one\n• two\n• three",
@@ -49,6 +72,27 @@ class ActionText::PlainTextConversionTest < ActiveSupport::TestCase
     assert_converted_to(
       "• one\n• two\n• three",
       "<li>one</li><li>two</li><li>three</li>"
+    )
+  end
+
+  test "basic nested <ul> tags are indented" do
+    assert_converted_to(
+      "• Item 1\n  • Item 2",
+      "<ul><li>Item 1<ul><li>Item 2</li></ul></li></ul>"
+    )
+  end
+
+  test "basic nested <ol> tags are indented" do
+    assert_converted_to(
+      "1. Item 1\n  1. Item 2",
+      "<ol><li>Item 1<ol><li>Item 2</li></ol></li></ol>"
+    )
+  end
+
+  test "complex nested / mixed list tags are indented" do
+    assert_converted_to(
+      "• Item 0\n• Item 1\n  • Item A\n    1. Item i\n    2. Item ii\n  • Item B\n    • Item i\n• Item 2",
+      "<ul><li>Item 0</li><li>Item 1<ul><li>Item A<ol><li>Item i</li><li>Item ii</li></ol></li><li>Item B<ul><li>Item i</li></ul></li></ul></li><li>Item 2</li></ul>"
     )
   end
 
@@ -85,7 +129,7 @@ class ActionText::PlainTextConversionTest < ActiveSupport::TestCase
       "Hello world!\nHow are you?",
       ActionText::Fragment.wrap("<div>Hello world!</div><div></div>").tap do |fragment|
         node = fragment.source.children.last
-        1_000.times do
+        10_000.times do
           child = node.clone
           child.parent = node
           node = child
@@ -106,6 +150,30 @@ class ActionText::PlainTextConversionTest < ActiveSupport::TestCase
     assert_converted_to(
       "Hello\nHow are you?",
       "<strong>Hello<br></strong>How are you?"
+    )
+  end
+
+  test "script tags are ignored" do
+    assert_converted_to(
+      "Hello world!",
+      <<~HTML
+        <script type="javascript">
+          console.log("message");
+        </script>
+        <div><strong>Hello </strong>world!</div>
+      HTML
+    )
+  end
+
+  test "style tags are ignored" do
+    assert_converted_to(
+      "Hello world!",
+      <<~HTML
+        <style type="text/css">
+          body { color: red; }
+        </style>
+        <div><strong>Hello </strong>world!</div>
+      HTML
     )
   end
 

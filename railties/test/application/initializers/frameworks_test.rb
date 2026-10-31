@@ -25,7 +25,7 @@ module ApplicationTests
         RUBY
 
         use_frameworks []
-        require "#{app_path}/config/environment"
+        app("development")
       end
     end
 
@@ -34,7 +34,7 @@ module ApplicationTests
         config.root = "#{app_path}"
       RUBY
 
-      require "#{app_path}/config/environment"
+      app("development")
 
       expanded_path = File.expand_path("app/views", app_path)
       assert_equal expanded_path, ActionController::Base.view_paths[0].to_s
@@ -48,7 +48,7 @@ module ApplicationTests
         end
       RUBY
 
-      require "#{app_path}/config/environment"
+      app("development")
       assert_equal "test.rails", ActionMailer::Base.default_url_options[:host]
     end
 
@@ -66,9 +66,9 @@ module ApplicationTests
         end
       RUBY
 
-      require "#{app_path}/config/environment"
-      assert Foo.method_defined?(:foo_url)
-      assert Foo.method_defined?(:main_app)
+      app("development")
+      assert Foo.new.respond_to?(:foo_url)
+      assert Foo.new.respond_to?(:main_app)
     end
 
     test "allows to not load all helpers for controllers" do
@@ -82,11 +82,11 @@ module ApplicationTests
       app_file "app/controllers/foo_controller.rb", <<-RUBY
         class FooController < ApplicationController
           def included_helpers
-            render :inline => "<%= from_app_helper -%> <%= from_foo_helper %>"
+            render inline: "<%= from_app_helper -%> <%= from_foo_helper %>"
           end
 
           def not_included_helper
-            render :inline => "<%= respond_to?(:from_bar_helper) -%>"
+            render inline: "<%= respond_to?(:from_bar_helper) -%>"
           end
         end
       RUBY
@@ -117,7 +117,8 @@ module ApplicationTests
 
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get "/:controller(/:action)"
+          get "/foo/included_helpers", to: "foo#included_helpers"
+          get "/foo/not_included_helper", to: "foo#not_included_helper"
         end
       RUBY
 
@@ -149,7 +150,7 @@ module ApplicationTests
 
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get "/:controller(/:action)"
+          get "/omg/show", to: "omg#show"
         end
       RUBY
 
@@ -163,14 +164,14 @@ module ApplicationTests
     # AD
     test "action_dispatch extensions are applied to ActionDispatch" do
       add_to_config "config.action_dispatch.tld_length = 2"
-      require "#{app_path}/config/environment"
+      app("development")
       assert_equal 2, ActionDispatch::Http::URL.tld_length
     end
 
     test "assignment config.encoding to default_charset" do
       charset = "Shift_JIS"
       add_to_config "config.encoding = '#{charset}'"
-      require "#{app_path}/config/environment"
+      app("development")
       assert_equal charset, ActionDispatch::Response.default_charset
     end
 
@@ -181,14 +182,14 @@ module ApplicationTests
         end
       RUBY
 
-      require "#{app_path}/config/environment"
+      app("development")
       assert_equal true, ActionDispatch::Http::URL.secure_protocol
     end
 
     # AS
     test "if there's no config.active_support.bare, all of ActiveSupport is required" do
       use_frameworks []
-      require "#{app_path}/config/environment"
+      app("development")
       assert_nothing_raised { [1, 2, 3].sample }
     end
 
@@ -198,29 +199,80 @@ module ApplicationTests
       use_frameworks []
 
       Dir.chdir("#{app_path}/app") do
-        require "#{app_path}/config/environment"
+        app("development")
         assert_raises(NoMethodError) { "hello".exclude? "lo" }
+      end
+    end
+
+    if RUBY_VERSION >= "4.0"
+      test "notification subscriptions are recorded" do
+        add_to_config "ActiveSupport::Ractors.unshareable_proc_action = :warn"
+
+        app_file "config/initializers/subscriptions.rb", <<-RUBY
+          WitnessError = Class.new(StandardError)
+
+          ActiveSupport::Notifications.subscribe("active_record.sql") { raise WitnessError }
+        RUBY
+
+        app("development")
+
+        # Main Ractor receives notifications
+        assert_raises(WitnessError) do
+          ActiveSupport::Notifications.instrument("active_record.sql")
+        end
+
+        previous_report_on_exception = Thread.report_on_exception
+        Thread.report_on_exception = false
+
+        # Worker Ractor received notifications
+        error = assert_raises(Ractor::RemoteError) do
+          Ractor.new do
+            ActiveSupport::Notifications.instrument("active_record.sql")
+          end.join
+        end
+
+        assert_instance_of(WitnessError, error.cause)
+      ensure
+        Thread.report_on_exception = previous_report_on_exception
+      end
+
+      test "Notification subscriptions can be added after boot" do
+        add_to_config "ActiveSupport::Ractors.unshareable_proc_action = :warn"
+
+        app_file "config/initializers/subscriptions.rb", <<-RUBY
+          WitnessError = Class.new(StandardError)
+
+          ActiveSupport::Notifications.subscribe("active_record.sql") { raise WitnessError }
+        RUBY
+
+        app("development")
+
+        assert_nothing_raised do
+          ActiveSupport::Notifications.subscribe("sql.active_record") { }
+        end
       end
     end
 
     # AR
     test "active_record extensions are applied to ActiveRecord" do
       add_to_config "config.active_record.table_name_prefix = 'tbl_'"
-      require "#{app_path}/config/environment"
+      app("development")
       assert_equal "tbl_", ActiveRecord::Base.table_name_prefix
     end
 
     test "database middleware doesn't initialize when activerecord is not in frameworks" do
       use_frameworks []
-      require "#{app_path}/config/environment"
+      app("development")
       assert !defined?(ActiveRecord::Base) || ActiveRecord.autoload?(:Base)
     end
 
     test "can boot with an unhealthy database" do
       rails %w(generate model post title:string)
 
-      switch_env("DATABASE_URL", "mysql2://127.0.0.1:1") do
-        require "#{app_path}/config/environment"
+      with_unhealthy_database do
+        assert_nothing_raised do
+          app("development")
+        end
       end
     end
 
@@ -232,11 +284,13 @@ module ApplicationTests
         config.eager_load = true
       RUBY
 
-      require "#{app_path}/config/environment"
+      Dir.chdir(app_path) do
+        app("development")
 
-      assert ActiveRecord::Base.connection.schema_cache.data_sources("posts")
+        assert ActiveRecord::Base.schema_cache.data_sources("posts")
+      end
     ensure
-      ActiveRecord::Base.connection.drop_table("posts", if_exists: true) # force drop posts table for test.
+      ActiveRecord::Base.lease_connection.drop_table("posts", if_exists: true) # force drop posts table for test.
     end
 
     test "expire schema cache dump" do
@@ -247,8 +301,15 @@ module ApplicationTests
         config.eager_load = true
       RUBY
 
-      require "#{app_path}/config/environment"
-      assert_not ActiveRecord::Base.connection.schema_cache.data_sources("posts")
+      Dir.chdir(app_path) do
+        app("development")
+
+        _, error = capture_io do
+          assert_not ActiveRecord::Base.schema_cache.data_sources("posts")
+        end
+
+        assert_match(/Ignoring db\/schema_cache\.yml because it has expired/, error)
+      end
     end
 
     test "expire schema cache dump if the version can't be checked because the database is unhealthy" do
@@ -259,12 +320,21 @@ module ApplicationTests
         config.eager_load = true
       RUBY
 
-      switch_env("DATABASE_URL", "mysql2://127.0.0.1:1") do
-        require "#{app_path}/config/environment"
+      with_unhealthy_database do
+        Dir.chdir(app_path) do
+          app("development")
 
-        assert_nil ActiveRecord::Base.connection_pool.schema_cache
-        assert_raises ActiveRecord::ConnectionNotEstablished do
-          ActiveRecord::Base.connection.execute("SELECT 1")
+          assert_raises ActiveRecord::ConnectionNotEstablished do
+            ActiveRecord::Base.lease_connection.execute("SELECT 1")
+          end
+
+          _, error = capture_io do
+            assert_raises ActiveRecord::ConnectionNotEstablished do
+              ActiveRecord::Base.schema_cache.columns("posts")
+            end
+          end
+
+          assert_match(/Failed to validate the schema cache because of ActiveRecord::(ConnectionNotEstablished|DatabaseConnectionError)/, error)
         end
       end
     end
@@ -278,8 +348,11 @@ module ApplicationTests
         config.active_record.check_schema_cache_dump_version = false
       RUBY
 
-      require "#{app_path}/config/environment"
-      assert ActiveRecord::Base.connection_pool.schema_cache.data_sources("posts")
+      Dir.chdir(app_path) do
+        app("development")
+
+        assert ActiveRecord::Base.connection_pool.schema_reflection.data_sources(:__unused__, "posts")
+      end
     end
 
     test "does not expire schema cache dump if check_schema_cache_dump_version is false and the database unhealthy" do
@@ -291,52 +364,134 @@ module ApplicationTests
         config.active_record.check_schema_cache_dump_version = false
       RUBY
 
-      switch_env("DATABASE_URL", "mysql2://127.0.0.1:1") do
-        require "#{app_path}/config/environment"
+      with_unhealthy_database do
+        Dir.chdir(app_path) do
+          app("development")
 
-        assert ActiveRecord::Base.connection_pool.schema_cache.data_sources("posts")
-        assert_raises ActiveRecord::ConnectionNotEstablished do
-          ActiveRecord::Base.connection.execute("SELECT 1")
+          assert ActiveRecord::Base.connection_pool.schema_reflection.data_sources(:__unused__, "posts")
+          assert_raises ActiveRecord::ConnectionNotEstablished do
+            ActiveRecord::Base.lease_connection.execute("SELECT 1")
+          end
         end
       end
     end
 
+    test "define attribute methods when schema cache is present and check_schema_cache_dump_version is false" do
+      rails %w(generate model post title:string)
+      rails %w(db:migrate db:schema:cache:dump)
+
+      add_to_config <<-RUBY
+        config.eager_load = true
+        config.active_record.check_schema_cache_dump_version = false
+      RUBY
+
+      Dir.chdir(app_path) do
+        app
+
+        assert_predicate Post, :attribute_methods_generated?
+      end
+    end
+
     test "active record establish_connection uses Rails.env if DATABASE_URL is not set" do
-      require "#{app_path}/config/environment"
-      orig_database_url = ENV.delete("DATABASE_URL")
-      orig_rails_env, Rails.env = Rails.env, "development"
-      ActiveRecord::Base.establish_connection
-      assert ActiveRecord::Base.connection
-      assert_match(/#{ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: "primary").database}/, ActiveRecord::Base.connection_db_config.database)
-      db_config = ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: "primary")
-      assert_match(/#{db_config.database}/, ActiveRecord::Base.connection_db_config.database)
+      app("development")
+      with_env DATABASE_URL: nil, RAILS_ENV: "development" do
+        ActiveRecord::Base.establish_connection
+        assert ActiveRecord::Base.lease_connection
+        assert_match(/#{ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: "primary").database}/, ActiveRecord::Base.connection_db_config.database)
+        db_config = ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: "primary")
+        assert_match(/#{db_config.database}/, ActiveRecord::Base.connection_db_config.database)
+      end
     ensure
       ActiveRecord::Base.remove_connection
-      ENV["DATABASE_URL"] = orig_database_url if orig_database_url
-      Rails.env = orig_rails_env if orig_rails_env
     end
 
     test "active record establish_connection uses DATABASE_URL even if Rails.env is set" do
-      require "#{app_path}/config/environment"
-      orig_database_url = ENV.delete("DATABASE_URL")
-      orig_rails_env, Rails.env = Rails.env, "development"
-      database_url_db_name = "db/database_url_db.sqlite3"
-      ENV["DATABASE_URL"] = "sqlite3:#{database_url_db_name}"
-      ActiveRecord::Base.establish_connection
-      assert ActiveRecord::Base.connection
-      assert_match(/#{database_url_db_name}/, ActiveRecord::Base.connection_db_config.database)
+      app("development")
+      with_env DATABASE_URL: nil, RAILS_ENV: "development" do
+        database_url_db_name = "db/database_url_db.sqlite3"
+        ENV["DATABASE_URL"] = "sqlite3:#{database_url_db_name}"
+        ActiveRecord::Base.establish_connection
+        assert ActiveRecord::Base.lease_connection
+        assert_match(/#{database_url_db_name}/, ActiveRecord::Base.connection_db_config.database)
+      end
     ensure
       ActiveRecord::Base.remove_connection
-      ENV["DATABASE_URL"] = orig_database_url if orig_database_url
-      Rails.env = orig_rails_env if orig_rails_env
     end
 
     test "connections checked out during initialization are returned to the pool" do
       app_file "config/initializers/active_record.rb", <<-RUBY
-        ActiveRecord::Base.connection
+        ActiveSupport.on_load(:active_record) do
+          ActiveRecord::Base.lease_connection
+        end
       RUBY
-      require "#{app_path}/config/environment"
+      app("development")
       assert_not_predicate ActiveRecord::Base.connection_pool, :active_connection?
+    end
+
+    test "Current scopes in AR models are reset on reloading" do
+      rails %w(generate model post)
+      rails %w(db:migrate)
+
+      app_file "app/models/a.rb", "A = 1"
+      app_file "app/models/m.rb", "module M; end"
+      app_file "app/models/post.rb", <<~RUBY
+        class Post < ActiveRecord::Base
+          def self.is_a?(_)
+            false
+          end
+
+          def self.<(_)
+            false
+          end
+        end
+      RUBY
+
+      app("development")
+
+      assert A
+      assert M
+      Post.current_scope = Post
+      assert_not_nil ActiveRecord::Scoping::ScopeRegistry.current_scope(Post) # precondition
+
+      ActiveSupport::Dependencies.clear
+
+      assert_nil ActiveRecord::Scoping::ScopeRegistry.current_scope(Post)
+    end
+
+    test "filters for Active Record encrypted attributes are added to config.filter_parameters only once" do
+      rails %w(generate model post title:string)
+      rails %w(db:migrate)
+
+      app_file "app/models/post.rb", <<~RUBY
+        class Post < ActiveRecord::Base
+          encrypts :title
+        end
+      RUBY
+
+      app("development")
+
+      assert Post
+      filter_parameters = Rails.application.config.filter_parameters.dup
+
+      reload
+
+      assert Post
+      assert_equal filter_parameters, Rails.application.config.filter_parameters
+    end
+
+    test "ActiveRecord::MessagePack extensions are installed when using ActiveSupport::MessagePack::CacheSerializer" do
+      rails %w(generate model post title:string)
+      rails %w(db:migrate)
+
+      add_to_config <<~RUBY
+        config.cache_store = :file_store, #{app_path("tmp/cache").inspect}, { serializer: :message_pack }
+      RUBY
+
+      app("development")
+
+      post = Post.create!(title: "Hello World")
+      Rails.cache.write("hello", post)
+      assert_equal post, Rails.cache.read("hello")
     end
   end
 end

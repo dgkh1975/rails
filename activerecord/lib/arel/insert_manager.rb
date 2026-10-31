@@ -1,10 +1,12 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   class InsertManager < Arel::TreeManager
-    def initialize
+    def initialize(table = nil)
       super
-      @ast = Nodes::InsertStatement.new
+
+      @ast = Nodes::InsertStatement.new(table)
     end
 
     def into(table)
@@ -35,6 +37,11 @@ module Arel # :nodoc: all
         end
         @ast.values = create_values(values)
       end
+      self
+    end
+
+    def returning(returning)
+      @ast.returning << returning
       self
     end
 

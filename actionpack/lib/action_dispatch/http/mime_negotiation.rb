@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "active_support/core_ext/module/attribute_accessors"
-
 module ActionDispatch
   module Http
     module MimeNegotiation
@@ -12,37 +10,26 @@ module ActionDispatch
       RESCUABLE_MIME_FORMAT_ERRORS = [
         ActionController::BadRequest,
         ActionDispatch::Http::Parameters::ParseError,
-      ]
+      ].freeze
+
+      @ignore_accept_header = false
+      @strict_accept_header = false
+      accessors = singleton_class.attr_accessor :ignore_accept_header, :strict_accept_header
 
       included do
-        mattr_accessor :ignore_accept_header, default: false
-        cattr_accessor :return_only_media_type_on_content_type, default: false
+        singleton_class.delegate(*accessors, to: MimeNegotiation)
       end
 
-      # The MIME type of the HTTP request, such as Mime[:xml].
+      # The MIME type of the HTTP request, such as [Mime](:xml).
       def content_mime_type
         fetch_header("action_dispatch.request.content_type") do |k|
-          v = if get_header("CONTENT_TYPE") =~ /^([^,;]*)/
-            Mime::Type.lookup($1.strip.downcase)
-          else
-            nil
+          v = if (content_type = get_header("CONTENT_TYPE"))
+            type = media_type_of(content_type)
+            Mime.lookup_by_string[type] || Mime::Type.lookup(type.strip.downcase)
           end
           set_header k, v
         rescue ::Mime::Type::InvalidMimeType => e
           raise InvalidType, e.message
-        end
-      end
-
-      def content_type
-        if self.class.return_only_media_type_on_content_type
-          ActiveSupport::Deprecation.warn(
-            "Rails 7.1 will return Content-Type header without modification." \
-            " If you want just the MIME type, please use `#media_type` instead."
-          )
-
-          content_mime_type&.to_s
-        else
-          super
         end
       end
 
@@ -66,13 +53,18 @@ module ActionDispatch
         end
       end
 
-      # Returns the MIME type for the \format used in the request.
+      # Returns the MIME type for the format used in the request.
       #
-      #   GET /posts/5.xml   | request.format => Mime[:xml]
-      #   GET /posts/5.xhtml | request.format => Mime[:html]
-      #   GET /posts/5       | request.format => Mime[:html] or Mime[:js], or request.accepts.first
+      #     # GET /posts/5.xml
+      #     request.format # => Mime[:xml]
       #
-      def format(view_path = [])
+      #     # GET /posts/5.xhtml
+      #     request.format # => Mime[:html]
+      #
+      #     # GET /posts/5
+      #     request.format # => Mime[:html] or Mime[:js], or request.accepts.first
+      #
+      def format(_view_path = nil)
         formats.first || Mime::NullType.instance
       end
 
@@ -81,7 +73,7 @@ module ActionDispatch
           v = if params_readable?
             Array(Mime[parameters[:format]])
           elsif use_accept_header && valid_accept_header
-            accepts
+            accepts.dup
           elsif extension_format = format_from_path_extension
             [extension_format]
           elsif xhr?
@@ -90,7 +82,7 @@ module ActionDispatch
             [Mime[:html]]
           end
 
-          v = v.select do |format|
+          v.select! do |format|
             format.symbol || format.ref == "*/*"
           end
 
@@ -98,51 +90,106 @@ module ActionDispatch
         end
       end
 
-      # Sets the \variant for template.
+      # Sets the \variant for the response template.
+      #
+      # When determining which template to render, Action View will incorporate
+      # all variants from the request. For example, if an
+      # `ArticlesController#index` action needs to respond to
+      # `request.variant = [:ios, :turbo_native]`, it will render the
+      # first template file it can find in the following list:
+      #
+      # - `app/views/articles/index.html+ios.erb`
+      # - `app/views/articles/index.html+turbo_native.erb`
+      # - `app/views/articles/index.html.erb`
+      #
+      # Variants add context to the requests that views render appropriately.
+      # Variant names are arbitrary, and can communicate anything from the
+      # request's platform (`:android`, `:ios`, `:linux`, `:macos`, `:windows`)
+      # to its browser (`:chrome`, `:edge`, `:firefox`, `:safari`), to the type
+      # of user (`:admin`, `:guest`, `:user`).
+      #
+      # Note: Adding many new variant templates with similarities to existing
+      # template files can make maintaining your view code more difficult.
+      #
+      # #### Parameters
+      #
+      # * `variant` - a symbol name or an array of symbol names for variants
+      #   used to render the response template
+      #
+      # #### Examples
+      #
+      #     class ApplicationController < ActionController::Base
+      #       before_action :determine_variants
+      #
+      #       private
+      #         def determine_variants
+      #           variants = []
+      #
+      #           # some code to determine the variant(s) to use
+      #
+      #           variants << :ios if request.user_agent.include?("iOS")
+      #           variants << :turbo_native if request.user_agent.include?("Turbo Native")
+      #
+      #           request.variant = variants
+      #         end
+      #     end
       def variant=(variant)
         variant = Array(variant)
 
-        if variant.all? { |v| v.is_a?(Symbol) }
+        if variant.all?(Symbol)
           @variant = ActiveSupport::ArrayInquirer.new(variant)
         else
           raise ArgumentError, "request.variant must be set to a Symbol or an Array of Symbols."
         end
       end
 
+      # Returns the \variant for the response template as an instance of
+      # ActiveSupport::ArrayInquirer.
+      #
+      #     request.variant = :phone
+      #     request.variant.phone?  # => true
+      #     request.variant.tablet? # => false
+      #
+      #     request.variant = [:phone, :tablet]
+      #     request.variant.phone?                  # => true
+      #     request.variant.desktop?                # => false
+      #     request.variant.any?(:phone, :desktop)  # => true
+      #     request.variant.any?(:desktop, :watch)  # => false
       def variant
         @variant ||= ActiveSupport::ArrayInquirer.new
       end
 
-      # Sets the \format by string extension, which can be used to force custom formats
+      # Sets the format by string extension, which can be used to force custom formats
       # that are not controlled by the extension.
       #
-      #   class ApplicationController < ActionController::Base
-      #     before_action :adjust_format_for_iphone
+      #     class ApplicationController < ActionController::Base
+      #       before_action :adjust_format_for_iphone
       #
-      #     private
-      #       def adjust_format_for_iphone
-      #         request.format = :iphone if request.env["HTTP_USER_AGENT"][/iPhone/]
-      #       end
-      #   end
+      #       private
+      #         def adjust_format_for_iphone
+      #           request.format = :iphone if request.env["HTTP_USER_AGENT"][/iPhone/]
+      #         end
+      #     end
       def format=(extension)
         parameters[:format] = extension.to_s
         set_header "action_dispatch.request.formats", [Mime::Type.lookup_by_extension(parameters[:format])]
       end
 
-      # Sets the \formats by string extensions. This differs from #format= by allowing you
-      # to set multiple, ordered formats, which is useful when you want to have a fallback.
+      # Sets the formats by string extensions. This differs from #format= by allowing
+      # you to set multiple, ordered formats, which is useful when you want to have a
+      # fallback.
       #
-      # In this example, the :iphone format will be used if it's available, otherwise it'll fallback
-      # to the :html format.
+      # In this example, the `:iphone` format will be used if it's available,
+      # otherwise it'll fall back to the `:html` format.
       #
-      #   class ApplicationController < ActionController::Base
-      #     before_action :adjust_format_for_iphone_with_html_fallback
+      #     class ApplicationController < ActionController::Base
+      #       before_action :adjust_format_for_iphone_with_html_fallback
       #
-      #     private
-      #       def adjust_format_for_iphone_with_html_fallback
-      #         request.formats = [ :iphone, :html ] if request.env["HTTP_USER_AGENT"][/iPhone/]
-      #       end
-      #   end
+      #       private
+      #         def adjust_format_for_iphone_with_html_fallback
+      #           request.formats = [ :iphone, :html ] if request.env["HTTP_USER_AGENT"][/iPhone/]
+      #         end
+      #     end
       def formats=(extensions)
         parameters[:format] = extensions.first.to_s
         set_header "action_dispatch.request.formats", extensions.collect { |extension|
@@ -168,26 +215,41 @@ module ActionDispatch
       end
 
       private
-        # We use normal content negotiation unless you include */* in your list,
-        # in which case we assume you're a browser and send HTML.
+        # We use normal content negotiation unless you include **/** in your list, in
+        # which case we assume you're a browser and send HTML.
         BROWSER_LIKE_ACCEPTS = /,\s*\*\/\*|\*\/\*\s*,/
 
-        def params_readable? # :doc:
+        def params_readable?
           parameters[:format]
         rescue *RESCUABLE_MIME_FORMAT_ERRORS
           false
         end
 
-        def valid_accept_header # :doc:
-          (xhr? && (accept.present? || content_mime_type)) ||
-            (accept.present? && !accept.match?(BROWSER_LIKE_ACCEPTS))
+        def valid_accept_header
+          if xhr?
+            accept.present? || content_mime_type
+          elsif accept.present?
+            MimeNegotiation.strict_accept_header || !accept.match?(BROWSER_LIKE_ACCEPTS)
+          end
         end
 
-        def use_accept_header # :doc:
-          !self.class.ignore_accept_header
+        def use_accept_header
+          !MimeNegotiation.ignore_accept_header
         end
 
-        def format_from_path_extension # :doc:
+        # The media type is whatever precedes the first ";" or ",". Most
+        # requests send a bare one, which is returned as is; scanning for the
+        # separators with String#index rather than a Regexp keeps the common
+        # case free of allocations.
+        def media_type_of(content_type)
+          index = content_type.index(";")
+          if (comma = content_type.index(",")) && (!index || comma < index)
+            index = comma
+          end
+          index ? content_type[0, index] : content_type
+        end
+
+        def format_from_path_extension
           path = get_header("action_dispatch.original_path") || get_header("PATH_INFO")
           if match = path && path.match(/\.(\w+)\z/)
             Mime[match.captures.first]

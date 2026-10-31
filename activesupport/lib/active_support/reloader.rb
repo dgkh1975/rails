@@ -1,28 +1,34 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "active_support/execution_wrapper"
 require "active_support/executor"
+require "active_support/ractors"
 
 module ActiveSupport
-  #--
+  # Active Support \Reloader
+  # ========================
+  #
   # This class defines several callbacks:
   #
-  #   to_prepare -- Run once at application startup, and also from
-  #   +to_run+.
+  # ```
+  # to_prepare -- Run once at application startup, and also from
+  # +to_run+.
   #
-  #   to_run -- Run before a work run that is reloading. If
-  #   +reload_classes_only_on_change+ is true (the default), the class
-  #   unload will have already occurred.
+  # to_run -- Run before a work run that is reloading. If
+  # +reload_classes_only_on_change+ is true (the default), the class
+  # unload will have already occurred.
   #
-  #   to_complete -- Run after a work run that has reloaded. If
-  #   +reload_classes_only_on_change+ is false, the class unload will
-  #   have occurred after the work run, but before this callback.
+  # to_complete -- Run after a work run that has reloaded. If
+  # +reload_classes_only_on_change+ is false, the class unload will
+  # have occurred after the work run, but before this callback.
   #
-  #   before_class_unload -- Run immediately before the classes are
-  #   unloaded.
+  # before_class_unload -- Run immediately before the classes are
+  # unloaded.
   #
-  #   after_class_unload -- Run immediately after the classes are
-  #   unloaded.
+  # after_class_unload -- Run immediately after the classes are
+  # unloaded.
+  # ```
   #
   class Reloader < ExecutionWrapper
     define_callbacks :prepare
@@ -58,7 +64,7 @@ module ActiveSupport
       prepare!
     end
 
-    def self.run! # :nodoc:
+    def self.run!(reset: false) # :nodoc:
       if check!
         super
       else
@@ -67,17 +73,27 @@ module ActiveSupport
     end
 
     # Run the supplied block as a work unit, reloading code as needed
-    def self.wrap
-      executor.wrap do
-        super
+    def self.wrap(**kwargs)
+      return yield if active?
+
+      executor.wrap(**kwargs) do
+        instance = run!
+        begin
+          yield
+        ensure
+          instance.complete!
+        end
       end
     end
 
     class_attribute :executor, default: Executor
-    class_attribute :check, default: lambda { false }
+    class_attribute :check, default: Ractors.shareable_proc { false }
 
     def self.check! # :nodoc:
-      @should_reload ||= check.call
+      return @should_reload if @should_reload
+
+      should_reload = check.call
+      @should_reload = should_reload if should_reload
     end
 
     def self.reloaded! # :nodoc:

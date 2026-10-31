@@ -1,15 +1,16 @@
+# :markup: markdown
 # frozen_string_literal: true
 
-require "set"
+gem "listen", "~> 3.5"
+require "listen"
+
 require "pathname"
 require "concurrent/atomic/atomic_boolean"
-require "listen"
-require "active_support/fork_tracker"
 
 module ActiveSupport
   # Allows you to "listen" to changes in a file system.
-  # The evented file updater does not hit disk when checking for updates
-  # instead it uses platform specific file system events to trigger a change
+  # The evented file updater does not hit disk when checking for updates.
+  # Instead, it uses platform-specific file system events to trigger a change
   # in state.
   #
   # The file checker takes an array of files to watch or a hash specifying directories
@@ -17,24 +18,24 @@ module ActiveSupport
   # EventedFileUpdateChecker#execute is run or when EventedFileUpdateChecker#execute_if_updated
   # is run and there have been changes to the file system.
   #
-  # Note: Forking will cause the first call to `updated?` to return `true`.
-  #
   # Example:
   #
-  #     checker = ActiveSupport::EventedFileUpdateChecker.new(["/tmp/foo"]) { puts "changed" }
-  #     checker.updated?
-  #     # => false
-  #     checker.execute_if_updated
-  #     # => nil
+  # ```
+  # checker = ActiveSupport::EventedFileUpdateChecker.new(["/tmp/foo"]) { puts "changed" }
+  # checker.updated?
+  # # => false
+  # checker.execute_if_updated
+  # # => nil
   #
-  #     FileUtils.touch("/tmp/foo")
+  # FileUtils.touch("/tmp/foo")
   #
-  #     checker.updated?
-  #     # => true
-  #     checker.execute_if_updated
-  #     # => "changed"
+  # checker.updated?
+  # # => true
+  # checker.execute_if_updated
+  # # => "changed"
+  # ```
   #
-  class EventedFileUpdateChecker #:nodoc: all
+  class EventedFileUpdateChecker # :nodoc: all
     def initialize(files, dirs = {}, &block)
       unless block
         raise ArgumentError, "A block is required to initialize an EventedFileUpdateChecker"
@@ -43,6 +44,10 @@ module ActiveSupport
       @block = block
       @core = Core.new(files, dirs)
       ObjectSpace.define_finalizer(self, @core.finalizer)
+    end
+
+    def inspect
+      "#<ActiveSupport::EventedFileUpdateChecker:#{object_id} @files=#{@core.files.to_a.inspect}"
     end
 
     def updated?
@@ -68,12 +73,16 @@ module ActiveSupport
     end
 
     class Core
-      attr_reader :updated
+      attr_reader :updated, :files
 
       def initialize(files, dirs)
-        @files = files.map { |file| Pathname(file).expand_path }.to_set
+        gem_paths = Gem.path
+        files = files.map { |f| Pathname(f).expand_path }
+        files.reject! { |f| f.to_s.start_with?(*gem_paths) }
+        @files = files.to_set
 
         @dirs = dirs.each_with_object({}) do |(dir, exts), hash|
+          next if dir.start_with?(*gem_paths)
           hash[Pathname(dir).expand_path] = Array(exts).map { |ext| ext.to_s.sub(/\A\.?/, ".") }.to_set
         end
 
@@ -86,6 +95,10 @@ module ActiveSupport
         @mutex = Mutex.new
 
         start
+        # inotify / FSEvents file descriptors are inherited on fork, so
+        # we need to reopen them otherwise only the parent or the child
+        # will be notified.
+        # FIXME: this callback is keeping a reference on the instance
         @after_fork = ActiveSupport::ForkTracker.after_fork { start }
       end
 
@@ -107,6 +120,11 @@ module ActiveSupport
         @dtw, @missing = [*@dtw, *@missing].partition(&:exist?)
         @listener = @dtw.any? ? Listen.to(*@dtw, &method(:changed)) : nil
         @listener&.start
+
+        # Wait for the listener to be ready to avoid race conditions
+        # Unfortunately this isn't quite enough on macOS because the Darwin backend
+        # has an extra private thread we can't wait on.
+        @listener&.wait_for_state(:processing_events)
       end
 
       def stop

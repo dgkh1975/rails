@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 module ActionDispatch
-  # This is a class that abstracts away an asserted response. It purposely
-  # does not inherit from Response because it doesn't need it. That means it
-  # does not have headers or a body.
+  # This is a class that abstracts away an asserted response. It purposely does
+  # not inherit from Response because it doesn't need it. That means it does not
+  # have headers or a body.
   class AssertionResponse
     attr_reader :code, :name
 
@@ -12,11 +12,11 @@ module ActionDispatch
       missing: "404",
       redirect: "3XX",
       error: "5XX"
-    }
+    }.freeze
 
-    # Accepts a specific response status code as an Integer (404) or String
-    # ('404') or a response status range as a Symbol pseudo-code (:success,
-    # indicating any 200-299 status code).
+    # Accepts a specific response status code as an Integer (404) or String ('404')
+    # or a response status range as a Symbol pseudo-code (:success, indicating any
+    # 200-299 status code).
     def initialize(code_or_name)
       if code_or_name.is_a?(Symbol)
         @name = code_or_name
@@ -36,7 +36,7 @@ module ActionDispatch
 
     private
       def code_from_name(name)
-        GENERIC_RESPONSE_CODES[name] || Rack::Utils::SYMBOL_TO_STATUS_CODE[name]
+        GENERIC_RESPONSE_CODES[name] || ActionDispatch::Response.rack_status_code(name)
       end
 
       def name_from_code(code)

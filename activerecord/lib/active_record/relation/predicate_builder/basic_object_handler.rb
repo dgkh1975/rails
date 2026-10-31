@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   class PredicateBuilder
     class BasicObjectHandler # :nodoc:
@@ -8,8 +9,8 @@ module ActiveRecord
       end
 
       def call(attribute, value)
-        bind = predicate_builder.build_bind_attribute(attribute.name, value)
-        attribute.eq(bind)
+        value = predicate_builder.predicate_value(attribute, value)
+        attribute.eq(value)
       end
 
       private

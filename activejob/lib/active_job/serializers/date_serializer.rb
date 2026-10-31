@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveJob
   module Serializers
     class DateSerializer < ObjectSerializer # :nodoc:
@@ -11,10 +12,9 @@ module ActiveJob
         Date.iso8601(hash["value"])
       end
 
-      private
-        def klass
-          Date
-        end
+      def klass
+        Date
+      end
     end
   end
 end

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Nodes
     class SqlLiteral < String
@@ -8,11 +9,24 @@ module Arel # :nodoc: all
       include Arel::AliasPredication
       include Arel::OrderPredications
 
+      attr_reader :retryable
+
+      def initialize(string, retryable: false)
+        @retryable = retryable
+        super(string)
+      end
+
       def encode_with(coder)
         coder.scalar = self.to_s
       end
 
-      def fetch_attribute
+      def fetch_attribute(&)
+      end
+
+      def +(other)
+        raise ArgumentError, "Expected Arel node" unless Arel.arel_node?(other)
+
+        Fragments.new([self, other])
       end
     end
   end

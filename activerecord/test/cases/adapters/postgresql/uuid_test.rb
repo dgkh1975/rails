@@ -5,19 +5,11 @@ require "support/schema_dumping_helper"
 
 module PostgresqlUUIDHelper
   def connection
-    @connection ||= ActiveRecord::Base.connection
+    @connection ||= ActiveRecord::Base.lease_connection
   end
 
   def drop_table(name)
     connection.drop_table name, if_exists: true
-  end
-
-  def uuid_function
-    connection.supports_pgcrypto_uuid? ? "gen_random_uuid()" : "uuid_generate_v4()"
-  end
-
-  def uuid_default
-    connection.supports_pgcrypto_uuid? ? {} : { default: uuid_function }
   end
 end
 
@@ -31,7 +23,7 @@ class PostgresqlUUIDTest < ActiveRecord::PostgreSQLTestCase
 
   setup do
     enable_extension!("uuid-ossp", connection)
-    enable_extension!("pgcrypto",  connection) if connection.supports_pgcrypto_uuid?
+    enable_extension!("pgcrypto",  connection)
 
     connection.create_table "uuid_data_type" do |t|
       t.uuid "guid"
@@ -39,17 +31,15 @@ class PostgresqlUUIDTest < ActiveRecord::PostgreSQLTestCase
   end
 
   teardown do
+    UUIDType.reset_column_information
     drop_table "uuid_data_type"
   end
 
-  if ActiveRecord::Base.connection.respond_to?(:supports_pgcrypto_uuid?) &&
-      ActiveRecord::Base.connection.supports_pgcrypto_uuid?
-    def test_uuid_column_default
-      connection.add_column :uuid_data_type, :thingy, :uuid, null: false, default: "gen_random_uuid()"
-      UUIDType.reset_column_information
-      column = UUIDType.columns_hash["thingy"]
-      assert_equal "gen_random_uuid()", column.default_function
-    end
+  def test_uuid_column_default
+    connection.add_column :uuid_data_type, :thingy, :uuid, null: false, default: "gen_random_uuid()"
+    UUIDType.reset_column_information
+    column = UUIDType.columns_hash["thingy"]
+    assert_equal "gen_random_uuid()", column.default_function
   end
 
   def test_change_column_default
@@ -120,9 +110,12 @@ class PostgresqlUUIDTest < ActiveRecord::PostgreSQLTestCase
     assert_empty UUIDType.where(guid: "foobar")
   end
 
-  def test_uuid_change_case_does_not_mark_dirty
+  def test_uuid_change_format_does_not_mark_dirty
     model = UUIDType.create!(guid: "abcd-0123-4567-89ef-dead-beef-0101-1010")
     model.guid = model.guid.swapcase
+    assert_not_predicate model, :changed?
+
+    model.guid = "{#{model.guid}}"
     assert_not_predicate model, :changed?
   end
 
@@ -165,7 +158,8 @@ class PostgresqlUUIDTest < ActiveRecord::PostgreSQLTestCase
      "a0ee-bc99------4ef8-bb6d-6bb9-bd38-0a11",
      "{a0eebc99-bb6d6bb9-bd380a11}",
      "{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11",
-     "a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}"].each do |invalid_uuid|
+     "a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}",
+     "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11-"].each do |invalid_uuid|
       uuid = UUIDType.new guid: invalid_uuid
       assert_nil uuid.guid
     end
@@ -201,7 +195,7 @@ class PostgresqlUUIDTest < ActiveRecord::PostgreSQLTestCase
     record = klass.create!(guid: "a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11")
     duplicate = klass.new(guid: record.guid)
 
-    assert record.guid.present? # Ensure we actually are testing a UUID
+    assert_predicate record.guid, :present? # Ensure we actually are testing a UUID
     assert_not_predicate duplicate, :valid?
   end
 end
@@ -224,7 +218,7 @@ class PostgresqlUUIDGenerationTest < ActiveRecord::PostgreSQLTestCase
     # to test dumping tables which columns have defaults with custom functions
     connection.execute <<~SQL
       CREATE OR REPLACE FUNCTION my_uuid_generator() RETURNS uuid
-      AS $$ SELECT * FROM #{uuid_function} $$
+      AS $$ SELECT * FROM gen_random_uuid() $$
       LANGUAGE SQL VOLATILE;
     SQL
 
@@ -234,7 +228,7 @@ class PostgresqlUUIDGenerationTest < ActiveRecord::PostgreSQLTestCase
       t.uuid "other_uuid_2", default: "my_uuid_generator()"
     end
 
-    connection.create_table("pg_uuids_3", id: :uuid, **uuid_default) do |t|
+    connection.create_table("pg_uuids_3", id: :uuid) do |t|
       t.string "name"
     end
   end
@@ -282,11 +276,7 @@ class PostgresqlUUIDGenerationTest < ActiveRecord::PostgreSQLTestCase
 
   def test_schema_dumper_for_uuid_primary_key_default
     schema = dump_table_schema "pg_uuids_3"
-    if connection.supports_pgcrypto_uuid?
-      assert_match(/\bcreate_table "pg_uuids_3", id: :uuid, default: -> { "gen_random_uuid\(\)" }/, schema)
-    else
-      assert_match(/\bcreate_table "pg_uuids_3", id: :uuid, default: -> { "uuid_generate_v4\(\)" }/, schema)
-    end
+    assert_match(/\bcreate_table "pg_uuids_3", id: :uuid, default: -> { "gen_random_uuid\(\)" }/, schema)
   end
 
   def test_schema_dumper_for_uuid_primary_key_default_in_legacy_migration
@@ -299,14 +289,16 @@ class PostgresqlUUIDGenerationTest < ActiveRecord::PostgreSQLTestCase
         create_table("pg_uuids_4", id: :uuid)
       end
     end.new
-    ActiveRecord::Migrator.new(:up, [migration], ActiveRecord::Base.connection.schema_migration).migrate
+
+    pool = ActiveRecord::Base.connection_pool
+    ActiveRecord::Migrator.new(:up, [migration], pool.schema_migration, pool.internal_metadata).migrate
 
     schema = dump_table_schema "pg_uuids_4"
     assert_match(/\bcreate_table "pg_uuids_4", id: :uuid, default: -> { "uuid_generate_v4\(\)" }/, schema)
   ensure
     drop_table "pg_uuids_4"
     ActiveRecord::Migration.verbose = @verbose_was
-    ActiveRecord::Base.connection.schema_migration.delete_all
+    ActiveRecord::Base.connection_pool.schema_migration.delete_all_versions
   end
   uses_transaction :test_schema_dumper_for_uuid_primary_key_default_in_legacy_migration
 end
@@ -349,14 +341,16 @@ class PostgresqlUUIDTestNilDefault < ActiveRecord::PostgreSQLTestCase
         create_table("pg_uuids_4", id: :uuid, default: nil)
       end
     end.new
-    ActiveRecord::Migrator.new(:up, [migration], ActiveRecord::Base.connection.schema_migration).migrate
+
+    pool = ActiveRecord::Base.connection_pool
+    ActiveRecord::Migrator.new(:up, [migration], pool.schema_migration, pool.internal_metadata).migrate
 
     schema = dump_table_schema "pg_uuids_4"
     assert_match(/\bcreate_table "pg_uuids_4", id: :uuid, default: nil/, schema)
   ensure
     drop_table "pg_uuids_4"
     ActiveRecord::Migration.verbose = @verbose_was
-    ActiveRecord::Base.connection.schema_migration.delete_all
+    ActiveRecord::Base.connection_pool.schema_migration.delete_all_versions
   end
   uses_transaction :test_schema_dumper_for_uuid_primary_key_with_default_nil_in_legacy_migration
 end
@@ -376,10 +370,10 @@ class PostgresqlUUIDTestInverseOf < ActiveRecord::PostgreSQLTestCase
 
   setup do
     connection.transaction do
-      connection.create_table("pg_uuid_posts", id: :uuid, **uuid_default) do |t|
+      connection.create_table("pg_uuid_posts", id: :uuid) do |t|
         t.string "title"
       end
-      connection.create_table("pg_uuid_comments", id: :uuid, **uuid_default) do |t|
+      connection.create_table("pg_uuid_comments", id: :uuid) do |t|
         t.references :uuid_post, type: :uuid
         t.string "content"
       end
@@ -407,5 +401,65 @@ class PostgresqlUUIDTestInverseOf < ActiveRecord::PostgreSQLTestCase
   def test_find_by_with_uuid
     UuidPost.create!
     assert_nil UuidPost.find_by(id: 789)
+  end
+end
+
+class PostgresqlUUIDHasManyThroughDisableJoinsTest < ActiveRecord::PostgreSQLTestCase
+  include PostgresqlUUIDHelper
+
+  class UuidForum < ActiveRecord::Base
+    self.table_name = "pg_uuid_forums"
+    has_many :uuid_posts, -> { order("title DESC") }
+    has_many :uuid_comments, through: :uuid_posts
+    has_many :uuid_comments_without_joins, through: :uuid_posts, source: :uuid_comments, disable_joins: true
+  end
+
+  class UuidPost < ActiveRecord::Base
+    self.table_name = "pg_uuid_posts"
+    belongs_to :uuid_forum
+    has_many :uuid_comments
+  end
+
+  class UuidComment < ActiveRecord::Base
+    self.table_name = "pg_uuid_comments"
+    belongs_to :uuid_post
+    has_one :uuid_forum, through: :uuid_post
+    has_one :uuid_forum_without_joins, through: :uuid_post, source: :uuid_forum, disable_joins: true
+  end
+
+  setup do
+    connection.transaction do
+      connection.create_table("pg_uuid_forums", id: :uuid) do |t|
+        t.string "name"
+      end
+      connection.create_table("pg_uuid_posts", id: :uuid) do |t|
+        t.references :uuid_forum, type: :uuid
+        t.string "title"
+      end
+      connection.create_table("pg_uuid_comments", id: :uuid) do |t|
+        t.references :uuid_post, type: :uuid
+        t.string "content"
+      end
+    end
+  end
+
+  teardown do
+    drop_table "pg_uuid_comments"
+    drop_table "pg_uuid_posts"
+    drop_table "pg_uuid_forums"
+  end
+
+  def test_uuid_primary_key_and_disable_joins_with_delegate_cache
+    uuid_forum = UuidForum.create!
+    uuid_post_1 = uuid_forum.uuid_posts.create!
+    uuid_comment_1_1 = uuid_post_1.uuid_comments.create!
+    uuid_comment_1_2 = uuid_post_1.uuid_comments.create!
+    uuid_post_2 = uuid_forum.uuid_posts.create!
+    uuid_comment_2_1 = uuid_post_2.uuid_comments.create!
+    uuid_comment_2_2 = uuid_post_2.uuid_comments.create!
+    uuid_comment_2_3 = uuid_post_2.uuid_comments.create!
+
+    assert_equal uuid_forum.uuid_comments_without_joins.order(:id).to_a.map(&:id).sort,
+      [uuid_comment_1_1.id, uuid_comment_1_2.id, uuid_comment_2_1.id, uuid_comment_2_2.id, uuid_comment_2_3.id].sort
   end
 end

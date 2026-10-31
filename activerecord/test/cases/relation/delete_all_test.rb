@@ -2,12 +2,16 @@
 
 require "cases/helper"
 require "models/author"
+require "models/lesson"
 require "models/post"
 require "models/pet"
+require "models/student"
 require "models/toy"
+require "models/comment"
+require "models/cpk"
 
 class DeleteAllTest < ActiveRecord::TestCase
-  fixtures :authors, :author_addresses, :posts, :pets, :toys
+  fixtures :authors, :author_addresses, :comments, :posts, :pets, :toys, :cpk_orders, :cpk_order_agreements
 
   def test_destroy_all
     davids = Author.where(name: "David")
@@ -29,8 +33,17 @@ class DeleteAllTest < ActiveRecord::TestCase
   def test_delete_all
     davids = Author.where(name: "David")
 
-    assert_difference("Author.count", -1) { davids.delete_all }
+    assert_difference("Author.count", -1) do
+      assert_equal 1, davids.delete_all
+    end
     assert_not_predicate davids, :loaded?
+  end
+
+  def test_delete_all_return_value_ignores_cascades
+    student = Student.create(name: "Ruy Rocha")
+    lesson = Lesson.create(name: "Anything Possible")
+    student.lessons << lesson
+    assert_equal 1, Student.delete_all
   end
 
   def test_delete_all_with_index_hint
@@ -53,10 +66,39 @@ class DeleteAllTest < ActiveRecord::TestCase
     assert_predicate davids, :loaded?
   end
 
+  def test_delete_all_with_group_by_and_having
+    minimum_comments_count = 2
+    posts_to_be_deleted = Post.most_commented(minimum_comments_count).all.to_a
+    assert_operator posts_to_be_deleted.length, :>, 0
+
+    assert_difference("Post.count", -posts_to_be_deleted.length) do
+      Post.most_commented(minimum_comments_count).delete_all
+    end
+
+    posts_to_be_deleted.each do |deleted_post|
+      assert_raise(ActiveRecord::RecordNotFound) { deleted_post.reload }
+    end
+  end
+
+  def test_delete_all_with_group_by_and_having_without_joins
+    posts = [
+      Post.create!(title: "low", body: "x", legacy_comments_count: 0),
+      Post.create!(title: "mid", body: "x", legacy_comments_count: 3),
+      Post.create!(title: "high", body: "x", legacy_comments_count: 9),
+    ]
+    relation = Post.where(id: posts).group("posts.id").having("MAX(legacy_comments_count) >= 3")
+
+    # Only the rows that survive the HAVING filter must be deleted, not every row.
+    assert_equal 2, relation.delete_all
+
+    assert Post.exists?(posts[0].id)
+    assert_not Post.exists?(posts[1].id)
+    assert_not Post.exists?(posts[2].id)
+  end
+
   def test_delete_all_with_unpermitted_relation_raises_error
     assert_raises(ActiveRecord::ActiveRecordError) { Author.distinct.delete_all }
-    assert_raises(ActiveRecord::ActiveRecordError) { Author.group(:name).delete_all }
-    assert_raises(ActiveRecord::ActiveRecordError) { Author.having("SUM(id) < 3").delete_all }
+    assert_raises(ActiveRecord::ActiveRecordError) { Author.with(limited: Author.limit(2)).delete_all }
   end
 
   def test_delete_all_with_joins_and_where_part_is_hash
@@ -67,10 +109,10 @@ class DeleteAllTest < ActiveRecord::TestCase
       assert_equal pets.count, pets.delete_all
     end
 
-    if current_adapter?(:Mysql2Adapter)
-      assert_no_match %r/SELECT DISTINCT #{Regexp.escape(Pet.connection.quote_table_name("pets.pet_id"))}/, sqls.last
+    if current_adapter?(:Mysql2Adapter, :TrilogyAdapter)
+      assert_no_match %r/SELECT DISTINCT #{Regexp.escape(quote_table_name("pets.pet_id"))}/, sqls.last
     else
-      assert_match %r/SELECT #{Regexp.escape(Pet.connection.quote_table_name("pets.pet_id"))}/, sqls.last
+      assert_match %r/SELECT #{Regexp.escape(quote_table_name("pets.pet_id"))}/, sqls.last
     end
   end
 
@@ -113,5 +155,11 @@ class DeleteAllTest < ActiveRecord::TestCase
     assert_equal 1, limited_posts.delete_all
     assert_raise(ActiveRecord::RecordNotFound) { posts(:thinking) }
     assert posts(:welcome)
+  end
+
+  def test_delete_all_composite_model_with_join_subquery
+    agreement = cpk_order_agreements(:order_agreement_three)
+    join_scope = Cpk::Order.joins(:order_agreements).where(order_agreements: { signature: agreement.signature })
+    assert_equal 1, join_scope.delete_all
   end
 end

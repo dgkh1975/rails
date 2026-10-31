@@ -5,21 +5,24 @@ require "rake/testtask"
 desc "Default Task"
 task default: [ :test ]
 
-task :package
+ENV["RAILS_MINITEST_PLUGIN"] = "true"
 
 # Run the unit tests
 Rake::TestTask.new { |t|
   t.libs << "test"
   t.pattern = "test/**/*_test.rb"
   t.warning = true
-  t.verbose = true
+  if ENV["CI"]
+    t.verbose = true
+    t.options = "--profile --defer-output"
+  end
   t.ruby_opts = ["--dev"] if defined?(JRUBY_VERSION)
 }
 
 namespace :test do
-  task :isolated do
-    Dir.glob("test/**/*_test.rb").all? do |file|
-      sh(Gem.ruby, "-w", "-Ilib:test", file)
+  task :railties do
+    ["action_mailer/railtie"].all? do |railtie|
+      sh(Gem.ruby, "-r", railtie, "-e", "'OK'")
     end || raise("Failures")
   end
 end

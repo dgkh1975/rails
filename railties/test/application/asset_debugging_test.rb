@@ -2,11 +2,13 @@
 
 require "isolation/abstract_unit"
 require "rack/test"
+require "env_helpers"
 
 module ApplicationTests
   class AssetDebuggingTest < ActiveSupport::TestCase
     include ActiveSupport::Testing::Isolation
     include Rack::Test::Methods
+    include EnvHelpers
 
     def setup
       build_app(initializers: true)
@@ -30,8 +32,6 @@ module ApplicationTests
         class PostsController < ActionController::Base
         end
       RUBY
-
-      ENV["RAILS_ENV"] = "production"
     end
 
     def teardown
@@ -40,18 +40,19 @@ module ApplicationTests
 
     test "assets are concatenated when debug is off and compile is off either if debug_assets param is provided" do
       # config.assets.debug and config.assets.compile are false for production environment
-      ENV["RAILS_ENV"] = "production"
-      rails "assets:precompile", "--trace"
+      with_rails_env("production") do
+        rails "assets:precompile", "--trace"
 
-      # Load app env
-      app "production"
+        # Load app env
+        app "production"
 
-      class ::PostsController < ActionController::Base ; end
+        class ::PostsController < ActionController::Base ; end
 
-      # the debug_assets params isn't used if compile is off
-      get "/posts?debug_assets=true"
-      assert_match(/<script src="\/assets\/application-([0-z]+)\.js"><\/script>/, last_response.body)
-      assert_no_match(/<script src="\/assets\/xmlhr-([0-z]+)\.js"><\/script>/, last_response.body)
+        # the debug_assets params isn't used if compile is off
+        get("/posts?debug_assets=true", {}, "HTTPS" => "on")
+        assert_match(/<script src="\/assets\/application-([0-z]+)\.js"><\/script>/, last_response.body)
+        assert_no_match(/<script src="\/assets\/xmlhr-([0-z]+)\.js"><\/script>/, last_response.body)
+      end
     end
 
     test "assets are debug when compile is true is on and debug_assets params is true" do
@@ -62,7 +63,7 @@ module ApplicationTests
 
       class ::PostsController < ActionController::Base ; end
 
-      get "/posts?debug_assets=true"
+      get("/posts?debug_assets=true", {}, "HTTPS" => "on")
       assert_match(/<script src="\/assets\/application(\.debug|\.self)?-([0-z]+)\.js(\?body=1)?"><\/script>/, last_response.body)
     end
 
@@ -77,7 +78,7 @@ module ApplicationTests
         javascript_path:        %r{/javascripts/#{contents}},
         stylesheet_path:        %r{/stylesheets/#{contents}},
         image_tag:              %r{<img src="/images/#{contents}"},
-        favicon_link_tag:       %r{<link rel="shortcut icon" type="image/x-icon" href="/images/#{contents}" />},
+        favicon_link_tag:       %r{<link rel="icon" type="image/x-icon" href="/images/#{contents}" />},
         stylesheet_link_tag:    %r{<link rel="stylesheet" href="/stylesheets/#{contents}.css" />},
         javascript_include_tag: %r{<script src="/javascripts/#{contents}.js">},
         audio_tag:              %r{<audio src="/audios/#{contents}"></audio>},
@@ -85,14 +86,18 @@ module ApplicationTests
         image_submit_tag:       %r{<input type="image" src="/images/#{contents}" />}
       }
 
+      class ::PostsController < ActionController::Base
+        def index
+          render params[:view_method]
+        end
+      end
+
       cases.each do |(view_method, tag_match)|
-        app_file "app/views/posts/index.html.erb", "<%= #{view_method} '#{contents}', skip_pipeline: true %>"
+        app_file "app/views/posts/#{view_method}.html.erb", "<%= #{view_method} '#{contents}', skip_pipeline: true %>"
 
         app "development"
 
-        class ::PostsController < ActionController::Base ; end
-
-        get "/posts?debug_assets=true"
+        get "/posts?debug_assets=true&view_method=#{view_method}"
 
         body = last_response.body
         assert_match(tag_match, body, "Expected `#{view_method}` to produce a match to #{tag_match}, but did not: #{body}")
@@ -111,14 +116,18 @@ module ApplicationTests
         stylesheet_url:  %r{http://example.org/stylesheets/#{contents}},
       }
 
+      class ::PostsController < ActionController::Base
+        def index
+          render params[:view_method]
+        end
+      end
+
       cases.each do |(view_method, tag_match)|
-        app_file "app/views/posts/index.html.erb", "<%= #{view_method} '#{contents}', skip_pipeline: true %>"
+        app_file "app/views/posts/#{view_method}.html.erb", "<%= #{view_method} '#{contents}', skip_pipeline: true %> "
 
         app "development"
 
-        class ::PostsController < ActionController::Base ; end
-
-        get "/posts?debug_assets=true"
+        get "/posts?debug_assets=true&view_method=#{view_method}"
 
         body = last_response.body
         assert_match(tag_match, body, "Expected `#{view_method}` to produce a match to #{tag_match}, but did not: #{body}")
@@ -130,14 +139,19 @@ module ApplicationTests
         /\/assets\/application-.*.\.js/ => {},
         /application.js/                => { skip_pipeline: true },
       }
-      cases.each do |(tag_match, options_hash)|
-        app_file "app/views/posts/index.html.erb", "<%= asset_path('application.js', #{options_hash}) %>"
+
+      class ::PostsController < ActionController::Base
+        def index
+          render params[:version]
+        end
+      end
+
+      cases.each_with_index do |(tag_match, options_hash), index|
+        app_file "app/views/posts/version_#{index}.html.erb", "<%= asset_path('application.js', #{options_hash}) %>"
 
         app "development"
 
-        class ::PostsController < ActionController::Base ; end
-
-        get "/posts?debug_assets=true"
+        get "/posts?debug_assets=true&version=version_#{index}"
 
         body = last_response.body.strip
         assert_match(tag_match, body, "Expected `asset_path` with `#{options_hash}` to produce a match to #{tag_match}, but did not: #{body}")
@@ -150,14 +164,18 @@ module ApplicationTests
         public_compute_asset_path: /application.js/,
       }
 
+      class ::PostsController < ActionController::Base
+        def index
+          render params[:view_method]
+        end
+      end
+
       cases.each do |(view_method, tag_match)|
-        app_file "app/views/posts/index.html.erb", "<%= #{ view_method } 'application.js' %>"
+        app_file "app/views/posts/#{view_method}.html.erb", "<%= #{ view_method } 'application.js' %>"
 
         app "development"
 
-        class ::PostsController < ActionController::Base ; end
-
-        get "/posts?debug_assets=true"
+        get "/posts?debug_assets=true&view_method=#{view_method}"
 
         body = last_response.body.strip
         assert_match(tag_match, body, "Expected `#{view_method}` to produce a match to #{ tag_match }, but did not: #{ body }")

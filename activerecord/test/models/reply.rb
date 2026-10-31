@@ -3,7 +3,7 @@
 require "models/topic"
 
 class Reply < Topic
-  belongs_to :topic, foreign_key: "parent_id", counter_cache: true
+  belongs_to :topic, foreign_key: "parent_id", counter_cache: true, inverse_of: :replies
   belongs_to :topic_with_primary_key, class_name: "Topic", primary_key: "title", foreign_key: "parent_title", counter_cache: "replies_count", touch: true
   has_many :replies, class_name: "SillyReply", dependent: :destroy, foreign_key: "parent_id"
   has_many :silly_unique_replies, dependent: :destroy, foreign_key: "parent_id"
@@ -76,4 +76,22 @@ module Web
   class Reply < Web::Topic
     belongs_to :topic, foreign_key: "parent_id", counter_cache: true, class_name: "Web::Topic"
   end
+end
+
+class ReplyWithAliasedParentId < ActiveRecord::Base
+  self.table_name = "topics"
+  self.inheritance_column = nil
+
+  alias_attribute :discussion_id, :parent_id
+
+  belongs_to :topic, foreign_key: :discussion_id, counter_cache: :replies_count
+end
+
+class ReplyWithAliasedTouchParentId < ActiveRecord::Base
+  self.table_name = "topics"
+  self.inheritance_column = nil
+
+  alias_attribute :discussion_id, :parent_id
+
+  belongs_to :topic, foreign_key: :discussion_id, touch: true
 end

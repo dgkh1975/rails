@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   module Type
     class Time < ActiveModel::Type::Time
       include Internal::Timezone
 
-      class Value < DelegateClass(::Time) # :nodoc:
-      end
+      Value = ActiveSupport::Delegation::DelegateClass(::Time) # :nodoc:
 
       def serialize(value)
         case value = super
@@ -15,6 +15,10 @@ module ActiveRecord
         else
           value
         end
+      end
+
+      def serialize_cast_value(value) # :nodoc:
+        Value.new(super) if value
       end
 
       private

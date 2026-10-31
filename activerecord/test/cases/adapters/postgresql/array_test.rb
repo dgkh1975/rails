@@ -9,10 +9,12 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
 
   class PgArray < ActiveRecord::Base
     self.table_name = "pg_arrays"
+
+    belongs_to :parent, class_name: "PgArray", primary_key: [:ratings, :id], foreign_key: [:ratings, :parent_id], optional: true
   end
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
 
     enable_extension!("hstore", @connection)
 
@@ -20,6 +22,7 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
       @connection.create_table "pg_arrays", force: true do |t|
         t.string "tags", array: true, limit: 255
         t.integer "ratings", array: true
+        t.bigint :parent_id
         t.datetime :datetimes, array: true
         t.hstore :hstores, array: true
         t.decimal :decimals, array: true, default: [], precision: 10, scale: 2
@@ -47,9 +50,20 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
     assert_predicate ratings_column, :array?
   end
 
+  def test_immutable_strings_by_default_does_not_affect_array_columns
+    new_klass = Class.new(PgArray) do
+      self.immutable_strings_by_default = true
+    end
+
+    type = new_klass.type_for_attribute("tags")
+    assert_instance_of ActiveRecord::ConnectionAdapters::PostgreSQL::OID::Array, type
+    assert_equal :string, type.type
+    assert_equal ["red"], new_klass.new(tags: ["red"]).tags
+  end
+
   def test_not_compatible_with_serialize_array
     new_klass = Class.new(PgArray) do
-      serialize :tags, Array
+      serialize :tags, type: Array
     end
     assert_raises(ActiveRecord::AttributeMethods::Serialization::ColumnNotSerializableError) do
       new_klass.new
@@ -65,7 +79,7 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
 
   def test_array_with_serialized_attributes
     new_klass = Class.new(PgArray) do
-      serialize :tags, MyTags
+      serialize :tags, coder: MyTags
     end
 
     new_klass.create!(tags: MyTags.new(["one", "two"]))
@@ -192,6 +206,45 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
     assert_equal [2, 3, 4], x.reload.ratings
   end
 
+  def test_integer_arrays_deserialize_without_allocating_per_element
+    ratings_type = PgArray.type_for_attribute("ratings")
+
+    assert_equal [1, nil, -3], ratings_type.deserialize("{1,NULL,-3}")
+    assert_deserializes_without_allocating_per_element ratings_type
+  end
+
+  def test_integer_arrays_round_trip_bigint_bounds_and_nils
+    @connection.add_column "pg_arrays", "counts", :bigint, array: true
+    PgArray.reset_column_information
+
+    assert_cycle(:counts, [-2**63, nil, 2**63 - 1])
+    assert_cycle(:counts, [[1, nil], [nil, 4]])
+  end
+
+  def test_integer_arrays_cast_blank_strings_to_nil
+    ratings_type = PgArray.type_for_attribute("ratings")
+
+    assert_equal [nil, 2], ratings_type.cast('{"",2}')
+  end
+
+  def test_integer_subclass_arrays_keep_their_own_serialization
+    subtype = Class.new(ActiveRecord::Type::Integer) do
+      def serialize(value) = "id#{value}"
+    end
+    type = ActiveRecord::ConnectionAdapters::PostgreSQL::OID::Array.new(subtype.new)
+
+    assert_equal "{id1,id2}", @connection.type_cast(type.serialize([1, 2]))
+  end
+
+  def test_integer_arrays_loaded_from_schema_cache_json_decode_integers
+    serializer = ActiveRecord::ConnectionAdapters::JSONSchemaCacheSerializer
+    ratings_type = serializer.load(serializer.dump(PgArray.type_for_attribute("ratings")))
+
+    assert_equal [1, nil, 3], ratings_type.deserialize("{1,NULL,3}")
+    assert_equal "{1,NULL,3}", @connection.type_cast(ratings_type.serialize([1, nil, 3]))
+    assert_deserializes_without_allocating_per_element ratings_type
+  end
+
   def test_multi_dimensional_with_strings
     assert_cycle(:tags, [[["1"], ["2"]], [["2"], ["3"]]])
   end
@@ -269,7 +322,7 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
     oid = ActiveRecord::ConnectionAdapters::PostgreSQL::OID
     comma_delim = oid::Array.new(ActiveRecord::Type::String.new, ",")
     semicolon_delim = oid::Array.new(ActiveRecord::Type::String.new, ";")
-    conn = PgArray.connection
+    conn = PgArray.lease_connection
 
     assert_equal %({"hello,",world;}), conn.type_cast(comma_delim.serialize(strings))
     assert_equal %({hello,;"world;"}), conn.type_cast(semicolon_delim.serialize(strings))
@@ -347,6 +400,14 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
     assert_equal record, PgArray.where(tags: tags).take
   end
 
+  def test_find_by_association_with_array_in_composite_key
+    parent = PgArray.create!(ratings: [10, 20])
+    record = PgArray.create!(ratings: parent.ratings, parent_id: parent.id)
+
+    assert_equal record, PgArray.where(parent: parent).take
+    assert_equal record, PgArray.find_by(parent: parent)
+  end
+
   def test_uniqueness_validation
     klass = Class.new(PgArray) do
       validates_uniqueness_of :tags
@@ -354,11 +415,11 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
       def self.model_name; ActiveModel::Name.new(PgArray) end
     end
     e1 = klass.create("tags" => ["black", "blue"])
-    assert e1.persisted?, "Saving e1"
+    assert_predicate e1, :persisted?, "Saving e1"
 
     e2 = klass.create("tags" => ["black", "blue"])
     assert_not e2.persisted?, "e2 shouldn't be valid"
-    assert e2.errors[:tags].any?, "Should have errors for tags"
+    assert_predicate e2.errors[:tags], :any?, "Should have errors for tags"
     assert_equal ["has already been taken"], e2.errors[:tags], "Should have uniqueness message for tags"
   end
 
@@ -390,5 +451,18 @@ class PostgresqlArrayTest < ActiveRecord::PostgreSQLTestCase
       x.save!
       x.reload
       assert_equal(array, x.public_send(field))
+    end
+
+    def assert_deserializes_without_allocating_per_element(type)
+      thousand_ids = "{#{(1..1_000).to_a.join(",")}}"
+      type.deserialize(thousand_ids)
+
+      assert_operator allocations { type.deserialize(thousand_ids) }, :<, 100
+    end
+
+    def allocations
+      before = GC.stat(:total_allocated_objects)
+      yield
+      GC.stat(:total_allocated_objects) - before
     end
 end

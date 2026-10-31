@@ -2,48 +2,57 @@
 
 require "active_support/core_ext/object/deep_dup"
 
-module ActionDispatch #:nodoc:
+module ActionDispatch # :nodoc:
+  # # Action Dispatch PermissionsPolicy
+  #
+  # Configures the HTTP
+  # [Feature-Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Feature-Policy)
+  # response header to specify which browser features the current
+  # document and its iframes can use.
+  #
+  # Example global policy:
+  #
+  #     Rails.application.config.permissions_policy do |policy|
+  #       policy.camera      :none
+  #       policy.gyroscope   :none
+  #       policy.microphone  :none
+  #       policy.usb         :none
+  #       policy.fullscreen  :self
+  #       policy.payment     :self, "https://secure.example.com"
+  #     end
+  #
+  # The Feature-Policy header has been renamed to Permissions-Policy. The
+  # Permissions-Policy requires a different implementation and isn't yet supported
+  # by all browsers. To avoid having to rename this middleware in the future we
+  # use the new name for the middleware but keep the old header name and
+  # implementation for now.
   class PermissionsPolicy
     class Middleware
-      CONTENT_TYPE = "Content-Type"
-      # The Feature-Policy header has been renamed to Permissions-Policy.
-      # The Permissions-Policy requires a different implementation and isn't
-      # yet supported by all browsers. To avoid having to rename this
-      # middleware in the future we use the new name for the middleware but
-      # keep the old header name and implementation for now.
-      POLICY       = "Feature-Policy"
-
       def initialize(app)
         @app = app
       end
 
       def call(env)
-        request = ActionDispatch::Request.new(env)
         _, headers, _ = response = @app.call(env)
 
-        return response unless html_response?(headers)
         return response if policy_present?(headers)
 
+        request = ActionDispatch::Request.new(env)
+
         if policy = request.permissions_policy
-          headers[POLICY] = policy.build(request.controller_instance)
+          headers[ActionDispatch::Constants::FEATURE_POLICY] = policy.build(request.controller_instance)
         end
 
         if policy_empty?(policy)
-          headers.delete(POLICY)
+          headers.delete(ActionDispatch::Constants::FEATURE_POLICY)
         end
 
         response
       end
 
       private
-        def html_response?(headers)
-          if content_type = headers[CONTENT_TYPE]
-            /html/.match?(content_type)
-          end
-        end
-
         def policy_present?(headers)
-          headers[POLICY]
+          headers[ActionDispatch::Constants::FEATURE_POLICY]
         end
 
         def policy_empty?(policy)
@@ -69,25 +78,57 @@ module ActionDispatch #:nodoc:
     }.freeze
 
     # List of available permissions can be found at
-    # https://github.com/w3c/webappsec-permissions-policy/blob/master/features.md#policy-controlled-features
+    # https://github.com/w3c/webappsec-permissions-policy/blob/main/features.md#policy-controlled-features
     DIRECTIVES = {
-      accelerometer:        "accelerometer",
-      ambient_light_sensor: "ambient-light-sensor",
-      autoplay:             "autoplay",
-      camera:               "camera",
-      encrypted_media:      "encrypted-media",
-      fullscreen:           "fullscreen",
-      geolocation:          "geolocation",
-      gyroscope:            "gyroscope",
-      magnetometer:         "magnetometer",
-      microphone:           "microphone",
-      midi:                 "midi",
-      payment:              "payment",
-      picture_in_picture:   "picture-in-picture",
-      speaker:              "speaker",
-      usb:                  "usb",
-      vibrate:              "vibrate",
-      vr:                   "vr",
+      accelerometer:                   "accelerometer",
+      ambient_light_sensor:            "ambient-light-sensor",
+      attribution_reporting:           "attribution-reporting",
+      autoplay:                        "autoplay",
+      battery:                         "battery",
+      bluetooth:                       "bluetooth",
+      camera:                          "camera",
+      ch_ua:                           "ch-ua",
+      ch_ua_arch:                      "ch-ua-arch",
+      ch_ua_bitness:                   "ch-ua-bitness",
+      ch_ua_full_version:              "ch-ua-full-version",
+      ch_ua_full_version_list:         "ch-ua-full-version-list",
+      ch_ua_high_entropy_values:       "ch-ua-high-entropy-values",
+      ch_ua_mobile:                    "ch-ua-mobile",
+      ch_ua_model:                     "ch-ua-model",
+      ch_ua_platform:                  "ch-ua-platform",
+      ch_ua_platform_version:          "ch-ua-platform-version",
+      ch_ua_wow64:                     "ch-ua-wow64",
+      compute_pressure:                "compute-pressure",
+      cross_origin_isolated:           "cross-origin-isolated",
+      direct_sockets:                  "direct-sockets",
+      display_capture:                 "display-capture",
+      encrypted_media:                 "encrypted-media",
+      execution_while_not_rendered:    "execution-while-not-rendered",
+      execution_while_out_of_viewport: "execution-while-out-of-viewport",
+      fullscreen:                      "fullscreen",
+      geolocation:                     "geolocation",
+      gyroscope:                       "gyroscope",
+      hid:                             "hid",
+      identity_credentials_get:        "identity-credentials-get",
+      idle_detection:                  "idle-detection",
+      keyboard_map:                    "keyboard-map",
+      magnetometer:                    "magnetometer",
+      mediasession:                    "mediasession",
+      microphone:                      "microphone",
+      midi:                            "midi",
+      navigation_override:             "navigation-override",
+      otp_credentials:                 "otp-credentials",
+      payment:                         "payment",
+      picture_in_picture:              "picture-in-picture",
+      publickey_credentials_get:       "publickey-credentials-get",
+      screen_wake_lock:                "screen-wake-lock",
+      serial:                          "serial",
+      storage_access:                  "storage-access",
+      sync_xhr:                        "sync-xhr",
+      usb:                             "usb",
+      web_share:                       "web-share",
+      window_management:               "window-management",
+      xr_spatial_tracking:             "xr-spatial-tracking",
     }.freeze
 
     private_constant :MAPPINGS, :DIRECTIVES
@@ -163,11 +204,16 @@ module ActionDispatch #:nodoc:
           if context.nil?
             raise RuntimeError, "Missing context for the dynamic permissions policy source: #{source.inspect}"
           else
-            context.instance_exec(&source)
+            resolved = context.instance_exec(&source)
+            apply_mappings(Array.wrap(resolved))
           end
         else
           raise RuntimeError, "Unexpected permissions policy source: #{source.inspect}"
         end
       end
+  end
+
+  ActiveSupport.on_load(:action_dispatch_request) do
+    include ActionDispatch::PermissionsPolicy::Request
   end
 end

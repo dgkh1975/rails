@@ -2,18 +2,18 @@
 
 module ActiveModel
   module Type
-    # == Active \Model \Type \Boolean
+    # Active Model \Boolean \Type
+    # ===========================
     #
-    # A class that behaves like a boolean type, including rules for coercion of user input.
+    # A class that behaves like a boolean type, including rules for coercion of
+    # user input.
     #
-    # === Coercion
-    # Values set from user input will first be coerced into the appropriate ruby type.
-    # Coercion behavior is roughly mapped to Ruby's boolean semantics.
-    #
-    # - "false", "f" , "0", +0+ or any other value in +FALSE_VALUES+ will be coerced to +false+
-    # - Empty strings are coerced to +nil+
-    # - All other values will be coerced to +true+
+    # - `"false"`, `"f"`, `"0"`, `0` or any other value in
+    #   `FALSE_VALUES` will be coerced to `false`.
+    # - Empty strings are coerced to `nil`.
+    # - All other values will be coerced to `true`.
     class Boolean < Value
+      include Helpers::Immutable
       FALSE_VALUES = [
         false, 0,
         "0", :"0",
@@ -31,6 +31,10 @@ module ActiveModel
 
       def serialize(value) # :nodoc:
         cast(value)
+      end
+
+      def serialize_cast_value(value) # :nodoc:
+        value
       end
 
       private

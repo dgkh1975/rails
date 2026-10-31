@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   module ConnectionAdapters
     module SQLite3
@@ -11,122 +12,162 @@ module ActiveRecord
 
         def write_query?(sql) # :nodoc:
           !READ_QUERY.match?(sql)
+        rescue ArgumentError # Invalid encoding
+          !READ_QUERY.match?(sql.b)
         end
 
-        def explain(arel, binds = [])
-          sql = "EXPLAIN QUERY PLAN #{to_sql(arel, binds)}"
-          SQLite3::ExplainPrettyPrinter.new.pp(exec_query(sql, "EXPLAIN", []))
+        def explain(arel_or_sql, binds = [], _options = [])
+          sql, _ = to_sql_and_binds(arel_or_sql, binds)
+          sql = "EXPLAIN QUERY PLAN " + sql
+          result = query_rows(sql, "EXPLAIN")
+          SQLite3::ExplainPrettyPrinter.new.pp(result)
         end
 
-        def execute(sql, name = nil) #:nodoc:
-          check_if_write_query(sql)
+        def begin_deferred_transaction(isolation = nil) # :nodoc:
+          internal_begin_transaction(:deferred, isolation)
+        end
 
-          materialize_transactions
-          mark_transaction_written_if_write(sql)
+        def begin_isolated_db_transaction(isolation) # :nodoc:
+          internal_begin_transaction(:deferred, isolation)
+        end
 
-          log(sql, name) do
-            ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-              @connection.execute(sql)
-            end
+        def begin_db_transaction # :nodoc:
+          internal_begin_transaction(:immediate, nil)
+        end
+
+        def commit_db_transaction # :nodoc:
+          query_command("COMMIT TRANSACTION", "TRANSACTION", allow_retry: true, materialize_transactions: false)
+        end
+
+        def exec_rollback_db_transaction # :nodoc:
+          return if connected? && !@raw_connection.transaction_active?
+
+          query_command("ROLLBACK TRANSACTION", "TRANSACTION", allow_retry: true, materialize_transactions: false)
+        end
+
+        def exec_rollback_to_savepoint(name = current_savepoint_name) # :nodoc:
+          return if connected? && !@raw_connection.transaction_active?
+
+          super
+        end
+
+        # https://stackoverflow.com/questions/17574784
+        # https://www.sqlite.org/lang_datefunc.html
+        HIGH_PRECISION_CURRENT_TIMESTAMP = Arel.sql("STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')", retryable: true).freeze # :nodoc:
+        private_constant :HIGH_PRECISION_CURRENT_TIMESTAMP
+
+        def high_precision_current_timestamp
+          HIGH_PRECISION_CURRENT_TIMESTAMP
+        end
+
+        def execute(...) # :nodoc:
+          # SQLite3Adapter was refactored to use ActiveRecord::Result internally
+          # but for backward compatibility we have to keep returning arrays of hashes here
+          super&.to_a
+        end
+
+        def reset_isolation_level # :nodoc:
+          query_command("PRAGMA read_uncommitted=#{@previous_read_uncommitted}", "TRANSACTION", allow_retry: true, materialize_transactions: false)
+          @previous_read_uncommitted = nil
+        end
+
+        def default_insert_value(column) # :nodoc:
+          if column.default_function
+            Arel.sql(column.default_function)
+          else
+            column.default
           end
         end
 
-        def exec_query(sql, name = nil, binds = [], prepare: false)
-          check_if_write_query(sql)
-
-          materialize_transactions
-          mark_transaction_written_if_write(sql)
-
-          type_casted_binds = type_casted_binds(binds)
-
-          log(sql, name, binds, type_casted_binds) do
-            ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-              # Don't cache statements if they are not prepared
-              unless prepare
-                stmt = @connection.prepare(sql)
-                begin
-                  cols = stmt.columns
-                  unless without_prepared_statement?(binds)
-                    stmt.bind_params(type_casted_binds)
-                  end
-                  records = stmt.to_a
-                ensure
-                  stmt.close
-                end
-              else
-                stmt = @statements[sql] ||= @connection.prepare(sql)
-                cols = stmt.columns
-                stmt.reset!
-                stmt.bind_params(type_casted_binds)
-                records = stmt.to_a
-              end
-
-              build_result(columns: cols, rows: records)
-            end
-          end
-        end
-
-        def exec_delete(sql, name = "SQL", binds = [])
-          exec_query(sql, name, binds)
-          @connection.changes
-        end
-        alias :exec_update :exec_delete
-
-        def begin_isolated_db_transaction(isolation) #:nodoc
-          raise TransactionIsolationError, "SQLite3 only supports the `read_uncommitted` transaction isolation level" if isolation != :read_uncommitted
-          raise StandardError, "You need to enable the shared-cache mode in SQLite mode before attempting to change the transaction isolation level" unless shared_cache?
-
-          Thread.current.thread_variable_set("read_uncommitted", @connection.get_first_value("PRAGMA read_uncommitted"))
-          @connection.read_uncommitted = true
-          begin_db_transaction
-        end
-
-        def begin_db_transaction #:nodoc:
-          log("begin transaction", "TRANSACTION") { @connection.transaction }
-        end
-
-        def commit_db_transaction #:nodoc:
-          log("commit transaction", "TRANSACTION") { @connection.commit }
-          reset_read_uncommitted
-        end
-
-        def exec_rollback_db_transaction #:nodoc:
-          log("rollback transaction", "TRANSACTION") { @connection.rollback }
-          reset_read_uncommitted
+        def execute_batch(statements, name = nil, **kwargs) # :nodoc:
+          sql = combine_multi_statements(statements)
+          intent = QueryIntent.new(
+            adapter: self,
+            processed_sql: sql,
+            name: name,
+            batch: true,
+            binds: kwargs[:binds] || [],
+            prepare: kwargs[:prepare] || false,
+            allow_async: kwargs[:async] || false,
+            allow_retry: kwargs[:allow_retry] || false,
+            materialize_transactions: kwargs[:materialize_transactions] != false
+          )
+          intent.execute!
+          intent.finish
         end
 
         private
-          def reset_read_uncommitted
-            read_uncommitted = Thread.current.thread_variable_get("read_uncommitted")
-            return unless read_uncommitted
+          def internal_begin_transaction(mode, isolation)
+            if isolation
+              raise TransactionIsolationError, "SQLite3 only supports the `read_uncommitted` transaction isolation level" if isolation != :read_uncommitted
+              raise StandardError, "You need to enable the shared-cache mode in SQLite mode before attempting to change the transaction isolation level" unless shared_cache?
+            end
 
-            @connection.read_uncommitted = read_uncommitted
-          end
-
-          def execute_batch(statements, name = nil)
-            sql = combine_multi_statements(statements)
-
-            check_if_write_query(sql)
-
-            materialize_transactions
-            mark_transaction_written_if_write(sql)
-
-            log(sql, name) do
-              ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-                @connection.execute_batch2(sql)
-              end
+            query_command("BEGIN #{mode} TRANSACTION", "TRANSACTION", allow_retry: true, materialize_transactions: false)
+            if isolation
+              @previous_read_uncommitted = query_value("PRAGMA read_uncommitted", "TRANSACTION")
+              query_command("PRAGMA read_uncommitted=ON", "TRANSACTION", allow_retry: true, materialize_transactions: false)
             end
           end
 
-          def last_inserted_id(result)
-            @connection.last_insert_row_id
+          def perform_query(raw_connection, intent)
+            total_changes_before_query = raw_connection.total_changes
+            affected_rows = nil
+
+            if intent.batch
+              raw_connection.execute_batch2(intent.processed_sql)
+            else
+              stmt = if intent.prepare
+                @statements[intent.processed_sql] ||= raw_connection.prepare(intent.processed_sql)
+                @statements[intent.processed_sql].reset!
+              else
+                # Don't cache statements if they are not prepared.
+                raw_connection.prepare(intent.processed_sql)
+              end
+              begin
+                if intent.has_binds?
+                  stmt.bind_params(intent.type_casted_binds)
+                end
+                result = if stmt.column_count.zero? # No return
+                  stmt.step
+
+                  affected_rows = if raw_connection.total_changes > total_changes_before_query
+                    raw_connection.changes
+                  else
+                    0
+                  end
+
+                  ActiveRecord::Result.empty(affected_rows: affected_rows)
+                else
+                  rows = stmt.to_a
+
+                  affected_rows = if raw_connection.total_changes > total_changes_before_query
+                    raw_connection.changes
+                  else
+                    0
+                  end
+
+                  ActiveRecord::Result.new(stmt.columns, rows, stmt.types.map { |t| type_map.lookup(t) }, affected_rows: affected_rows)
+                end
+              ensure
+                stmt.close unless intent.prepare
+              end
+            end
+            verified!
+
+            intent.notification_payload[:affected_rows] = affected_rows
+            intent.notification_payload[:row_count] = result&.length || 0
+            result
           end
 
-          def build_fixture_statements(fixture_set)
-            fixture_set.flat_map do |table_name, fixtures|
-              next if fixtures.empty?
-              fixtures.map { |fixture| build_fixture_sql([fixture], table_name) }
-            end.compact
+          def cast_result(result)
+            # Given that SQLite3 doesn't have a Result type, raw_execute already returns an ActiveRecord::Result
+            # so we have nothing to cast here.
+            result
+          end
+
+          def affected_rows(result)
+            result&.affected_rows
           end
 
           def build_truncate_statement(table_name)

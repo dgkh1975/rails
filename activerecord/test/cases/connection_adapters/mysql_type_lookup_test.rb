@@ -3,18 +3,18 @@
 require "cases/helper"
 require "support/connection_helper"
 
-if current_adapter?(:Mysql2Adapter)
-  module ActiveRecord
-    module ConnectionAdapters
-      class MysqlTypeLookupTest < ActiveRecord::TestCase
+module ActiveRecord
+  module ConnectionAdapters
+    class MysqlTypeLookupTest < ActiveRecord::TestCase
+      if current_adapter?(:Mysql2Adapter, :TrilogyAdapter)
         include ConnectionHelper
 
         setup do
-          @connection = ActiveRecord::Base.connection
+          @connection = ActiveRecord::Base.lease_connection
         end
 
         def teardown
-          reset_connection
+          reset_pool
         end
 
         def test_boolean_types

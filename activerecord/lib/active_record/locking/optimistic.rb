@@ -1,72 +1,112 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   module Locking
-    # == What is Optimistic Locking
+    # What is \Optimistic \Locking
+    # ----------------------------
     #
     # Optimistic locking allows multiple users to access the same record for edits, and assumes a minimum of
     # conflicts with the data. It does this by checking whether another process has made changes to a record since
-    # it was opened, an <tt>ActiveRecord::StaleObjectError</tt> exception is thrown if that has occurred
+    # it was opened, an ActiveRecord::StaleObjectError exception is thrown if that has occurred
     # and the update is ignored.
     #
-    # Check out <tt>ActiveRecord::Locking::Pessimistic</tt> for an alternative.
+    # Check out ActiveRecord::Locking::Pessimistic for an alternative.
     #
-    # == Usage
+    # Usage
+    # -----
     #
-    # Active Record supports optimistic locking if the +lock_version+ field is present. Each update to the
-    # record increments the +lock_version+ column and the locking facilities ensure that records instantiated twice
-    # will let the last one saved raise a +StaleObjectError+ if the first was also updated. Example:
+    # Active Record supports optimistic locking if the `lock_version` field is present. Each update to the
+    # record increments the integer column `lock_version` and the locking facilities ensure that records instantiated twice
+    # will let the last one saved raise a `StaleObjectError` if the first was also updated. Example:
     #
-    #   p1 = Person.find(1)
-    #   p2 = Person.find(1)
+    # ```
+    # p1 = Person.find(1)
+    # p2 = Person.find(1)
     #
-    #   p1.first_name = "Michael"
-    #   p1.save
+    # p1.first_name = "Michael"
+    # p1.save
     #
-    #   p2.first_name = "should fail"
-    #   p2.save # Raises an ActiveRecord::StaleObjectError
+    # p2.first_name = "should fail"
+    # p2.save # Raises an ActiveRecord::StaleObjectError
+    # ```
     #
     # Optimistic locking will also check for stale data when objects are destroyed. Example:
     #
-    #   p1 = Person.find(1)
-    #   p2 = Person.find(1)
+    # ```
+    # p1 = Person.find(1)
+    # p2 = Person.find(1)
     #
-    #   p1.first_name = "Michael"
-    #   p1.save
+    # p1.first_name = "Michael"
+    # p1.save
     #
-    #   p2.destroy # Raises an ActiveRecord::StaleObjectError
+    # p2.destroy # Raises an ActiveRecord::StaleObjectError
+    # ```
     #
     # You're then responsible for dealing with the conflict by rescuing the exception and either rolling back, merging,
     # or otherwise apply the business logic needed to resolve the conflict.
     #
     # This locking mechanism will function inside a single Ruby process. To make it work across all
-    # web requests, the recommended approach is to add +lock_version+ as a hidden field to your form.
+    # web requests, the recommended approach is to add `lock_version` as a hidden field to your form.
     #
-    # This behavior can be turned off by setting <tt>ActiveRecord::Base.lock_optimistically = false</tt>.
-    # To override the name of the +lock_version+ column, set the <tt>locking_column</tt> class attribute:
+    # This behavior can be turned off by setting `ActiveRecord::Base.lock_optimistically = false`.
+    # To override the name of the `lock_version` column, set the `locking_column` class attribute:
     #
-    #   class Person < ActiveRecord::Base
-    #     self.locking_column = :lock_person
-    #   end
+    # ```
+    # class Person < ActiveRecord::Base
+    #   self.locking_column = :lock_person
+    # end
+    # ```
     #
     module Optimistic
       extend ActiveSupport::Concern
 
-      included do
-        class_attribute :lock_optimistically, instance_writer: false, default: true
+      # Captures the `preserve_lock_version_on_touch` intent on the record at
+      # `touch_later` time, since the actual touch is deferred until the
+      # transaction commits — by which point the surrounding block has already
+      # exited.
+      module DeferredTouch # :nodoc:
+        def touch_later(*)
+          if Optimistic.preserving_lock_version_on_touch?
+            @_skip_locking_column_on_touch = true
+          end
+          super
+        end
       end
 
-      def locking_enabled? #:nodoc:
+      included do
+        class_attribute :lock_optimistically, instance_writer: false, default: true
+        prepend DeferredTouch
+      end
+
+      def self.preserve_lock_version_on_touch # :nodoc:
+        prior = ActiveSupport::IsolatedExecutionState[:active_record_preserve_lock_version_on_touch]
+        ActiveSupport::IsolatedExecutionState[:active_record_preserve_lock_version_on_touch] = true
+        yield
+      ensure
+        ActiveSupport::IsolatedExecutionState[:active_record_preserve_lock_version_on_touch] = prior
+      end
+
+      def self.preserving_lock_version_on_touch? # :nodoc:
+        ActiveSupport::IsolatedExecutionState[:active_record_preserve_lock_version_on_touch]
+      end
+
+      def locking_enabled? # :nodoc:
         self.class.locking_enabled?
       end
 
-      def increment!(*, **) #:nodoc:
+      def increment!(*, **) # :nodoc:
         super.tap do
           if locking_enabled?
             self[self.class.locking_column] += 1
             clear_attribute_change(self.class.locking_column)
           end
         end
+      end
+
+      def initialize_dup(other) # :nodoc:
+        super
+        _clear_locking_column if locking_enabled?
       end
 
       private
@@ -80,27 +120,39 @@ module ActiveRecord
         end
 
         def _touch_row(attribute_names, time)
-          @_touch_attr_names << self.class.locking_column if locking_enabled?
+          if locking_enabled? && !_skip_locking_column_on_touch?
+            @_touch_attr_names << self.class.locking_column
+          end
           super
+        ensure
+          @_skip_locking_column_on_touch = nil
         end
 
         def _update_row(attribute_names, attempted_action = "update")
           return super unless locking_enabled?
+          return super if attempted_action == "touch" && _skip_locking_column_on_touch?
 
           begin
             locking_column = self.class.locking_column
             lock_attribute_was = @attributes[locking_column]
-            lock_value_for_database = _lock_value_for_database(locking_column)
+
+            update_constraints = _query_constraints_hash
 
             attribute_names = attribute_names.dup if attribute_names.frozen?
             attribute_names << locking_column
+
+            if self[locking_column].nil?
+              raise(<<-MSG.squish)
+                For optimistic locking, locking_column ('#{locking_column}') can't be nil.
+                Are you missing a default value or validation on '#{locking_column}'?
+              MSG
+            end
 
             self[locking_column] += 1
 
             affected_rows = self.class._update_record(
               attributes_with_values(attribute_names),
-              @primary_key => id_in_database,
-              locking_column => lock_value_for_database
+              update_constraints
             )
 
             if affected_rows != 1
@@ -116,17 +168,14 @@ module ActiveRecord
           end
         end
 
+        def _skip_locking_column_on_touch?
+          @_skip_locking_column_on_touch || Optimistic.preserving_lock_version_on_touch?
+        end
+
         def destroy_row
-          return super unless locking_enabled?
+          affected_rows = super
 
-          locking_column = self.class.locking_column
-
-          affected_rows = self.class._delete_record(
-            @primary_key => id_in_database,
-            locking_column => _lock_value_for_database(locking_column)
-          )
-
-          if affected_rows != 1
+          if locking_enabled? && affected_rows != 1
             raise ActiveRecord::StaleObjectError.new(self, "destroy")
           end
 
@@ -141,29 +190,38 @@ module ActiveRecord
           end
         end
 
+        def _clear_locking_column
+          self[self.class.locking_column] = nil
+          clear_attribute_change(self.class.locking_column)
+        end
+
+        def _query_constraints_hash
+          return super unless locking_enabled?
+
+          locking_column = self.class.locking_column
+          super.merge(locking_column => _lock_value_for_database(locking_column))
+        end
+
         module ClassMethods
           DEFAULT_LOCKING_COLUMN = "lock_version"
 
-          # Returns true if the +lock_optimistically+ flag is set to true
+          # Returns true if the `lock_optimistically` flag is set to true
           # (which it is, by default) and the table includes the
-          # +locking_column+ column (defaults to +lock_version+).
+          # `locking_column` column (defaults to `lock_version`).
           def locking_enabled?
             lock_optimistically && columns_hash[locking_column]
           end
 
-          # Set the column to use for optimistic locking. Defaults to +lock_version+.
+          # Set the column to use for optimistic locking. Defaults to `lock_version`.
           def locking_column=(value)
             reload_schema_from_cache
             @locking_column = value.to_s
           end
 
-          # The version column used for optimistic locking. Defaults to +lock_version+.
-          def locking_column
-            @locking_column = DEFAULT_LOCKING_COLUMN unless defined?(@locking_column)
-            @locking_column
-          end
+          # The version column used for optimistic locking. Defaults to `lock_version`.
+          attr_reader :locking_column
 
-          # Reset the column used for optimistic locking back to the +lock_version+ default.
+          # Reset the column used for optimistic locking back to the `lock_version` default.
           def reset_locking_column
             self.locking_column = DEFAULT_LOCKING_COLUMN
           end
@@ -175,21 +233,36 @@ module ActiveRecord
             super
           end
 
-          def define_attribute(name, cast_type, **) # :nodoc:
-            if lock_optimistically && name == locking_column
-              cast_type = LockingType.new(cast_type)
+          private
+            def hook_attribute_type(name, cast_type)
+              if lock_optimistically && name == locking_column
+                cast_type = LockingType.new(cast_type)
+              end
+
+              super
             end
-            super
-          end
+
+            def inherited(base)
+              super
+              base.class_eval do
+                @locking_column = DEFAULT_LOCKING_COLUMN
+              end
+            end
         end
     end
 
-    # In de/serialize we change `nil` to 0, so that we can allow passing
-    # `nil` values to `lock_version`, and not result in `ActiveRecord::StaleObjectError`
+    # In de/serialize we change \`nil\` to 0, so that we can allow passing
+    # \`nil\` values to \`lock_version\`, and not result in \`ActiveRecord::StaleObjectError\`
     # during update record.
-    class LockingType < DelegateClass(Type::Value) # :nodoc:
+    class LockingType < ActiveSupport::Delegation::DelegateClass(Type::Value) # :nodoc:
+      include Type::QueryPredicates::Decorator
+
       def self.new(subtype)
         self === subtype ? subtype : super
+      end
+
+      def subtype
+        __getobj__
       end
 
       def deserialize(value)

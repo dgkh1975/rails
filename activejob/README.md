@@ -2,22 +2,22 @@
 
 Active Job is a framework for declaring jobs and making them run on a variety
 of queuing backends. These jobs can be everything from regularly scheduled
-clean-ups, to billing charges, to mailings. Anything that can be chopped up into
-small units of work and run in parallel, really.
+clean-ups, to billing charges, to mailings — anything that can be chopped up into
+small units of work and run in parallel.
 
 It also serves as the backend for Action Mailer's #deliver_later functionality
 that makes it easy to turn any mailing into a job for running later. That's
 one of the most common jobs in a modern web application: sending emails outside
-of the request-response cycle, so the user doesn't have to wait on it.
+the request-response cycle, so the user doesn't have to wait on it.
 
-The main point is to ensure that all Rails apps will have a job infrastructure
+The main point is to ensure that all \Rails apps will have a job infrastructure
 in place, even if it's in the form of an "immediate runner". We can then have
 framework features and other gems build on top of that, without having to worry
 about API differences between Delayed Job and Resque. Picking your queuing
 backend becomes more of an operational concern, then. And you'll be able to
 switch between them without having to rewrite your jobs.
 
-You can read more about Active Job in the [Active Job Basics](https://edgeguides.rubyonrails.org/active_job_basics.html) guide.
+You can read more about Active Job in the [Active Job Basics](https://guides.rubyonrails.org/active_job_basics.html) guide.
 
 ## Usage
 
@@ -85,15 +85,16 @@ by default has been mixed into Active Record classes.
 
 ## Supported queuing systems
 
-Active Job has built-in adapters for multiple queuing backends (Sidekiq,
-Resque, Delayed Job and others). To get an up-to-date list of the adapters
+Active Job has built-in adapters for multiple queuing backends (Resque, Delayed Job and others). To get an up-to-date list of the adapters
 see the API Documentation for [ActiveJob::QueueAdapters](https://api.rubyonrails.org/classes/ActiveJob/QueueAdapters.html).
 
-**Please note:** We are not accepting pull requests for new adapters. We
-encourage library authors to provide an ActiveJob adapter as part of
-their gem, or as a stand-alone gem. For discussion about this see the
-following PRs: [23311](https://github.com/rails/rails/issues/23311#issuecomment-176275718),
-[21406](https://github.com/rails/rails/pull/21406#issuecomment-138813484), and [#32285](https://github.com/rails/rails/pull/32285).
+**Please note:** We are not accepting pull requests for new adapters, and we are
+actively extracting the current adapters. We encourage library authors to provide
+an Active Job adapter as part of their gem, or as a stand-alone gem.
+
+## Continuations
+
+Continuations allow jobs to be interrupted and resumed. See more at ActiveJob::Continuation.
 
 
 ## Download and installation
@@ -104,7 +105,7 @@ The latest version of Active Job can be installed with RubyGems:
   $ gem install activejob
 ```
 
-Source code can be downloaded as part of the Rails project on GitHub:
+Source code can be downloaded as part of the \Rails project on GitHub:
 
 * https://github.com/rails/rails/tree/main/activejob
 
@@ -122,10 +123,10 @@ API documentation is at:
 
 * https://api.rubyonrails.org
 
-Bug reports for the Ruby on Rails project can be filed here:
+Bug reports for the Ruby on \Rails project can be filed here:
 
 * https://github.com/rails/rails/issues
 
-Feature requests should be discussed on the rails-core mailing list here:
+Feature requests should be discussed on the rubyonrails-core forum here:
 
 * https://discuss.rubyonrails.org/c/rubyonrails-core

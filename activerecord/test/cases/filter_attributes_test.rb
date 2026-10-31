@@ -13,6 +13,7 @@ class FilterAttributesTest < ActiveRecord::TestCase
   setup do
     @previous_filter_attributes = ActiveRecord::Base.filter_attributes
     ActiveRecord::Base.filter_attributes = [:name]
+    ActiveRecord.use_yaml_unsafe_load = true
   end
 
   teardown do
@@ -63,6 +64,13 @@ class FilterAttributesTest < ActiveRecord::TestCase
     assert_includes account.inspect, 'name: "slangis73"'
   end
 
+  test "proc filter_attributes don't prevent marshal dump" do
+    ActiveRecord::Base.filter_attributes = [ lambda { |key, value| value.reverse! if key == "name" } ]
+    account = Admin::Account.new(id: 123, name: "37signals")
+    account.inspect
+    assert_equal account, Marshal.load(Marshal.dump(account))
+  end
+
   test "filter_attributes could be overwritten by models" do
     Admin::Account.all.each do |account|
       assert_includes account.inspect, "name: [FILTERED]"
@@ -83,7 +91,7 @@ class FilterAttributesTest < ActiveRecord::TestCase
         assert_equal 0, account.inspect.scan("[FILTERED]").length
       end
     ensure
-      Admin::Account.remove_instance_variable(:@filter_attributes)
+      Admin::Account.instance_variable_set(:@filter_attributes, nil)
     end
   end
 
@@ -102,7 +110,7 @@ class FilterAttributesTest < ActiveRecord::TestCase
     assert_includes user.inspect, "auth_token: [FILTERED]"
     assert_includes user.inspect, 'token: "[FILTERED]"'
   ensure
-    User.remove_instance_variable(:@filter_attributes)
+    User.instance_variable_set(:@filter_attributes, nil)
   end
 
   test "filter_attributes on pretty_print" do
@@ -110,7 +118,7 @@ class FilterAttributesTest < ActiveRecord::TestCase
     actual = "".dup
     PP.pp(user, StringIO.new(actual))
 
-    assert_includes actual, 'name: "[FILTERED]"'
+    assert_includes actual, "name: [FILTERED]"
     assert_equal 1, actual.scan("[FILTERED]").length
   end
 
@@ -130,9 +138,9 @@ class FilterAttributesTest < ActiveRecord::TestCase
     actual = "".dup
     PP.pp(user, StringIO.new(actual))
 
-    assert_includes actual, 'auth_token: "[FILTERED]"'
-    assert_includes actual, 'token: "[FILTERED]"'
+    assert_includes actual, "auth_token: [FILTERED]"
+    assert_includes actual, "token: [FILTERED]"
   ensure
-    User.remove_instance_variable(:@filter_attributes)
+    User.instance_variable_set(:@filter_attributes, nil)
   end
 end

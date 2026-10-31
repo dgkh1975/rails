@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/generators/active_model"
 require "rails/generators/model_helpers"
 
@@ -8,13 +9,13 @@ module Rails
     # Deal with controller names on scaffold and add some helpers to deal with
     # ActiveModel.
     module ResourceHelpers # :nodoc:
-      def self.included(base) #:nodoc:
+      def self.included(base) # :nodoc:
         base.include(Rails::Generators::ModelHelpers)
         base.class_option :model_name, type: :string, desc: "ModelName to be used"
       end
 
       # Set controller variables on initialization.
-      def initialize(*args) #:nodoc:
+      def initialize(*args) # :nodoc:
         super
         controller_name = name
         if options[:model_name]

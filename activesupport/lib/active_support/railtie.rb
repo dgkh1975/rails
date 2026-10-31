@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "active_support"
@@ -9,6 +10,28 @@ module ActiveSupport
 
     config.eager_load_namespaces << ActiveSupport
 
+    guard_load_hooks(:message_pack, :active_support_test_case)
+
+    initializer "active_support.deprecator", before: :load_environment_config do |app|
+      app.deprecators[:active_support] = ActiveSupport.deprecator
+    end
+
+    initializer "active_support.isolation_level" do |app|
+      config.after_initialize do
+        if level = app.config.active_support.isolation_level
+          ActiveSupport::IsolatedExecutionState.isolation_level = level
+        end
+      end
+    end
+
+    initializer "active_support.raise_on_invalid_cache_expiration_time" do |app|
+      config.after_initialize do
+        if app.config.active_support.raise_on_invalid_cache_expiration_time
+          ActiveSupport::Cache::Store.raise_on_invalid_cache_expiration_time = true
+        end
+      end
+    end
+
     initializer "active_support.set_authenticated_message_encryption" do |app|
       config.after_initialize do
         unless app.config.active_support.use_authenticated_message_encryption.nil?
@@ -18,28 +41,71 @@ module ActiveSupport
       end
     end
 
-    initializer "active_support.reset_all_current_attributes_instances" do |app|
-      app.reloader.before_class_unload { ActiveSupport::CurrentAttributes.clear_all }
-      app.executor.to_run              { ActiveSupport::CurrentAttributes.reset_all }
-      app.executor.to_complete         { ActiveSupport::CurrentAttributes.reset_all }
+    initializer "active_support.set_event_reporter_context_store" do |app|
+      config.after_initialize do
+        if klass = app.config.active_support.event_reporter_context_store
+          ActiveSupport::EventReporter.context_store = klass
+        end
+      end
+    end
+
+    initializer "active_support.reset_execution_context" do |app|
+      app.reloader.before_class_unload do
+        ActiveSupport::CurrentAttributes.clear_all
+        ActiveSupport::ExecutionContext.flush
+        ActiveSupport.event_reporter.clear_context
+      end
+
+      app.executor.to_run(&ActiveSupport::Ractors.shareable_proc do
+        ActiveSupport::ExecutionContext.push
+      end)
+
+      app.executor.to_complete(&ActiveSupport::Ractors.shareable_proc do
+        ActiveSupport::CurrentAttributes.clear_all
+        ActiveSupport::ExecutionContext.pop
+        ActiveSupport.event_reporter.clear_context
+      end)
 
       ActiveSupport.on_load(:active_support_test_case) do
-        require "active_support/current_attributes/test_helper"
-        include ActiveSupport::CurrentAttributes::TestHelper
+        if app.config.active_support.executor_around_test_case
+          ActiveSupport::ExecutionContext.nestable = true
+
+          require "active_support/executor/test_helper"
+          include ActiveSupport::Executor::TestHelper
+        else
+          require "active_support/current_attributes/test_helper"
+          include ActiveSupport::CurrentAttributes::TestHelper
+
+          require "active_support/execution_context/test_helper"
+          include ActiveSupport::ExecutionContext::TestHelper
+        end
+      end
+    end
+
+    initializer "active_support.set_filter_parameters" do |app|
+      config.after_initialize do
+        ActiveSupport.filter_parameters += Rails.application.config.filter_parameters
+        ActiveSupport.event_reporter.reload_payload_filter
       end
     end
 
     initializer "active_support.deprecation_behavior" do |app|
-      if deprecation = app.config.active_support.deprecation
-        ActiveSupport::Deprecation.behavior = deprecation
-      end
+      if app.config.active_support.report_deprecations == false
+        app.deprecators.silenced = true
+        app.deprecators.behavior = :silence
+        app.deprecators.disallowed_behavior = :silence
+      else
+        if deprecation = app.config.active_support.deprecation
+          app.deprecators.behavior = deprecation
+        end
 
-      if disallowed_deprecation = app.config.active_support.disallowed_deprecation
-        ActiveSupport::Deprecation.disallowed_behavior = disallowed_deprecation
-      end
+        if disallowed_deprecation = app.config.active_support.disallowed_deprecation
+          app.deprecators.disallowed_behavior = disallowed_deprecation
+        end
 
-      if disallowed_warnings = app.config.active_support.disallowed_deprecation_warnings
-        ActiveSupport::Deprecation.disallowed_warnings = disallowed_warnings
+        if disallowed_warnings = app.config.active_support.disallowed_deprecation_warnings
+          app.deprecators.disallowed_warnings = disallowed_warnings
+        end
       end
     end
 
@@ -49,10 +115,11 @@ module ActiveSupport
       begin
         TZInfo::DataSource.get
       rescue TZInfo::DataSourceNotFound => e
-        raise e.exception "tzinfo-data is not present. Please add gem 'tzinfo-data' to your Gemfile and run bundle install"
+        raise e.exception('tzinfo-data is not present. Please add gem "tzinfo-data" to your Gemfile and run bundle install')
       end
       require "active_support/core_ext/time/zones"
       Time.zone_default = Time.find_zone!(app.config.time_zone)
+      config.eager_load_namespaces << TZInfo
     end
 
     # Sets the default week start
@@ -84,15 +151,6 @@ module ActiveSupport
 
     initializer "active_support.set_hash_digest_class" do |app|
       config.after_initialize do
-        if app.config.active_support.use_sha1_digests
-          ActiveSupport::Deprecation.warn(<<-MSG.squish)
-            config.active_support.use_sha1_digests is deprecated and will
-            be removed from Rails 7.0. Use
-            config.active_support.hash_digest_class = OpenSSL::Digest::SHA1 instead.
-          MSG
-          ActiveSupport::Digest.hash_digest_class = OpenSSL::Digest::SHA1
-        end
-
         if klass = app.config.active_support.hash_digest_class
           ActiveSupport::Digest.hash_digest_class = klass
         end
@@ -105,6 +163,31 @@ module ActiveSupport
           ActiveSupport::KeyGenerator.hash_digest_class = klass
         end
       end
+    end
+
+    initializer "active_support.set_default_message_serializer" do |app|
+      config.after_initialize do
+        if message_serializer = app.config.active_support.message_serializer
+          ActiveSupport::Messages::Codec.default_serializer = message_serializer
+        end
+      end
+    end
+
+    initializer "active_support.set_use_message_serializer_for_metadata" do |app|
+      config.after_initialize do
+        ActiveSupport::Messages::Metadata.use_message_serializer_for_metadata =
+          app.config.active_support.use_message_serializer_for_metadata
+      end
+    end
+
+    initializer "active_support.freeze_inflections" do
+      config.after_initialize do
+        ActiveSupport::Inflector::Inflections.all_instances.each(&:freeze)
+      end
+    end
+
+    initializer "active_support.set_log_subscriber_logger", after: :initialize_logger do
+      ActiveSupport::LogSubscriber.logger = Rails.logger
     end
   end
 end

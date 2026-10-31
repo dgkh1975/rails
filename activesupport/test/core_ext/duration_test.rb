@@ -81,10 +81,13 @@ class DurationTest < ActiveSupport::TestCase
     assert_in_delta 1.0, 365.days.in_years
   end
 
-  def test_eql
-    rubinius_skip "Rubinius' #eql? definition relies on #instance_of? " \
-                  "which behaves oddly for the sake of backward-compatibility."
+  def test_in_units_preserve_sub_second_precision
+    assert_in_delta 1.5083333, 90.5.seconds.in_minutes, 0.0000001
+    assert_in_delta 1.0170833, 3661.5.seconds.in_hours, 0.0000001
+    assert_in_delta 0.0000058, 0.5.seconds.in_days, 0.0000001
+  end
 
+  def test_eql
     assert 1.minute.eql?(1.minute)
     assert 1.minute.eql?(60.seconds)
     assert 2.days.eql?(48.hours)
@@ -113,11 +116,11 @@ class DurationTest < ActiveSupport::TestCase
     assert_equal "3600 seconds",                    (1.day / 24).inspect
   end
 
-  def test_inspect_locale
+  def test_inspect_ignores_locale
     current_locale = I18n.default_locale
     I18n.default_locale = :de
     I18n.backend.store_translations(:de, support: { array: { last_word_connector: " und " } })
-    assert_equal "10 years, 1 month und 1 day", (10.years + 1.month + 1.day).inspect
+    assert_equal "10 years, 1 month, and 1 day", (10.years + 1.month + 1.day).inspect
   ensure
     I18n.default_locale = current_locale
   end
@@ -129,6 +132,40 @@ class DurationTest < ActiveSupport::TestCase
   def test_unary_plus
     assert_equal (+ 1.second), 1.second
     assert_instance_of ActiveSupport::Duration, + 1.second
+  end
+
+  def test_unary_minus_negates_value_and_parts
+    assert_equal(-86400, (-1.day).value)
+    assert_equal({ days: -1 }, (-1.day).parts)
+    assert_equal({ years: -1, days: -1 }, (-(1.year + 1.day)).parts)
+    assert_instance_of ActiveSupport::Duration, -1.day
+  end
+
+  def test_build_decomposes_seconds_into_parts
+    assert_equal({ years: 1 }, ActiveSupport::Duration.build(31556952).parts)
+    assert_equal({ months: 1, days: 1 }, ActiveSupport::Duration.build(2716146).parts)
+    assert_equal 2716146, ActiveSupport::Duration.build(2716146).value
+  end
+
+  def test_parts_returns_an_independent_copy
+    duration = 5.minutes
+    parts = duration.parts
+    parts[:minutes] = 99
+
+    assert_equal({ minutes: 5 }, duration.parts)
+  end
+
+  def test_compare_returns_nil_for_an_incomparable_object
+    assert_nil(1.day <=> "foo")
+  end
+
+  def test_coerce_with_a_duration
+    one_minute = 1.minute
+    scalar, duration = one_minute.coerce(2.hours)
+
+    assert_instance_of ActiveSupport::Duration::Scalar, scalar
+    assert_equal 7200, scalar.value
+    assert_same one_minute, duration
   end
 
   def test_plus
@@ -318,7 +355,7 @@ class DurationTest < ActiveSupport::TestCase
     Time.zone = nil
   end
 
-  def test_before_and_afer
+  def test_before_and_after
     t = Time.local(2000)
     assert_equal t + 1, 1.second.after(t)
     assert_equal t - 1, 1.second.before(t)
@@ -625,9 +662,15 @@ class DurationTest < ActiveSupport::TestCase
       ["P1Y1M1DT1H",    1.year + 1.month + 1.day + 1.hour],
       ["PT0S",          0.minutes                        ],
       ["PT-0.2S",       (-0.2).seconds                   ],
+      ["PT1000000S",    1_000_000.seconds                ],
+      ["PT0.00005S",    (0.00005).seconds                ],
+      ["PT0.00001H",    (0.00001).hours                  ],
+      ["P1.5D",         Rational(3, 2).days              ],
+      ["PT1H1.5S",      1.hour + Rational(3, 2).seconds  ],
     ]
     expectations.each do |expected_output, duration|
       assert_equal expected_output, duration.iso8601, expected_output.inspect
+      assert_equal duration, ActiveSupport::Duration.parse(duration.iso8601), expected_output.inspect
     end
   end
 
@@ -713,7 +756,8 @@ class DurationTest < ActiveSupport::TestCase
   end
 
   def test_durations_survive_yaml_serialization
-    d1 = YAML.load(YAML.dump(10.minutes))
+    payload = YAML.dump(10.minutes)
+    d1 = YAML.unsafe_load(payload)
     assert_equal 600, d1.to_i
     assert_equal 660, (d1 + 60).to_i
   end
@@ -732,6 +776,33 @@ class DurationTest < ActiveSupport::TestCase
     end
 
     assert_equal "can't build an ActiveSupport::Duration from a NilClass", error.message
+  end
+
+  def test_variable
+    assert_not 12.seconds.variable?
+    assert_not 12.minutes.variable?
+    assert_not 12.hours.variable?
+
+    assert_predicate 12.days, :variable?
+    assert_predicate 12.weeks, :variable?
+    assert_predicate 12.months, :variable?
+    assert_predicate 12.years, :variable?
+
+    assert_not (12.hours + 12.minutes).variable?
+
+    assert_predicate (12.hours + 1.day), :variable?
+    assert_predicate (1.day + 12.hours), :variable?
+  end
+
+  def test_duration_symmetry
+    time = Time.parse("Dec 7, 2021")
+    expected_time = Time.parse("2021-12-06 23:59:59")
+
+    assert_equal expected_time, time + -1.second
+    assert_equal expected_time, time + ActiveSupport::Duration.build(1) * -1
+    assert_equal expected_time, time + -ActiveSupport::Duration.build(1)
+    assert_equal expected_time, time + ActiveSupport::Duration::Scalar.new(-1)
+    assert_equal expected_time, time + ActiveSupport::Duration.build(-1)
   end
 
   private

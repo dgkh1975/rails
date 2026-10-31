@@ -9,6 +9,7 @@
 # It is also good to know what is the bare minimum to get
 # Rails booted up.
 require "fileutils"
+require "shellwords"
 
 require "bundler/setup" unless defined?(Bundler)
 require "active_support"
@@ -16,11 +17,15 @@ require "active_support/testing/autorun"
 require "active_support/testing/stream"
 require "active_support/testing/method_call_assertions"
 require "active_support/test_case"
+require "active_record"
+require "active_record/tasks/database_tasks"
 require "minitest/retry"
 
 if ENV["BUILDKITE"]
   Minitest::Retry.use!(verbose: false, retry_count: 1)
 end
+
+require_relative "../../../tools/test_common"
 
 RAILS_FRAMEWORK_ROOT = File.expand_path("../../..", __dir__)
 
@@ -30,7 +35,6 @@ require "active_support/core_ext/object/blank"
 require "active_support/testing/isolation"
 require "active_support/core_ext/kernel/reporting"
 require "tmpdir"
-require "rails/secrets"
 
 module TestHelpers
   module Paths
@@ -38,8 +42,16 @@ module TestHelpers
       File.join RAILS_FRAMEWORK_ROOT, "tmp/templates/app_template"
     end
 
+    def bootsnap_cache_path
+      File.join RAILS_FRAMEWORK_ROOT, "tmp/templates/bootsnap"
+    end
+
     def tmp_path(*args)
-      @tmp_path ||= File.realpath(Dir.mktmpdir(nil, File.join(RAILS_FRAMEWORK_ROOT, "tmp")))
+      @tmp_path = nil if @tmp_path && !File.directory?(@tmp_path)
+      @tmp_path ||= begin
+        FileUtils.mkdir_p(File.join(RAILS_FRAMEWORK_ROOT, "tmp"))
+        File.realpath(Dir.mktmpdir(nil, File.join(RAILS_FRAMEWORK_ROOT, "tmp")))
+      end
       File.join(@tmp_path, *args)
     end
 
@@ -52,9 +64,6 @@ module TestHelpers
       end
     end
 
-    def framework_path
-      RAILS_FRAMEWORK_ROOT
-    end
 
     def rails_root
       app_path
@@ -91,14 +100,20 @@ module TestHelpers
       assert_equal 200, resp[0]
       assert_match "text/html", resp[1]["Content-Type"]
       assert_match "charset=utf-8", resp[1]["Content-Type"]
-      assert extract_body(resp).match(/Yay! You.*re on Rails!/)
+      assert extract_body(resp).match(/Rails version:/)
     end
   end
 
   module Generation
+    include ActiveSupport::Testing::Stream
+
     # Build an application by invoking the generator and going through the whole stack.
     def build_app(options = {})
-      @prev_rails_env = ENV["RAILS_ENV"]
+      @prev_rails_app_class ||= Rails.app_class
+      @prev_rails_application ||= Rails.application
+      Rails.app_class = Rails.application = nil
+
+      @prev_rails_env = ENV["RAILS_ENV"] unless defined?(@prev_rails_env)
       ENV["RAILS_ENV"] = "development"
 
       FileUtils.rm_rf(app_path)
@@ -111,92 +126,11 @@ module TestHelpers
         end
       end
 
-      routes = File.read("#{app_path}/config/routes.rb")
-      if routes =~ /(\n\s*end\s*)\z/
-        File.open("#{app_path}/config/routes.rb", "w") do |f|
-          f.puts $` + "\nActiveSupport::Deprecation.silence { match ':controller(/:action(/:id))(.:format)', via: :all }\n" + $1
-        end
-      end
-
-      if options[:multi_db]
-        File.open("#{app_path}/config/database.yml", "w") do |f|
-          f.puts <<-YAML
-          default: &default
-            adapter: sqlite3
-            pool: 5
-            timeout: 5000
-            variables:
-              statement_timeout: 1000
-          development:
-            primary:
-              <<: *default
-              database: db/development.sqlite3
-            primary_readonly:
-              <<: *default
-              database: db/development.sqlite3
-              replica: true
-            animals:
-              <<: *default
-              database: db/development_animals.sqlite3
-              migrations_paths: db/animals_migrate
-            animals_readonly:
-              <<: *default
-              database: db/development_animals.sqlite3
-              migrations_paths: db/animals_migrate
-              replica: true
-          test:
-            primary:
-              <<: *default
-              database: db/test.sqlite3
-            primary_readonly:
-              <<: *default
-              database: db/test.sqlite3
-              replica: true
-            animals:
-              <<: *default
-              database: db/test_animals.sqlite3
-              migrations_paths: db/animals_migrate
-            animals_readonly:
-              <<: *default
-              database: db/test_animals.sqlite3
-              migrations_paths: db/animals_migrate
-              replica: true
-          production:
-            primary:
-              <<: *default
-              database: db/production.sqlite3
-            primary_readonly:
-              <<: *default
-              database: db/production.sqlite3
-              replica: true
-            animals:
-              <<: *default
-              database: db/production_animals.sqlite3
-              migrations_paths: db/animals_migrate
-            animals_readonly:
-              <<: *default
-              database: db/production_animals.sqlite3
-              migrations_paths: db/animals_migrate
-              replica: true
-          YAML
-        end
-      else
-        File.open("#{app_path}/config/database.yml", "w") do |f|
-          f.puts <<-YAML
-          default: &default
-            adapter: sqlite3
-            pool: 5
-            timeout: 5000
-          development:
-            <<: *default
-            database: db/development.sqlite3
-          test:
-            <<: *default
-            database: db/test.sqlite3
-          production:
-            <<: *default
-            database: db/production.sqlite3
-          YAML
+      File.open("#{app_path}/config/database.yml", "w") do |f|
+        if options[:multi_db]
+          f.puts multi_db_database_configs
+        else
+          f.puts default_database_configs
         end
       end
 
@@ -204,14 +138,185 @@ module TestHelpers
         config.hosts << proc { true }
         config.eager_load = false
         config.session_store :cookie_store, key: "_myapp_session"
+        config.cache_store = :mem_cache_store
         config.active_support.deprecation = :log
         config.action_controller.allow_forgery_protection = false
       RUBY
+
+      add_to_env_config :development, "config.action_view.annotate_rendered_view_with_filenames = false"
+
+      remove_from_env_config("development", "config.generators.apply_rubocop_autocorrect_after_generate!")
+      add_to_env_config :production, "config.log_level = :error"
+    end
+
+    def reset_environment_configs
+      Dir["#{app_path}/config/environments/*.rb"].each do |path|
+        File.write(path, "")
+      end
     end
 
     def teardown_app
-      ENV["RAILS_ENV"] = @prev_rails_env if @prev_rails_env
-      FileUtils.rm_rf(tmp_path)
+      if @prev_rails_env
+        ENV["RAILS_ENV"] = @prev_rails_env
+      else
+        ENV.delete("RAILS_ENV")
+      end
+      Rails.app_class = @prev_rails_app_class if @prev_rails_app_class
+      Rails.application = @prev_rails_application if @prev_rails_application
+      FileUtils.rm_rf(@tmp_path) if @tmp_path
+      @tmp_path = nil
+    end
+
+    def with_test_database_cleanup(adapter)
+      pre_existing_databases = list_test_databases(adapter) rescue nil
+      yield
+    ensure
+      if pre_existing_databases
+        drop_test_databases(adapter, list_test_databases(adapter) - pre_existing_databases)
+      end
+    end
+
+    def list_test_databases(adapter)
+      saved_db_config = ActiveRecord::Base.connection_pool.db_config rescue nil
+      ActiveRecord::Base.establish_connection(database_maintenance_config_for(adapter))
+      ActiveRecord::Base.lease_connection.select_values(database_list_sql_for(adapter))
+    ensure
+      ActiveRecord::Base.remove_connection
+      ActiveRecord::Base.establish_connection(saved_db_config) if saved_db_config
+    end
+
+    def drop_test_databases(adapter, databases)
+      saved_db_config = ActiveRecord::Base.connection_pool.db_config rescue nil
+      config = database_maintenance_config_for(adapter)
+      quietly do
+        databases.each do |db|
+          ActiveRecord::Tasks::DatabaseTasks.drop(config.merge(database: db))
+        end
+      end
+    ensure
+      if saved_db_config
+        ActiveRecord::Base.remove_connection rescue nil
+        ActiveRecord::Base.establish_connection(saved_db_config) rescue nil
+      end
+    end
+
+    def database_maintenance_config_for(adapter)
+      case adapter
+      when :postgresql
+        { adapter: "postgresql", database: "postgres" }
+      when :mysql
+        cfg = { adapter: "mysql2", database: "mysql", username: "root" }
+        cfg[:host] = ENV["MYSQL_HOST"] if ENV["MYSQL_HOST"]
+        cfg[:socket] = ENV["MYSQL_SOCK"] if ENV["MYSQL_SOCK"]
+        cfg
+      end
+    end
+
+    def database_list_sql_for(adapter)
+      conn = ActiveRecord::Base.lease_connection
+      pattern = conn.quote("railties_#{Process.pid}_%")
+      case adapter
+      when :postgresql
+        "SELECT datname FROM pg_database WHERE datname LIKE #{pattern}"
+      when :mysql
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE #{pattern}"
+      end
+    end
+
+    def default_database_configs
+      <<-YAML
+        default: &default
+          adapter: sqlite3
+          max_connections: 5
+          timeout: 5000
+        development:
+          <<: *default
+          database: storage/development.sqlite3
+        test:
+          <<: *default
+          database: storage/test.sqlite3
+        production:
+          <<: *default
+          database: storage/production.sqlite3
+      YAML
+    end
+
+    def multi_db_database_configs
+      <<-YAML
+        default: &default
+          adapter: sqlite3
+          max_connections: 5
+          timeout: 5000
+          variables:
+            statement_timeout: 1000
+        development:
+          primary:
+            <<: *default
+            database: storage/development.sqlite3
+          primary_readonly:
+            <<: *default
+            database: storage/development.sqlite3
+            replica: true
+          animals:
+            <<: *default
+            database: storage/development_animals.sqlite3
+            migrations_paths: db/animals_migrate
+          animals_readonly:
+            <<: *default
+            database: storage/development_animals.sqlite3
+            migrations_paths: db/animals_migrate
+            replica: true
+        test:
+          primary:
+            <<: *default
+            database: storage/test.sqlite3
+          primary_readonly:
+            <<: *default
+            database: storage/test.sqlite3
+            replica: true
+          animals:
+            <<: *default
+            database: storage/test_animals.sqlite3
+            migrations_paths: db/animals_migrate
+          animals_readonly:
+            <<: *default
+            database: storage/test_animals.sqlite3
+            migrations_paths: db/animals_migrate
+            replica: true
+        production:
+          primary:
+            <<: *default
+            database: storage/production.sqlite3
+          primary_readonly:
+            <<: *default
+            database: storage/production.sqlite3
+            replica: true
+          animals:
+            <<: *default
+            database: storage/production_animals.sqlite3
+            migrations_paths: db/animals_migrate
+          animals_readonly:
+            <<: *default
+            database: storage/production_animals.sqlite3
+            migrations_paths: db/animals_migrate
+            replica: true
+      YAML
+    end
+
+    def with_unhealthy_database(&block)
+      # The existing schema cache dump will contain ActiveRecord::ConnectionAdapters::SQLite3Adapter objects
+      require "active_record/connection_adapters/sqlite3_adapter"
+
+      # We need to change the `database_version` to match what is expected for MySQL
+      dump_path = File.join(app_path, "db/schema_cache.yml")
+      if File.exist?(dump_path)
+        schema_cache = ActiveRecord::ConnectionAdapters::SchemaCache._load_from(dump_path)
+        schema_cache.instance_variable_set(:@database_version, ActiveRecord::ConnectionAdapters::AbstractAdapter::Version.new("8.8.8"))
+        File.write(dump_path, YAML.dump(schema_cache))
+      end
+
+      # We load the app while pointing at a non-existing MySQL server
+      switch_env("DATABASE_URL", "mysql2://127.0.0.1:1", &block)
     end
 
     # Make a very basic app, without creating the whole directory structure.
@@ -228,8 +333,8 @@ module TestHelpers
       @app.config.eager_load = false
       @app.config.session_store :cookie_store, key: "_myapp_session"
       @app.config.active_support.deprecation = :log
-      @app.config.log_level = :info
-      @app.secrets.secret_key_base = "b3c631c314c0bbca50c1b2843150fe33"
+      @app.config.log_level = :error
+      @app.config.secret_key_base = "b3c631c314c0bbca50c1b2843150fe33"
 
       yield @app if block_given?
       @app.initialize!
@@ -253,7 +358,7 @@ module TestHelpers
 
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get ':controller(/:action)'
+          get 'foo', to: 'foo#index'
         end
       RUBY
     end
@@ -367,7 +472,12 @@ module TestHelpers
         Process.waitpid pid
 
       else
-        output = `cd #{app_path}; #{command}`
+        ENV["BOOTSNAP_CACHE_DIR"] = bootsnap_cache_path
+        begin
+          output = `cd #{app_path}; #{command}`
+        ensure
+          ENV.delete("BOOTSNAP_CACHE_DIR")
+        end
       end
 
       raise "rails command failed (#{$?.exitstatus}): #{command}\n#{output}" unless allow_failure || $?.success?
@@ -412,7 +522,7 @@ module TestHelpers
 
     def remove_from_file(file, str)
       contents = File.read(file)
-      contents.sub!(/#{str}/, "")
+      contents.gsub!(/#{str}/, "")
       File.write(file, contents)
     end
 
@@ -437,8 +547,16 @@ module TestHelpers
       app_file("app/controllers/#{name}_controller.rb", contents)
     end
 
+    def routes(routes)
+      app_file("config/routes.rb", <<~RUBY)
+        Rails.application.routes.draw do
+          #{routes}
+        end
+      RUBY
+    end
+
     def use_frameworks(arr)
-      to_remove = [:actionmailer, :activerecord, :activestorage, :activejob, :actionmailbox] - arr
+      to_remove = [:actionmailer, :activerecord, :activestorage, :activejob, :actionmailbox, :actiontext] - arr
 
       if to_remove.include?(:activerecord)
         remove_from_config "config.active_record.*"
@@ -448,19 +566,20 @@ module TestHelpers
     end
 
     def use_postgresql(multi_db: false)
+      database_name = "railties_#{Process.pid}"
       if multi_db
         File.open("#{app_path}/config/database.yml", "w") do |f|
           f.puts <<-YAML
           default: &default
             adapter: postgresql
-            pool: 5
+            max_connections: 5
           development:
             primary:
               <<: *default
-              database: railties_test
+              database: #{database_name}_test
             animals:
               <<: *default
-              database: railties_animals_test
+              database: #{database_name}_animals_test
               migrations_paths: db/animals_migrate
           YAML
         end
@@ -469,14 +588,80 @@ module TestHelpers
           f.puts <<-YAML
           default: &default
             adapter: postgresql
-            pool: 5
-            database: railties_test
+            max_connections: 5
           development:
             <<: *default
+            database: #{database_name}_development
           test:
             <<: *default
+            database: #{database_name}_test
           YAML
         end
+      end
+      if block_given?
+        with_test_database_cleanup(:postgresql) { yield database_name }
+      else
+        database_name
+      end
+    end
+
+    def use_mysql2(multi_db: false)
+      database_name = "railties_#{Process.pid}"
+      if multi_db
+        File.open("#{app_path}/config/database.yml", "w") do |f|
+          f.puts <<-YAML
+          default: &default
+            adapter: mysql2
+            max_connections: 5
+            username: root
+          <% if ENV['MYSQL_CODESPACES'] %>
+            password: 'root'
+          <% end %>
+          <% if ENV['MYSQL_HOST'] %>
+            host: <%= ENV['MYSQL_HOST'] %>
+          <% end %>
+          <% if ENV['MYSQL_SOCK'] %>
+            socket: "<%= ENV['MYSQL_SOCK'] %>"
+          <% end %>
+          development:
+            primary:
+              <<: *default
+              database: #{database_name}_test
+            animals:
+              <<: *default
+              database: #{database_name}_animals_test
+              migrations_paths: db/animals_migrate
+          YAML
+        end
+      else
+        File.open("#{app_path}/config/database.yml", "w") do |f|
+          f.puts <<-YAML
+          default: &default
+            adapter: mysql2
+            max_connections: 5
+            username: root
+          <% if ENV['MYSQL_CODESPACES'] %>
+            password: 'root'
+          <% end %>
+          <% if ENV['MYSQL_HOST'] %>
+            host: <%= ENV['MYSQL_HOST'] %>
+          <% end %>
+          <% if ENV['MYSQL_SOCK'] %>
+            socket: "<%= ENV['MYSQL_SOCK'] %>"
+          <% end %>
+          development:
+            <<: *default
+            database: #{database_name}_development
+          test:
+            <<: *default
+            database: #{database_name}_test
+          YAML
+        end
+      end
+      if block_given?
+        with_test_database_cleanup(:mysql) { yield database_name }
+      else
+        database_name
       end
     end
   end
@@ -495,6 +680,14 @@ class ActiveSupport::TestCase
   include TestHelpers::Reload
   include ActiveSupport::Testing::Stream
   include ActiveSupport::Testing::MethodCallAssertions
+
+  private
+    def with_env(env)
+      env.each { |k, v| ENV[k.to_s] = v }
+      yield
+    ensure
+      env.each_key { |k| ENV.delete k.to_s }
+    end
 end
 
 # Create a scope and build a fixture rails app
@@ -510,44 +703,19 @@ Module.new do
   FileUtils.rm_rf(app_template_path)
   FileUtils.mkdir_p(app_template_path)
 
-  sh "#{Gem.ruby} #{RAILS_FRAMEWORK_ROOT}/railties/exe/rails new #{app_template_path} --skip-bundle --skip-spring --skip-listen --no-rc --skip-webpack-install --quiet"
+  sh "#{Gem.ruby} #{RAILS_FRAMEWORK_ROOT}/railties/exe/rails new #{app_template_path} --skip-bundle --no-rc --quiet"
   File.open("#{app_template_path}/config/boot.rb", "w") do |f|
+    f.puts 'require "bootsnap/setup" if ENV["BOOTSNAP_CACHE_DIR"]'
     f.puts 'require "rails/all"'
   end
 
-  unless File.exist?("#{RAILS_FRAMEWORK_ROOT}/actionview/lib/assets/compiled/rails-ujs.js")
-    Dir.chdir("#{RAILS_FRAMEWORK_ROOT}/actionview") do
-      sh "yarn build"
-    end
-  end
-
-  assets_path = "#{RAILS_FRAMEWORK_ROOT}/railties/test/isolation/assets"
-  unless Dir.exist?("#{assets_path}/node_modules")
-    Dir.chdir(assets_path) do
-      sh "yarn install"
-    end
-  end
-
-  # Fix relative file paths
-  package_json = File.read("#{assets_path}/package.json")
-  package_json.gsub!(%r{"file:(\.\./[^"]+)"}) do
-    path = Pathname.new($1).expand_path(assets_path).relative_path_from(Pathname.new(app_template_path))
-    "\"file:#{path}\""
-  end
-  File.write("#{app_template_path}/package.json", package_json)
-
-  FileUtils.cp("#{assets_path}/config/webpacker.yml", "#{app_template_path}/config/webpacker.yml")
-  FileUtils.cp_r("#{assets_path}/config/webpack", "#{app_template_path}/config/webpack")
-  FileUtils.ln_s("#{assets_path}/node_modules", "#{app_template_path}/node_modules")
-  FileUtils.chdir(app_template_path) do
-    sh "yarn install"
-    sh "bin/rails webpacker:binstubs"
-  end
+  FileUtils.mkdir_p "#{app_template_path}/app/javascript"
+  File.write("#{app_template_path}/app/javascript/application.js", "\n")
 
   # Fake 'Bundler.require' -- we run using the repo's Gemfile, not an
   # app-specific one: we don't want to require every gem that lists.
   contents = File.read("#{app_template_path}/config/application.rb")
-  contents.sub!(/^Bundler\.require.*/, "%w(turbolinks webpacker).each { |r| require r }")
+  contents.sub!(/^Bundler\.require.*/, "%w(propshaft importmap-rails).each { |r| require r }")
   File.write("#{app_template_path}/config/application.rb", contents)
 
   require "rails"
@@ -562,7 +730,6 @@ Module.new do
   require "action_cable"
   require "action_mailbox"
   require "action_text"
-  require "sprockets"
 
   require "action_view/helpers"
   require "action_dispatch/routing/route_set"

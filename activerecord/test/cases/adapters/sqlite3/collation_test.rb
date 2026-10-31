@@ -4,10 +4,12 @@ require "cases/helper"
 require "support/schema_dumping_helper"
 
 class SQLite3CollationTest < ActiveRecord::SQLite3TestCase
+  skip_under_ractor_proxy
+
   include SchemaDumpingHelper
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
     @connection.create_table :collation_table_sqlite3, force: true do |t|
       t.string :string_nocase, collation: "NOCASE"
       t.text :text_rtrim, collation: "RTRIM"

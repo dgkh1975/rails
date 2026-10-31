@@ -1,12 +1,14 @@
 # frozen_string_literal: true
 
 require "cases/helper"
+require "support/deprecated_associations_test_helpers"
 require "models/developer"
 require "models/computer"
 require "models/project"
 require "models/company"
 require "models/ship"
 require "models/pirate"
+require "models/person"
 require "models/car"
 require "models/bulb"
 require "models/author"
@@ -17,6 +19,30 @@ require "models/chef"
 require "models/department"
 require "models/club"
 require "models/membership"
+require "models/parrot"
+require "models/cpk"
+require "models/room"
+require "models/user"
+require "models/dats"
+
+class HasOneStaleTypeChild < ActiveRecord::Base
+  self.table_name = "faces"
+end
+
+class HasOneStaleTypeOwner < ActiveRecord::Base
+  self.table_name = "humans"
+  has_one :stale_type_child, class_name: "HasOneStaleTypeChild", as: :poly_human_without_inverse
+end
+
+class HasOneContainedKeyChild < ActiveRecord::Base
+  self.table_name = "faces"
+  self.primary_key = [:poly_human_without_inverse_id, :human_id]
+end
+
+class HasOneContainedKeyOwner < ActiveRecord::Base
+  self.table_name = "humans"
+  has_one :contained_key_child, class_name: "HasOneContainedKeyChild", as: :poly_human_without_inverse
+end
 
 class HasOneAssociationsTest < ActiveRecord::TestCase
   self.use_transactional_tests = false unless supports_savepoints?
@@ -30,7 +56,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
   def test_has_one
     firm = companies(:first_firm)
     first_account = Account.find(1)
-    assert_sql(/LIMIT|ROWNUM <=|FETCH FIRST/) do
+    assert_queries_match(/LIMIT|ROWNUM <=|FETCH FIRST/) do
       assert_equal first_account, firm.account
       assert_equal first_account.credit_limit, firm.account.credit_limit
     end
@@ -43,7 +69,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
 
   def test_has_one_cache_nils
     firm = companies(:another_firm)
-    assert_queries(1) { assert_nil firm.account }
+    assert_queries_count(1) { assert_nil firm.account }
     assert_no_queries { assert_nil firm.account }
 
     firms = Firm.includes(:account).to_a
@@ -51,8 +77,8 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_with_select
-    assert_equal Firm.find(1).account_with_select.attributes.size, 2
-    assert_equal Firm.all.merge!(includes: :account_with_select).find(1).account_with_select.attributes.size, 2
+    assert_equal 2, Firm.find(1).account_with_select.attributes.size
+    assert_equal 2, Firm.all.merge!(includes: :account_with_select).find(1).account_with_select.attributes.size
   end
 
   def test_finding_using_primary_key
@@ -132,12 +158,88 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_nil chef.employable_type
   end
 
+  def test_replacing_a_polymorphic_has_one_nullifies_the_type_column
+    owner = HasOneStaleTypeOwner.create!
+    child = HasOneStaleTypeChild.create!
+    owner.stale_type_child = child
+
+    child.reload
+    assert_equal owner.id, child.poly_human_without_inverse_id
+    assert_equal "HasOneStaleTypeOwner", child.poly_human_without_inverse_type
+
+    owner.stale_type_child = nil
+
+    child.reload
+    assert_nil child.poly_human_without_inverse_id
+    assert_nil child.poly_human_without_inverse_type
+  end
+
+  def test_clearing_polymorphic_has_one_nullifies_id_contained_in_composite_pk
+    owner = HasOneContainedKeyOwner.create!
+    child = HasOneContainedKeyChild.create!(
+      human_id: 1,
+      poly_human_without_inverse_id: owner.id,
+      poly_human_without_inverse_type: "HasOneContainedKeyOwner"
+    )
+
+    assert_equal child, owner.contained_key_child
+
+    owner.contained_key_child = nil
+
+    child = HasOneContainedKeyChild.find_by!(id: child.read_attribute(:id))
+    assert_nil child.poly_human_without_inverse_id
+    assert_nil child.poly_human_without_inverse_type
+  end
+
   def test_nullification_on_destroyed_association
     developer = Developer.create!(name: "Someone")
     ship = Ship.create!(name: "Planet Caravan", developer: developer)
     ship.destroy
     assert_not_predicate ship, :persisted?
     assert_not_predicate developer, :persisted?
+  end
+
+  def test_nullification_on_cpk_association
+    book = Cpk::Book.create!(id: [1, 2])
+    other_book = Cpk::Book.create!(id: [3, 4])
+    order = Cpk::OrderWithNullifiedBook.create!(book: book)
+
+    order.book = other_book
+
+    assert_nil book.order_id
+    assert_nil book.shop_id
+  end
+
+  def test_nullification_on_cpk_association_with_pk_column
+    chapter = Cpk::Chapter.create!(id: [1, 2])
+    other_chapter = Cpk::Chapter.create!(id: [1, 4])
+    book = Cpk::NullifiedBook.create!(id: [1, 3], chapter: chapter)
+
+    book.chapter = other_chapter
+
+    assert_nil chapter.book_id
+    assert_equal 1, chapter.author_id
+  end
+
+  def test_has_one_for_new_record_owner_with_composite_primary_key_present
+    order = Cpk::Order.create!(id: [1, 10])
+    book = order.create_book!(id: [1, 100], title: "Some book")
+
+    new_order = Cpk::Order.new(id: [1, 10])
+    assert_predicate new_order, :new_record?
+
+    assert_equal book, new_order.book
+  end
+
+  def test_has_one_for_new_record_owner_with_composite_primary_key_missing
+    order = Cpk::Order.create!(id: [1, 10])
+    order.create_book!(id: [1, 100], title: "Some book")
+
+    new_order = Cpk::Order.new(shop_id: 1)
+    assert_predicate new_order, :new_record?
+    assert_not new_order.attribute_present?(:id)
+
+    assert_nil new_order.book
   end
 
   def test_natural_assignment_to_nil_after_destroy
@@ -243,6 +345,26 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     I18n.backend.reload!
   end
 
+  def test_restrict_with_error_exposes_association_name_without_downcasing
+    I18n.backend = I18n::Backend::Simple.new
+    I18n.backend.store_translations "de",
+      activerecord: {
+        attributes: { restricted_with_error_firm: { account: "Konto" } },
+        errors: { messages: { restrict_dependent_destroy: { has_one: "Datensatz kann nicht gelöscht werden, da ein abhängiges %{association_name} existiert" } } }
+      }
+    firm = RestrictedWithErrorFirm.create!(name: "restrict")
+    firm.create_account(credit_limit: 10)
+
+    I18n.with_locale(:de) do
+      firm.destroy
+      assert_equal "Datensatz kann nicht gelöscht werden, da ein abhängiges Konto existiert", firm.errors[:base].first
+    end
+    assert RestrictedWithErrorFirm.exists?(name: "restrict")
+    assert_predicate firm.account, :present?
+  ensure
+    I18n.backend.reload!
+  end
+
   def test_successful_build_association
     firm = Firm.new("name" => "GlobalMegaCorp")
     firm.save
@@ -254,7 +376,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
 
   def test_build_association_dont_create_transaction
     firm = Firm.new
-    assert_queries(0) do
+    assert_queries_count(0) do
       firm.build_account
     end
   end
@@ -307,6 +429,19 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_equal account, firm.reload.account
   end
 
+  def test_clearing_an_association_clears_the_associations_inverse
+    author = Author.create(name: "Jimmy Tolkien")
+    post = author.create_post(title: "The silly medallion", body: "")
+    assert_equal post, author.post
+    assert_equal author, post.author
+
+    post.update!(author: nil)
+    assert_nil post.author
+
+    author.update!(name: "J.R.R. Tolkien")
+    assert_nil post.author
+  end
+
   def test_create_association_with_bang
     firm = Firm.create(name: "GlobalMegaCorp")
     account = firm.create_account!(credit_limit: 1000)
@@ -340,6 +475,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     end
 
     assert_equal "You cannot call create unless the parent is saved", error.message
+    assert_equal firm, error.record
   end
 
   def test_reload_association
@@ -349,13 +485,15 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     Account.where(id: odegy.account.id).update_all(credit_limit: 80)
     assert_equal 53, odegy.account.credit_limit
 
-    assert_equal 80, odegy.reload_account.credit_limit
+    assert_queries_count(1) { odegy.reload_account }
+    assert_no_queries { odegy.account }
+    assert_equal 80, odegy.account.credit_limit
   end
 
   def test_reload_association_with_query_cache
     odegy_id = companies(:odegy).id
 
-    connection = ActiveRecord::Base.connection
+    connection = ActiveRecord::Base.lease_connection
     connection.enable_query_cache!
     connection.clear_query_cache
 
@@ -367,12 +505,25 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_equal 2, connection.query_cache.size
 
     # Clear the cache and fetch the account again, populating the cache with a query
-    assert_queries(1) { odegy.reload_account }
+    assert_queries_count(1) { odegy.reload_account }
 
     # This query is not cached anymore, so it should make a real SQL query
-    assert_queries(1) { Company.find(odegy_id) }
+    assert_queries_count(1) { Company.find(odegy_id) }
   ensure
-    ActiveRecord::Base.connection.disable_query_cache!
+    ActiveRecord::Base.lease_connection.disable_query_cache!
+  end
+
+  def test_reset_association
+    odegy = companies(:odegy)
+
+    assert_equal 53, odegy.account.credit_limit
+    Account.where(id: odegy.account.id).update_all(credit_limit: 80)
+    assert_equal 53, odegy.account.credit_limit
+
+    assert_no_queries { odegy.reset_account }
+
+    assert_queries_count(1) { odegy.account }
+    assert_equal 80, odegy.account.credit_limit
   end
 
   def test_build
@@ -450,8 +601,10 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_proxy_should_respond_to_private_methods_via_send
-    accounts(:signals37).send(:private_method)
-    companies(:first_firm).account.send(:private_method)
+    assert_nothing_raised do
+      accounts(:signals37).send(:private_method)
+      companies(:first_firm).account.send(:private_method)
+    end
   end
 
   def test_save_of_record_with_loaded_has_one
@@ -485,10 +638,10 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
 
   def test_attributes_are_being_set_when_initialized_from_has_one_association_with_where_clause
     new_account = companies(:first_firm).build_account(firm_name: "Account")
-    assert_equal new_account.firm_name, "Account"
+    assert_equal "Account", new_account.firm_name
   end
 
-  def test_create_association_replaces_existing_without_dependent_option
+  def test_creation_failure_replaces_existing_without_dependent_option
     pirate = pirates(:blackbeard)
     orig_ship = pirate.ship
 
@@ -497,16 +650,18 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_not_equal ships(:black_pearl), new_ship
     assert_equal new_ship, pirate.ship
     assert_predicate new_ship, :new_record?
+    assert_predicate new_ship, :invalid?
     assert_nil orig_ship.pirate_id
     assert_not orig_ship.changed? # check it was saved
   end
 
-  def test_create_association_replaces_existing_with_dependent_option
+  def test_creation_failure_replaces_existing_with_dependent_option
     pirate = pirates(:blackbeard).becomes(DestructivePirate)
     orig_ship = pirate.dependent_ship
 
     new_ship = pirate.create_dependent_ship
     assert_predicate new_ship, :new_record?
+    assert_predicate new_ship, :invalid?
     assert_predicate orig_ship, :destroyed?
   end
 
@@ -519,6 +674,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     end
 
     assert_equal "Failed to save the new associated ship.", error.message
+    assert_equal new_ship, error.record
     assert_nil pirate.ship
     assert_nil new_ship.pirate_id
   end
@@ -536,6 +692,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_equal pirate.id, pirate.ship.pirate_id
     assert_equal "Failed to remove the existing associated ship. " \
                  "The record failed to save after its foreign key was set to nil.", error.message
+    assert_equal pirate.ship, error.record
   end
 
   def test_replacement_failure_due_to_new_record_should_raise_error
@@ -547,6 +704,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     end
 
     assert_equal "Failed to save the new associated ship.", error.message
+    assert_equal new_ship, error.record
     assert_equal ships(:black_pearl), pirate.ship
     assert_equal pirate.id, pirate.ship.pirate_id
     assert_equal pirate.id, ships(:black_pearl).reload.pirate_id
@@ -623,7 +781,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     company.account = nil
     assert_no_queries { company.account = nil }
     account = Account.find(2)
-    assert_queries { company.account = account }
+    assert_queries_count(3) { company.account = account }
 
     assert_no_queries { Firm.new.account = account }
   end
@@ -635,7 +793,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
 
     ship.name = "new name"
     assert_predicate ship, :changed?
-    assert_queries(1) do
+    assert_queries_count(3) do
       # One query for updating name, not triggering query for updating pirate_id
       pirate.ship = ship
     end
@@ -649,12 +807,46 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     ship.save!
 
     new_ship = Ship.create(name: "new name")
-    assert_queries(2) do
+    assert_queries_count(4) do
       # One query to nullify the old ship, one query to update the new ship
       pirate.ship = new_ship
     end
 
     assert_equal "new name", pirate.ship.reload.name
+  end
+
+  def test_saving_the_owner_does_not_update_a_target_loaded_without_its_foreign_key
+    pirate = Pirate.create!(catchphrase: "Arr")
+    ship = Ship.create!(name: "Partial", pirate: pirate)
+    pirate = Pirate.find(pirate.id)
+    pirate.association(:ship).target = Ship.select(:id, :name).find(ship.id)
+    pirate.catchphrase = "Changed"
+
+    assert_no_queries_match(/UPDATE.*ships/i) { pirate.save! }
+  end
+
+  def test_saving_the_owner_does_not_update_a_polymorphic_target_loaded_without_its_type
+    owner = HasOneStaleTypeOwner.create!(name: "Partial")
+    child = HasOneStaleTypeChild.create!(poly_human_without_inverse_id: owner.id, poly_human_without_inverse_type: HasOneStaleTypeOwner.polymorphic_name)
+    owner = HasOneStaleTypeOwner.find(owner.id)
+    owner.association(:stale_type_child).target = HasOneStaleTypeChild.select(:id, :poly_human_without_inverse_id).find(child.id)
+    owner.name = "Changed"
+
+    assert_no_queries_match(/UPDATE.*faces/i) { owner.save! }
+  end
+
+  def test_saving_the_owner_restores_a_polymorphic_type_assigned_to_a_target_loaded_without_it
+    owner = HasOneStaleTypeOwner.create!(name: "Partial")
+    child = HasOneStaleTypeChild.create!(poly_human_without_inverse_id: owner.id, poly_human_without_inverse_type: "Other")
+    owner = HasOneStaleTypeOwner.find(owner.id)
+    partial_child = HasOneStaleTypeChild.select(:id, :poly_human_without_inverse_id).find(child.id)
+    owner.association(:stale_type_child).target = partial_child
+    partial_child.poly_human_without_inverse_type = "Other"
+    owner.name = "Changed"
+    owner.save!
+
+    assert_equal HasOneStaleTypeOwner.polymorphic_name, partial_child.poly_human_without_inverse_type
+    assert_equal HasOneStaleTypeOwner.polymorphic_name, child.reload.poly_human_without_inverse_type
   end
 
   def test_has_one_autosave_with_primary_key_manually_set
@@ -705,13 +897,13 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
   end
 
   def test_has_one_with_touch_option_on_create
-    assert_queries(3) {
-      Club.create(name: "1000 Oaks", membership_attributes: { favourite: true })
+    assert_queries_count(5) {
+      Club.create(name: "1000 Oaks", membership_attributes: { favorite: true })
     }
   end
 
   def test_polymorphic_has_one_with_touch_option_on_create_wont_cache_association_so_fetching_after_transaction_commit_works
-    assert_queries(4) {
+    assert_queries_count(6) {
       chef = Chef.create(employable: DrinkDesignerWithPolymorphicTouchChef.new)
       employable = chef.employable
 
@@ -723,7 +915,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     DrinkDesignerWithPolymorphicTouchChef.create(chef: Chef.new)
     designer = DrinkDesignerWithPolymorphicTouchChef.last
 
-    assert_queries(3) {
+    assert_queries_count(5) {
       designer.update(name: "foo")
     }
   end
@@ -732,21 +924,21 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     new_club = Club.create(name: "1000 Oaks")
     new_club.create_membership
 
-    assert_queries(2) { new_club.update(name: "Effingut") }
+    assert_queries_count(4) { new_club.update(name: "Effingut") }
   end
 
   def test_has_one_with_touch_option_on_touch
     new_club = Club.create(name: "1000 Oaks")
     new_club.create_membership
 
-    assert_queries(1) { new_club.touch }
+    assert_queries_count(3) { new_club.touch }
   end
 
   def test_has_one_with_touch_option_on_destroy
     new_club = Club.create(name: "1000 Oaks")
     new_club.create_membership
 
-    assert_queries(2) { new_club.destroy }
+    assert_queries_count(4) { new_club.destroy }
   end
 
   def test_has_one_with_touch_option_on_empty_update
@@ -756,12 +948,34 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     assert_no_queries { new_club.save }
   end
 
+  def test_has_one_double_belongs_to_destroys_both_from_either_end
+    landlord = User.create!
+    tenant = User.create!
+    room = Room.create!(landlord: landlord, tenant: tenant)
+
+    landlord.destroy!
+
+    assert_predicate(room, :destroyed?)
+    assert_predicate(landlord, :destroyed?)
+    assert_predicate(tenant, :destroyed?)
+
+    landlord = User.create!
+    tenant = User.create!
+    room = Room.create!(landlord: landlord, tenant: tenant)
+
+    tenant.destroy!
+
+    assert_predicate(room, :destroyed?)
+    assert_predicate(tenant, :destroyed?)
+    assert_predicate(landlord, :destroyed?)
+  end
+
   class SpecialBook < ActiveRecord::Base
     self.table_name = "books"
     belongs_to :author, class_name: "SpecialAuthor"
-    has_one :subscription, class_name: "SpecialSupscription", foreign_key: "subscriber_id"
+    has_one :subscription, class_name: "SpecialSubscription", foreign_key: "subscriber_id"
 
-    enum status: [:proposed, :written, :published]
+    enum :status, [:proposed, :written, :published]
   end
 
   class SpecialAuthor < ActiveRecord::Base
@@ -769,7 +983,7 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
     has_one :book, class_name: "SpecialBook", foreign_key: "author_id"
   end
 
-  class SpecialSupscription < ActiveRecord::Base
+  class SpecialSubscription < ActiveRecord::Base
     self.table_name = "subscriptions"
     belongs_to :book, class_name: "SpecialBook"
   end
@@ -864,9 +1078,190 @@ class HasOneAssociationsTest < ActiveRecord::TestCase
 
   def test_has_one_with_touch_option_on_nonpersisted_built_associations_doesnt_update_parent
     car = SpecialCar.create(name: "honda")
-    assert_queries(1) do
+    assert_queries_count(1) do
       car.build_special_bulb
       car.build_special_bulb
     end
+  end
+  test "composite primary key malformed association class" do
+    error = assert_raises(ActiveRecord::CompositePrimaryKeyMismatchError) do
+      order = Cpk::BrokenOrder.new(id: [1, 2], book: Cpk::Book.new(title: "Some book"))
+      order.save!
+    end
+
+    assert_equal(<<~MESSAGE.squish, error.message)
+      Association Cpk::BrokenOrder#book primary key ["shop_id", "status"]
+      doesn't match with foreign key broken_order_id. Please specify query_constraints, or primary_key and foreign_key values.
+    MESSAGE
+  end
+
+  test "composite primary key malformed association owner class" do
+    error = assert_raises(ActiveRecord::CompositePrimaryKeyMismatchError) do
+      order = Cpk::BrokenOrderWithNonCpkBooks.new(id: [1, 2], book: Cpk::NonCpkBook.new(title: "Some book"))
+      order.save!
+    end
+
+    assert_equal(<<~MESSAGE.squish, error.message)
+      Association Cpk::BrokenOrderWithNonCpkBooks#book primary key [\"shop_id\", \"status\"]
+      doesn't match with foreign key broken_order_with_non_cpk_books_id. Please specify query_constraints, or primary_key and foreign_key values.
+    MESSAGE
+  end
+end
+
+class AsyncHasOneAssociationsTest < ActiveRecord::TestCase
+  include WaitForTestHelper
+
+  self.use_transactional_tests = false
+
+  fixtures :companies, :accounts
+
+  unless in_memory_db?
+    def test_async_load_has_one
+      firm = companies(:first_firm)
+      first_account = Account.find(1)
+
+      firm.association(:account).async_load_target
+      wait_for_async_query
+
+      events = capture_notifications("sql.active_record") do
+        firm.account
+      end.reject { |e| e.payload[:name] == "SCHEMA" }
+
+      assert_no_queries do
+        assert_equal first_account, firm.account
+        assert_equal first_account.credit_limit, firm.account.credit_limit
+      end
+
+      assert_equal 1, events.size
+      assert_equal true, events.first.payload[:async]
+    end
+  end
+end
+
+class DeprecatedHasOneAssociationsTest < ActiveRecord::TestCase
+  include DeprecatedAssociationsTestHelpers
+
+  fixtures :cars
+
+  def create_bulb!
+    @bulb = @car.create_bulb!(name: "for has_one deprecated test suite")
+  end
+
+  def modify_bulb_name_directly_in_the_database(bulb)
+    new_name = "#{bulb.name} edited"
+    DATS::Bulb.connection.execute("UPDATE bulbs SET name = '#{new_name}'")
+    new_name
+  end
+
+  setup do
+    @model = DATS::Car
+    @car = @model.first
+  end
+
+  test "<association>" do
+    create_bulb!
+
+    assert_not_deprecated_association(:bulb) do
+      @car.bulb
+    end
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:deprecated_bulb)) do
+      assert_equal @bulb, @car.deprecated_bulb
+    end
+  end
+
+  test "<association>=" do
+    bulb = DATS::Bulb.new
+
+    assert_not_deprecated_association(:bulb) do
+      @car.bulb = bulb
+    end
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:deprecated_bulb=)) do
+      @car.deprecated_bulb = bulb
+    end
+    assert_same bulb, @car.deprecated_bulb
+  end
+
+  test "reload_<association>" do
+    create_bulb!
+
+    assert_not_deprecated_association(:bulb) do
+      @car.reload_bulb
+    end
+
+    deprecated_bulb = @car.deprecated_bulb # caches the associated object
+    new_name = modify_bulb_name_directly_in_the_database(deprecated_bulb)
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:reload_deprecated_bulb)) do
+      assert_equal new_name, @car.reload_deprecated_bulb.name
+    end
+  end
+
+  test "reset_<association>" do
+    create_bulb!
+
+    assert_not_deprecated_association(:bulb) do
+      @car.reset_bulb
+    end
+
+    deprecated_bulb = @car.deprecated_bulb # caches the associated object
+    new_name = modify_bulb_name_directly_in_the_database(deprecated_bulb)
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:reset_deprecated_bulb)) do
+      @car.reset_deprecated_bulb
+    end
+    assert_equal new_name, @car.deprecated_bulb.name
+  end
+
+  test "build_<association>" do
+    assert_not_deprecated_association(:bulb) do
+      @car.build_bulb
+    end
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:build_deprecated_bulb)) do
+      assert_instance_of DATS::Bulb, @car.build_deprecated_bulb
+    end
+  end
+
+  test "create_<association>" do
+    assert_not_deprecated_association(:bulb) do
+      @car.create_bulb
+    end
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:create_deprecated_bulb)) do
+      assert_predicate @car.create_deprecated_bulb, :persisted?
+    end
+  end
+
+  test "create_<association>!" do
+    assert_not_deprecated_association(:bulb) do
+      @car.create_bulb!
+    end
+
+    assert_deprecated_association(:deprecated_bulb, context: context_for_method(:create_deprecated_bulb!)) do
+      @car.create_deprecated_bulb!
+    end
+    assert_predicate @car.deprecated_bulb, :persisted?
+  end
+
+  test "parent destroy (not deprecated)" do
+    create_bulb!
+
+    assert_not_deprecated_association(:bulb) do
+      @car.destroy
+    end
+    assert_predicate @car, :destroyed?
+  end
+
+  test "parent destroy (deprecated)" do
+    create_bulb!
+
+    deprecated_bulb = @car.deprecated_bulb
+    assert_deprecated_association(:deprecated_bulb, context: context_for_dependent) do
+      @car.destroy
+    end
+    assert_predicate @car, :destroyed?
+    assert_predicate deprecated_bulb, :destroyed?
   end
 end

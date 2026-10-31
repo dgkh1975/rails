@@ -2,6 +2,7 @@
 
 require "abstract_unit"
 require "active_support/messages/rotation_configuration"
+require "active_support/testing/ractors_assertions"
 
 class FlashTest < ActionController::TestCase
   class TestController < ActionController::Base
@@ -100,6 +101,8 @@ class FlashTest < ActionController::TestCase
   end
 
   tests TestController
+
+  include ActiveSupport::Testing::RactorsAssertions
 
   def test_flash
     get :set_flash
@@ -224,6 +227,13 @@ class FlashTest < ActionController::TestCase
     @controller = original_controller
   end
 
+  def test_additional_flash_types_are_not_listed_in_actions_set
+    test_controller_with_flash_type_foo = Class.new(TestController) do
+      add_flash_types :foo
+    end
+    assert_not_includes test_controller_with_flash_type_foo.action_methods, "foo"
+  end
+
   def test_add_flash_type_to_subclasses
     test_controller_with_flash_type_foo = Class.new(TestController) do
       add_flash_types :foo
@@ -238,13 +248,25 @@ class FlashTest < ActionController::TestCase
     end
     assert_not TestController._flash_types.include?(:bar)
   end
+
+  def test_flash_types_are_ractor_safe
+    assert_ractor_shareable TestController._flash_types
+
+    assert_nothing_raised do
+      on_ractor do
+        c = TestController.new
+        c.set_request! ActionDispatch::Request.new({})
+        c.send(:alert)
+      end
+    end
+  end
 end
 
 class FlashIntegrationTest < ActionDispatch::IntegrationTest
   SessionKey = "_myapp_session"
   Generator = ActiveSupport::CachingKeyGenerator.new(
     ActiveSupport::KeyGenerator.new("b3c631c314c0bbca50c1b2843150fe33", iterations: 1000)
- )
+  )
   Rotations = ActiveSupport::Messages::RotationConfiguration.new
   SIGNED_COOKIE_SALT = "signed cookie"
 
@@ -253,6 +275,11 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
 
     def set_flash
       flash["that"] = "hello"
+      head :ok
+    end
+
+    def set_html_flash
+      flash["that"] = ActiveSupport::SafeBuffer.new("<p>Hello world</p>")
       head :ok
     end
 
@@ -267,7 +294,7 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
 
     def set_bar
       flash[:bar] = "for great justice"
-      head :ok
+      render inline: "<%= bar %>"
     end
 
     def set_flash_optionally
@@ -290,6 +317,18 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
     end
   end
 
+  def test_flash_safebuffer
+    with_test_route_set do
+      get "/set_html_flash", env: { "action_dispatch.cookies_serializer" => :message_pack }
+      assert_response :success
+      assert_equal "<p>Hello world</p>", @request.flash["that"]
+
+      get "/use_flash", env: { "action_dispatch.cookies_serializer" => :message_pack }
+      assert_response :success
+      assert_equal "flash: <p>Hello world</p>", @response.body
+    end
+  end
+
   def test_just_using_flash_does_not_stream_a_cookie_back
     with_test_route_set do
       get "/use_flash"
@@ -303,7 +342,9 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
     with_test_route_set do
       env = { "action_dispatch.request.flash_hash" => ActionDispatch::Flash::FlashHash.new }
       get "/set_flash", env: env
-      get "/set_flash", env: env
+      assert_nothing_raised do
+        get "/set_flash", env: env
+      end
     end
   end
 
@@ -311,7 +352,9 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
     with_test_route_set do
       env = { "action_dispatch.request.flash_hash" => ActionDispatch::Flash::FlashHash.new }
       get "/set_flash_now", env: env
-      get "/set_flash_now", env: env
+      assert_nothing_raised do
+        get "/set_flash_now", env: env
+      end
     end
   end
 
@@ -319,7 +362,7 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
     with_test_route_set do
       get "/set_bar"
       assert_response :success
-      assert_equal "for great justice", @controller.bar
+      assert_equal "for great justice", response.body
     end
   end
 
@@ -345,7 +388,7 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
     end
   end
 
-  def test_flash_usable_in_metal_without_helper
+  def test_flash_unusable_in_metal_without_helper
     controller_class = nil
 
     assert_nothing_raised do
@@ -356,8 +399,11 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
 
     controller = controller_class.new
 
-    assert_respond_to controller, :alert
-    assert_respond_to controller, :notice
+    assert_not_respond_to controller, :alert
+    assert_not_respond_to controller, :notice
+
+    assert_includes controller.private_methods, :alert
+    assert_includes controller.private_methods, :notice
   end
 
   private
@@ -370,19 +416,17 @@ class FlashIntegrationTest < ActionDispatch::IntegrationTest
       super(path, **options)
     end
 
+    def app
+      @app ||= self.class.build_app do |middleware|
+        middleware.use ActionDispatch::Session::CookieStore, key: SessionKey
+        middleware.use ActionDispatch::Flash
+        middleware.delete ActionDispatch::ShowExceptions
+      end
+    end
+
     def with_test_route_set
       with_routing do |set|
-        set.draw do
-          ActiveSupport::Deprecation.silence do
-            get ":action", to: FlashIntegrationTest::TestController
-          end
-        end
-
-        @app = self.class.build_app(set) do |middleware|
-          middleware.use ActionDispatch::Session::CookieStore, key: SessionKey
-          middleware.use ActionDispatch::Flash
-          middleware.delete ActionDispatch::ShowExceptions
-        end
+        draw_root_action_routes(set, FlashIntegrationTest::TestController)
 
         yield
       end

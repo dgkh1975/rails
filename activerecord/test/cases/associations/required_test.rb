@@ -12,9 +12,10 @@ class RequiredAssociationsTest < ActiveRecord::TestCase
   end
 
   setup do
-    @connection = ActiveRecord::Base.connection
-    @connection.create_table :parents, force: true
-    @connection.create_table :children, force: true do |t|
+    @connection = ActiveRecord::Base.lease_connection
+    ddl_connection = main_ractor_connection(@connection)
+    ddl_connection.create_table :parents, force: true
+    ddl_connection.create_table :children, force: true do |t|
       t.belongs_to :parent
     end
   end

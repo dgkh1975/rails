@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   class TreeManager
     include Arel::FactoryMethods
@@ -21,7 +22,11 @@ module Arel # :nodoc: all
       end
 
       def key=(key)
-        @ast.key = Nodes.build_quoted(key)
+        @ast.key = if key.is_a?(Array)
+          key.map { |k| Nodes.build_quoted(k) }
+        else
+          Nodes.build_quoted(key)
+        end
       end
 
       def key
@@ -40,8 +45,8 @@ module Arel # :nodoc: all
 
     attr_reader :ast
 
-    def initialize
-      @ctx = nil
+    def initialize(table = nil)
+      @table = table
     end
 
     def to_dot
@@ -50,23 +55,22 @@ module Arel # :nodoc: all
       collector.value
     end
 
-    def to_sql(engine = Table.engine)
+    def to_sql(engine = nil)
+      unless engine
+        table = @table.is_a?(Nodes::JoinSource) ? @table.left : @table
+
+        engine = table&.klass || Table.engine
+      end
+
       collector = Arel::Collectors::SQLString.new
-      collector = engine.connection.visitor.accept @ast, collector
-      collector.value
+      engine.with_connection do |connection|
+        connection.visitor.accept(@ast, collector).value
+      end
     end
 
     def initialize_copy(other)
       super
       @ast = @ast.clone
-    end
-
-    def where(expr)
-      if Arel::TreeManager === expr
-        expr = expr.ast
-      end
-      @ctx.wheres << expr
-      self
     end
   end
 end

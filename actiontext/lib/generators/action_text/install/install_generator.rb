@@ -1,54 +1,75 @@
 # frozen_string_literal: true
 
 require "pathname"
-require "json"
+require "rails/generators/js_package_manager"
 
 module ActionText
   module Generators
     class InstallGenerator < ::Rails::Generators::Base
+      include Rails::Generators::JsPackageManager
+
       source_root File.expand_path("templates", __dir__)
 
-      def install_javascript_dependencies
-        rails_command "app:binstub:yarn", inline: true
+      class_option :editor, type: :string, default: "trix"
 
-        say "Installing JavaScript dependencies", :green
-        yarn_command "add #{js_dependencies.map { |name, version| "#{name}@#{version}" }.join(" ")}", capture: true
+      def install_editor
+        return unless using_js_runtime?
+
+        editor = options[:editor]
+
+        say "Installing #{editor} JavaScript dependency", :green
+        run package_add_command(editor)
       end
 
-      def append_dependencies_to_package_file
-        in_root do
-          if (app_javascript_pack_path = Pathname.new("app/javascript/packs/application.js")).exist?
-            js_dependencies.each_key do |dependency|
-              line = %[require("#{dependency}")]
+      def append_editor
+        destination = Pathname(destination_root)
+        editor = options[:editor]
 
-              unless app_javascript_pack_path.read.include? line
-                say "Adding #{dependency} to #{app_javascript_pack_path}", :green
-                append_to_file app_javascript_pack_path, "\n#{line}"
-              end
-            end
-          else
-            say <<~WARNING, :red
-              WARNING: Action Text can't locate your JavaScript bundle to add its package dependencies.
+        if (application_javascript_path = destination.join("app/javascript/application.js")).exist?
+          insert_into_file application_javascript_path.to_s, %(\nimport "#{editor}"\n)
+        else
+          say <<~INSTRUCTIONS, :green
+            You must import the #{editor} JavaScript module in your application entrypoint.
+          INSTRUCTIONS
+        end
 
-              Add these lines to any bundles:
+        if (importmap_path = destination.join("config/importmap.rb")).exist?
+          append_to_file importmap_path.to_s, %(pin "#{editor}"\n)
+        end
+      end
 
-              require("trix")
-              require("@rails/actiontext")
+      def install_javascript_dependencies
+        return unless using_js_runtime?
 
-              Alternatively, install and setup the webpacker gem then rerun `bin/rails action_text:install`
-              to have these dependencies added automatically.
-            WARNING
-          end
+        say "Installing JavaScript dependencies", :green
+        run package_add_command("@rails/actiontext")
+      end
+
+      def append_javascript_dependencies
+        destination = Pathname(destination_root)
+
+        if (application_javascript_path = destination.join("app/javascript/application.js")).exist?
+          insert_into_file application_javascript_path.to_s, %(\nimport "@rails/actiontext"\n)
+        else
+          say <<~INSTRUCTIONS, :green
+            You must import the @rails/actiontext JavaScript module in your application entrypoint.
+          INSTRUCTIONS
+        end
+
+        if (importmap_path = destination.join("config/importmap.rb")).exist?
+          append_to_file importmap_path.to_s, %(pin "@rails/actiontext", to: "actiontext.esm.js"\n)
         end
       end
 
       def create_actiontext_files
-        template "actiontext.scss", "app/assets/stylesheets/actiontext.scss"
+        template "actiontext.css", "app/assets/stylesheets/actiontext.css"
 
-        copy_file "#{GEM_ROOT}/app/views/active_storage/blobs/_blob.html.erb",
+        gem_root = "#{__dir__}/../../../.."
+
+        copy_file "#{gem_root}/app/views/active_storage/blobs/_blob.html.erb",
           "app/views/active_storage/blobs/_blob.html.erb"
 
-        copy_file "#{GEM_ROOT}/app/views/layouts/action_text/contents/_content.html.erb",
+        copy_file "#{gem_root}/app/views/layouts/action_text/contents/_content.html.erb",
           "app/views/layouts/action_text/contents/_content.html.erb"
       end
 
@@ -57,19 +78,6 @@ module ActionText
       end
 
       hook_for :test_framework
-
-      private
-        GEM_ROOT = "#{__dir__}/../../../.."
-
-        def js_dependencies
-          js_package = JSON.load(Pathname.new("#{GEM_ROOT}/package.json"))
-          js_package["peerDependencies"].merge \
-            js_package["name"] => "^#{js_package["version"]}"
-        end
-
-        def yarn_command(command, config = {})
-          in_root { run "#{Thor::Util.ruby_command} bin/yarn #{command}", abort_on_failure: true, **config }
-        end
     end
   end
 end

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "active_support/configuration_file"
 
 module ActiveRecord
@@ -8,7 +9,7 @@ module ActiveRecord
       include Enumerable
 
       ##
-      # Open a fixture file named +file+.  When called with a block, the block
+      # Open a fixture file named `file`.  When called with a block, the block
       # is called with the filehandle and the filehandle is automatically closed
       # when the block finishes.
       def self.open(file)
@@ -41,7 +42,7 @@ module ActiveRecord
           @config_row ||= begin
             row = raw_rows.find { |fixture_name, _| fixture_name == "_fixture" }
             if row
-              row.last
+              validate_config_row(row.last)
             else
               { 'model_class': nil, 'ignore': nil }
             end
@@ -50,12 +51,26 @@ module ActiveRecord
 
         def raw_rows
           @raw_rows ||= begin
-            data = ActiveSupport::ConfigurationFile.parse(@file, context:
+            data = ActiveSupport::ConfigurationFile.parse(@file, freeze: true, context:
               ActiveRecord::FixtureSet::RenderContext.create_subclass.new.get_binding)
             data ? validate(data).to_a : []
-          rescue RuntimeError => error
+          rescue ActiveSupport::ConfigurationFile::FormatError => error
             raise Fixture::FormatError, error.message
           end
+        end
+
+        def validate_config_row(data)
+          unless Hash === data
+            raise Fixture::FormatError, "Invalid `_fixture` section: `_fixture` must be a hash: #{@file}"
+          end
+
+          begin
+            data.assert_valid_keys("model_class", "ignore")
+          rescue ArgumentError => error
+            raise Fixture::FormatError, "Invalid `_fixture` section: #{error.message}: #{@file}"
+          end
+
+          data
         end
 
         # Validate our unmarshalled data.

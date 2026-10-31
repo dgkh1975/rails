@@ -21,6 +21,40 @@ module ActiveRecord
 
           assert_equal "foo", type.serialize("foo")
         end
+
+        test "type_cast_for_schema keeps full IPv4 mask short" do
+          type = OID::Cidr.new
+
+          assert_equal %("192.168.1.0"),    type.type_cast_for_schema(IPAddr.new("192.168.1.0/32"))
+          assert_equal %("192.168.1.0/24"), type.type_cast_for_schema(IPAddr.new("192.168.1.0/24"))
+          assert_equal %("10.0.0.0/8"),     type.type_cast_for_schema(IPAddr.new("10.0.0.0/8"))
+        end
+
+        test "type_cast_for_schema keeps full IPv6 mask short" do
+          type = OID::Cidr.new
+
+          assert_equal %("::/32"),     type.type_cast_for_schema(IPAddr.new("::/32"))
+          assert_equal %("::/0"),      type.type_cast_for_schema(IPAddr.new("::/0"))
+          assert_equal %("fe80::/10"), type.type_cast_for_schema(IPAddr.new("fe80::/10"))
+          assert_equal %("::1"),       type.type_cast_for_schema(IPAddr.new("::1/128"))
+        end
+
+        test "changed? with nil values" do
+          type = OID::Cidr.new
+
+          assert_not type.changed?(nil, nil, "")
+          assert type.changed?("192.168.0.0/24", nil, "")
+          assert type.changed?(nil, "192.168.0.0/24", "")
+          assert type.changed?("192.168.0.0/24", "192.168.0.0/25", "")
+          assert type.changed?(IPAddr.new("192.168.0.0/24"), nil, "")
+          assert type.changed?(nil, IPAddr.new("192.168.0.0/24"), "")
+          assert type.changed?(IPAddr.new("192.168.0.0/24"), IPAddr.new("192.168.0.0/25"), "")
+
+          assert type.changed?(IPAddr.new("0.0.0.0"), nil, "")
+          assert type.changed?(nil, IPAddr.new("0.0.0.0"), "")
+          assert type.changed?(IPAddr.new("::"), nil, "")
+          assert type.changed?(nil, IPAddr.new("::"), "")
+        end
       end
     end
   end

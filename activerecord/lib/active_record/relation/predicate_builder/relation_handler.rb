@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveRecord
   class PredicateBuilder
     class RelationHandler # :nodoc:
@@ -9,11 +10,31 @@ module ActiveRecord
         end
 
         if value.select_values.empty?
-          value = value.select(value.table[value.klass.primary_key])
+          model = value.model
+          if model.composite_primary_key?
+            raise ArgumentError, "Cannot map composite primary key #{model.primary_key} to #{attribute.name}"
+          else
+            value = value.select(value.table[model.primary_key])
+          end
         end
 
-        attribute.in(value.arel)
+        query = value.arel
+        if attribute.is_a?(ComparisonAttribute)
+          query = query.clone
+          query.projections = query.projections.map { |projection| comparison_projection(attribute, projection) }
+        end
+
+        attribute.in(query)
       end
+
+      private
+        def comparison_projection(attribute, projection)
+          if projection.is_a?(Arel::Nodes::As)
+            Arel::Nodes::As.new(attribute.comparison_expression(projection.left), projection.right)
+          else
+            attribute.comparison_expression(projection)
+          end
+        end
     end
   end
 end

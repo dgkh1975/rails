@@ -16,12 +16,16 @@ class InflectorTest < ActiveSupport::TestCase
     # This helper is implemented by setting @__instance__ because in some tests
     # there are module functions that access ActiveSupport::Inflector.inflections,
     # so we need to replace the singleton itself.
-    @original_inflections = ActiveSupport::Inflector::Inflections.instance_variable_get(:@__instance__)[:en]
-    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__instance__, en: @original_inflections.dup)
+    @original_inflections = ActiveSupport::Inflector::Inflections.instance_variable_get(:@__instance__)
+    @original_inflection_en = ActiveSupport::Inflector::Inflections.instance_variable_get(:@__en_instance__)
+
+    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__instance__, {})
+    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__en_instance__, @original_inflection_en.dup)
   end
 
   def teardown
-    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__instance__, en: @original_inflections)
+    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__instance__, @original_inflections)
+    ActiveSupport::Inflector::Inflections.instance_variable_set(:@__en_instance__, @original_inflection_en)
   end
 
   def test_pluralize_plurals
@@ -37,6 +41,16 @@ class InflectorTest < ActiveSupport::TestCase
     I18n.stub(:default_locale, :"en-GB") do
       assert_equal "days", ActiveSupport::Inflector.pluralize("day")
     end
+  end
+
+  def test_pluralize_with_i18n_fallbacks_to_en
+    original_fallbacks = I18n.fallbacks
+    I18n.fallbacks = I18n::Locale::Fallbacks.new(custom: :en)
+
+    assert_equal "applicants", ActiveSupport::Inflector.pluralize("applicant", :custom)
+    assert_equal "days", ActiveSupport::Inflector.pluralize("day", :custom)
+  ensure
+    I18n.fallbacks = original_fallbacks
   end
 
   test "uncountability of ascii word" do
@@ -220,11 +234,21 @@ class InflectorTest < ActiveSupport::TestCase
     ].each do |camel, under, human, title|
       assert_equal(camel, ActiveSupport::Inflector.camelize(under))
       assert_equal(camel, ActiveSupport::Inflector.camelize(camel))
+      assert_not_predicate(ActiveSupport::Inflector.camelize(under), :frozen?)
+      assert_not_predicate(ActiveSupport::Inflector.camelize(camel), :frozen?)
+
       assert_equal(under, ActiveSupport::Inflector.underscore(under))
       assert_equal(under, ActiveSupport::Inflector.underscore(camel))
+      assert_not_predicate(ActiveSupport::Inflector.underscore(under), :frozen?)
+      assert_not_predicate(ActiveSupport::Inflector.underscore(camel), :frozen?)
+
       assert_equal(title, ActiveSupport::Inflector.titleize(under))
       assert_equal(title, ActiveSupport::Inflector.titleize(camel))
+      assert_not_predicate(ActiveSupport::Inflector.titleize(under), :frozen?)
+      assert_not_predicate(ActiveSupport::Inflector.titleize(camel), :frozen?)
+
       assert_equal(human, ActiveSupport::Inflector.humanize(under))
+      assert_not_predicate(ActiveSupport::Inflector.humanize(camel), :frozen?)
     end
   end
 
@@ -259,6 +283,16 @@ class InflectorTest < ActiveSupport::TestCase
     end
 
     assert_equal("json_html_api", ActiveSupport::Inflector.underscore("JSONHTMLAPI"))
+  end
+
+  def test_overlapping_acronyms
+    ActiveSupport::Inflector.inflections do |inflect|
+      inflect.acronym "USD"
+      inflect.acronym "USDC"
+    end
+
+    assert_equal "usd", "USD".underscore
+    assert_equal "usdc", "USDC".underscore
   end
 
   def test_underscore
@@ -335,6 +369,43 @@ class InflectorTest < ActiveSupport::TestCase
     end
   end
 
+  def test_parameterize_with_separators_special_to_tr
+    assert_equal "Donald^E^Knuth", ActiveSupport::Inflector.parameterize("Donald E. Knuth", separator: "^", preserve_case: true)
+    assert_equal "donald\\e\\knuth", ActiveSupport::Inflector.parameterize("Donald E. Knuth", separator: "\\")
+    assert_equal "donald]e]knuth", ActiveSupport::Inflector.parameterize("Donald E. Knuth", separator: "]")
+    assert_equal "a-b-c", ActiveSupport::Inflector.parameterize("a - b -- c", separator: "-")
+    assert_equal "a+b_c", ActiveSupport::Inflector.parameterize("a !b_c?", separator: "+")
+  end
+
+  def test_parameterize_with_a_transliteration_rule_returning_non_ascii_chars
+    I18n.backend.store_translations(:xx, i18n: { transliterate: { rule: ->(string) { string } } })
+
+    assert_equal "a-b", ActiveSupport::Inflector.parameterize("a 日本 b", locale: :xx)
+    assert_equal "", ActiveSupport::Inflector.parameterize("Привет мир", locale: :xx)
+  ensure
+    I18n.backend.reload!
+  end
+
+  def test_parameterize_replaces_unwanted_chars_like_a_regexp_on_random_strings
+    I18n.backend.store_translations(:xx, i18n: { transliterate: { rule: ->(string) { string } } })
+    random = Random.new(42)
+    chars = ["a", "Z", "9", "-", "_", " ", ".", "^", "\\", "]", "\n", "é", "日"]
+
+    3000.times do
+      string = Array.new(random.rand(10)) { chars.sample(random: random) }.join
+      separator = ["-", "_", "+", "^", "\\", ""].sample(random: random)
+      locale = [:en, :xx].sample(random: random)
+
+      expected = ActiveSupport::Inflector.transliterate(string, locale: locale).gsub(/[^a-z0-9\-_]+/i, separator)
+      expected = expected.squeeze(separator).delete_prefix(separator).delete_suffix(separator) unless separator.empty?
+
+      assert_equal expected.downcase, ActiveSupport::Inflector.parameterize(string, separator: separator, locale: locale),
+        "#{string.inspect} with separator #{separator.inspect} and locale #{locale}"
+    end
+  ensure
+    I18n.backend.reload!
+  end
+
   def test_parameterize_with_multi_character_separator
     StringToParameterized.each do |some_string, parameterized_string|
       assert_equal(parameterized_string.gsub("-", "__sep__"), ActiveSupport::Inflector.parameterize(some_string, separator: "__sep__"))
@@ -368,6 +439,10 @@ class InflectorTest < ActiveSupport::TestCase
     UnderscoreToHuman.each do |underscore, human|
       assert_equal(human, ActiveSupport::Inflector.humanize(underscore))
     end
+  end
+
+  def test_humanize_nil
+    assert_equal("", ActiveSupport::Inflector.humanize(nil))
   end
 
   def test_humanize_without_capitalize
@@ -410,6 +485,11 @@ class InflectorTest < ActiveSupport::TestCase
     assert_equal("LAX roundtrip to SFO", ActiveSupport::Inflector.humanize("lax roundtrip to sfo", capitalize: false))
     assert_equal("LAX roundtrip to SFO", ActiveSupport::Inflector.humanize("Lax Roundtrip To Sfo"))
     assert_equal("LAX roundtrip to SFO", ActiveSupport::Inflector.humanize("Lax Roundtrip To Sfo", capitalize: false))
+  end
+
+  def test_humanize_with_international_characters
+    assert_equal("Áéíóú", ActiveSupport::Inflector.humanize("áÉÍÓÚ"))
+    assert_equal("Абвгде", ActiveSupport::Inflector.humanize("аБВГДЕ"))
   end
 
   def test_constantize
@@ -469,6 +549,18 @@ class InflectorTest < ActiveSupport::TestCase
     RUBY
   end
 
+  def test_clear_acronyms_resets_to_reusable_state
+    ActiveSupport::Inflector.inflections.clear(:acronyms)
+
+    assert_empty ActiveSupport::Inflector.inflections.acronyms
+
+    ActiveSupport::Inflector.inflections do |inflect|
+      inflect.acronym "HTML"
+    end
+
+    assert_equal "HTML", "html".titleize
+  end
+
   def test_inflector_locality
     ActiveSupport::Inflector.inflections(:es) do |inflect|
       inflect.plural(/$/, "s")
@@ -512,6 +604,7 @@ class InflectorTest < ActiveSupport::TestCase
       inflect.singular(/(database)s$/i, '\1')
       inflect.uncountable("series")
       inflect.human("col_rpted_bugs", "Reported bugs")
+      inflect.acronym("HTML")
 
       inflect.clear :all
 
@@ -519,6 +612,7 @@ class InflectorTest < ActiveSupport::TestCase
       assert_empty inflect.singulars
       assert_empty inflect.uncountables
       assert_empty inflect.humans
+      assert_empty inflect.acronyms
     end
   end
 
@@ -529,6 +623,7 @@ class InflectorTest < ActiveSupport::TestCase
       inflect.singular(/(database)s$/i, '\1')
       inflect.uncountable("series")
       inflect.human("col_rpted_bugs", "Reported bugs")
+      inflect.acronym("HTML")
 
       inflect.clear
 
@@ -536,6 +631,22 @@ class InflectorTest < ActiveSupport::TestCase
       assert_empty inflect.singulars
       assert_empty inflect.uncountables
       assert_empty inflect.humans
+      assert_empty inflect.acronyms
+    end
+  end
+
+  def test_clear_all_resets_camelize_and_underscore_regexes
+    ActiveSupport::Inflector.inflections do |inflect|
+      # ensure any data is present
+      inflect.acronym("HTTP")
+      assert_equal "http_s", "HTTPS".underscore
+      assert_equal "Https", "https".camelize
+
+      inflect.clear :all
+
+      assert_empty inflect.acronyms
+      assert_equal "https", "HTTPS".underscore
+      assert_equal "Https", "https".camelize
     end
   end
 
@@ -578,7 +689,7 @@ class InflectorTest < ActiveSupport::TestCase
 
         assert_equal [], inflect.singulars
         assert_equal [], inflect.plurals
-        assert_equal [], inflect.uncountables
+        assert_equal [], inflect.uncountables.to_a
 
         # restore all the inflections
         singulars.reverse_each { |singular| inflect.singular(*singular) }
@@ -592,7 +703,7 @@ class InflectorTest < ActiveSupport::TestCase
     end
   end
 
-  %w(plurals singulars uncountables humans acronyms).each do |scope|
+  %i(plurals singulars uncountables humans).each do |scope|
     define_method("test_clear_inflections_with_#{scope}") do
       # clear the inflections
       ActiveSupport::Inflector.inflections do |inflect|
@@ -600,5 +711,18 @@ class InflectorTest < ActiveSupport::TestCase
         assert_equal [], inflect.public_send(scope)
       end
     end
+  end
+
+  def test_clear_inflections_with_acronyms
+    ActiveSupport::Inflector.inflections do |inflect|
+      inflect.clear(:acronyms)
+      assert_equal({}, inflect.acronyms)
+    end
+  end
+
+  def test_output_is_not_frozen_even_if_input_is_frozen
+    input = "plurals"
+    assert_predicate input, :frozen?
+    assert_not_predicate ActiveSupport::Inflector.pluralize(input), :frozen?
   end
 end

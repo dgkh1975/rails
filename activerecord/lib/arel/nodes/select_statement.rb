@@ -1,14 +1,15 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Nodes
     class SelectStatement < Arel::Nodes::NodeExpression
       attr_reader :cores
       attr_accessor :limit, :orders, :lock, :offset, :with
 
-      def initialize(cores = [SelectCore.new])
+      def initialize(relation = nil)
         super()
-        @cores          = cores
+        @cores          = [SelectCore.new(relation)]
         @orders         = []
         @limit          = nil
         @lock           = nil

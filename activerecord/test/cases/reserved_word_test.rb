@@ -3,6 +3,8 @@
 require "cases/helper"
 
 class ReservedWordTest < ActiveRecord::TestCase
+  skip_under_ractor_proxy
+
   self.use_instantiated_fixtures = true
   self.use_transactional_tests = false
 
@@ -28,7 +30,7 @@ class ReservedWordTest < ActiveRecord::TestCase
   end
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
     @connection.create_table :select, force: true
     @connection.create_table :distinct, force: true
     @connection.create_table :distinct_select, id: false, force: true do |t|

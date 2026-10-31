@@ -1,13 +1,36 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
+  # Active Storage \Attached \Many
+  # ==============================
+  #
   # Decorated proxy object representing of multiple attachments to a model.
   class Attached::Many < Attached
+    ##
+    # :method: purge
+    #
+    # Directly purges each associated attachment (i.e. destroys the blobs and
+    # attachments and deletes the files on the service).
+    delegate :purge, to: :purge_many
+
+    ##
+    # :method: purge_later
+    #
+    # Purges each associated attachment through the queuing system.
+    delegate :purge_later, to: :purge_many
+
+    ##
+    # :method: detach
+    #
+    # Deletes associated attachments without purging them, leaving their respective blobs in place.
+    delegate :detach, to: :detach_many
+
     delegate_missing_to :attachments
 
     # Returns all the associated attachment records.
     #
-    # All methods called on this proxy object that aren't listed here will automatically be delegated to +attachments+.
+    # All methods called on this proxy object that aren't listed here will automatically be delegated to `attachments`.
     def attachments
       change.present? ? change.attachments : record.public_send("#{name}_attachments")
     end
@@ -17,50 +40,71 @@ module ActiveStorage
       change.present? ? change.blobs : record.public_send("#{name}_blobs")
     end
 
-    # Attaches one or more +attachables+ to the record.
+    # Attaches one or more `attachables` to the record.
     #
     # If the record is persisted and unchanged, the attachments are saved to
     # the database immediately. Otherwise, they'll be saved to the DB when the
     # record is next saved.
     #
-    #   document.images.attach(params[:images]) # Array of ActionDispatch::Http::UploadedFile objects
-    #   document.images.attach(params[:signed_blob_id]) # Signed reference to blob from direct upload
-    #   document.images.attach(io: File.open("/path/to/racecar.jpg"), filename: "racecar.jpg", content_type: "image/jpg")
-    #   document.images.attach([ first_blob, second_blob ])
+    # ```
+    # document.images.attach(params[:images]) # Array of ActionDispatch::Http::UploadedFile objects
+    # document.images.attach(params[:signed_blob_id]) # Signed reference to blob from direct upload
+    # document.images.attach(io: File.open("/path/to/racecar.jpg"), filename: "racecar.jpg", content_type: "image/jpeg")
+    # document.images.attach([ first_blob, second_blob ])
+    # ```
     def attach(*attachables)
+      record.public_send("#{name}=", blobs + attachables.flatten)
       if record.persisted? && !record.changed?
-        record.public_send("#{name}=", blobs + attachables.flatten)
-        record.save
-      else
-        record.public_send("#{name}=", (change&.attachables || blobs) + attachables.flatten)
+        return if !record.save
       end
+      record.public_send("#{name}")
+    end
+
+    # Calls attach, and raises an exception if the record was meant to be saved but at least one of the validations failed.
+    #
+    # ```
+    # document.images.attach!(params[:images]) # Array of ActionDispatch::Http::UploadedFile objects
+    # document.images.attach!(params[:signed_blob_id]) # Signed reference to blob from direct upload
+    # document.images.attach!(io: File.open("/path/to/racecar.jpg"), filename: "racecar.jpg", content_type: "image/jpeg")
+    # document.images.attach!([ first_blob, second_blob ])
+    # ```
+    def attach!(*attachables)
+      attach(*attachables) || raise(ActiveRecord::RecordNotSaved.new("Failed to save the record", record))
     end
 
     # Returns true if any attachments have been made.
     #
-    #   class Gallery < ApplicationRecord
-    #     has_many_attached :photos
-    #   end
+    # ```
+    # class Gallery < ApplicationRecord
+    #   has_many_attached :photos
+    # end
     #
-    #   Gallery.new.photos.attached? # => false
+    # Gallery.new.photos.attached? # => false
+    # ```
     def attached?
       attachments.any?
     end
 
-    # Deletes associated attachments without purging them, leaving their respective blobs in place.
-    def detach
-      attachments.delete_all if attached?
+    # Returns the combined size in bytes of all attached blobs.
+    #
+    # ```
+    # document.images.byte_size # => 2048
+    # ```
+    def byte_size
+      blobs.pluck(:byte_size).sum
     end
 
-    ##
-    # :method: purge
-    #
-    # Directly purges each associated attachment (i.e. destroys the blobs and
-    # attachments and deletes the files on the service).
+    def as_json(options = nil)
+      attachments.as_json(options)
+    end
 
-    ##
-    # :method: purge_later
-    #
-    # Purges each associated attachment through the queuing system.
+    private
+      def purge_many
+        Attached::Changes::PurgeMany.new(name, record, attachments)
+      end
+
+      def detach_many
+        Attached::Changes::DetachMany.new(name, record, attachments)
+      end
   end
 end

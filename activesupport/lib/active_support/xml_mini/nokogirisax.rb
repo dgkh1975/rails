@@ -1,16 +1,17 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 begin
   require "nokogiri"
 rescue LoadError => e
-  $stderr.puts "You don't have nokogiri installed in your application. Please add it to your Gemfile and run bundle install"
+  warn "You don't have nokogiri installed in your application. Please add it to your Gemfile and run bundle install"
   raise e
 end
 require "active_support/core_ext/object/blank"
 require "stringio"
 
 module ActiveSupport
-  module XmlMini_NokogiriSAX #:nodoc:
+  module XmlMini_NokogiriSAX # :nodoc:
     extend self
 
     # Class that will build the hash while the XML document

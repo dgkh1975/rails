@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 4.0 Release Notes
 ===============================
@@ -11,7 +11,7 @@ Highlights in Rails 4.0:
 * Russian Doll Caching
 
 These release notes cover only the major changes. To learn about various bug
-fixes and changes, please refer to the change logs or check out the [list of
+fixes and changes, please refer to the changelogs or check out the [list of
 commits](https://github.com/rails/rails/commits/4-0-stable) in the main Rails
 repository on GitHub.
 
@@ -60,7 +60,7 @@ Major Features
 ### Upgrade
 
 * **Ruby 1.9.3** ([commit](https://github.com/rails/rails/commit/a0380e808d3dbd2462df17f5d3b7fcd8bd812496)) - Ruby 2.0 preferred; 1.9.3+ required
-* **[New deprecation policy](https://www.youtube.com/watch?v=z6YgD6tVPQs)** - Deprecated features are warnings in Rails 4.0 and will be removed in Rails 4.1.
+* **[New deprecation policy](https://web.archive.org/web/20140924105854/https://www.youtube.com/watch?v=z6YgD6tVPQs)** - Deprecated features are warnings in Rails 4.0 and will be removed in Rails 4.1.
 * **ActionPack page and action caching** ([commit](https://github.com/rails/rails/commit/b0a7068564f0c95e7ef28fc39d0335ed17d93e90)) - Page and action caching are extracted to a separate gem. Page and action caching requires too much manual intervention (manually expiring caches when the underlying model objects are updated). Instead, use Russian doll caching.
 * **ActiveRecord observers** ([commit](https://github.com/rails/rails/commit/ccecab3ba950a288b61a516bf9b6962e384aae0b)) - Observers are extracted to a separate gem. Observers are only needed for page and action caching, and can lead to spaghetti code.
 * **ActiveRecord session store** ([commit](https://github.com/rails/rails/commit/0ffe19056c8e8b2f9ae9d487b896cad2ce9387ad)) - The ActiveRecord session store is extracted to a separate gem. Storing sessions in SQL is costly. Instead, use cookie sessions, memcache sessions, or a custom session store.
@@ -204,7 +204,7 @@ Please refer to the [Changelog](https://github.com/rails/rails/blob/4-0-stable/a
 
 * Deprecates the compatibility method `Module#local_constant_names`, use `Module#local_constants` instead (which returns symbols).
 
-* `BufferedLogger` is deprecated. Use `ActiveSupport::Logger`, or the logger from Ruby standard library.
+* `ActiveSupport::BufferedLogger` is deprecated. Use `ActiveSupport::Logger`, or the logger from Ruby standard library.
 
 * Deprecate `assert_present` and `assert_blank` in favor of `assert object.blank?` and `assert object.present?`
 

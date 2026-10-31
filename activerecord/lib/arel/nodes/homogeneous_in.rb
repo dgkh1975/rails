@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Nodes
     class HomogeneousIn < Node
@@ -36,14 +37,6 @@ module Arel # :nodoc: all
         attribute.quoted_array(values)
       end
 
-      def table_name
-        attribute.relation.table_alias || attribute.relation.name
-      end
-
-      def column_name
-        attribute.name
-      end
-
       def casted_values
         type = attribute.type_caster
 
@@ -55,12 +48,12 @@ module Arel # :nodoc: all
         casted_values
       end
 
+      def proc_for_binds
+        -> value { ActiveModel::Attribute.with_cast_value(attribute.name, value, ActiveModel::Type.default_value) }
+      end
+
       def fetch_attribute(&block)
-        if attribute
-          yield attribute
-        else
-          expr.fetch_attribute(&block)
-        end
+        attribute.fetch_attribute(&block)
       end
 
       protected

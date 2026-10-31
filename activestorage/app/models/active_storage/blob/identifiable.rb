@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+# Active Storage \Blob \Identifiable
+# ==================================
 module ActiveStorage::Blob::Identifiable
   def identify
     identify_without_saving

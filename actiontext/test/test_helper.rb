@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
+require_relative "../../tools/strict_warnings"
+
 # Configure Rails Environment
 ENV["RAILS_ENV"] = "test"
 
 require_relative "../test/dummy/config/environment"
-ActiveRecord::Migrator.migrations_paths = [File.expand_path("../test/dummy/db/migrate", __dir__)]
+require "active_record/testing/query_assertions"
+ActiveRecord::Migrator.migrations_paths = [ File.expand_path("../test/dummy/db/migrate", __dir__) ]
 require "rails/test_help"
 
 require "rails/test_unit/reporter"
@@ -14,35 +17,39 @@ Rails::TestUnitReporter.executable = "bin/test"
 I18n.enforce_available_locales = false
 
 # Load fixtures from the engine
-if ActiveSupport::TestCase.respond_to?(:fixture_path=)
-  ActiveSupport::TestCase.fixture_path = File.expand_path("fixtures", __dir__)
-  ActionDispatch::IntegrationTest.fixture_path = ActiveSupport::TestCase.fixture_path
-  ActiveSupport::TestCase.file_fixture_path = ActiveSupport::TestCase.fixture_path + "/files"
+if ActiveSupport::TestCase.respond_to?(:fixture_paths=)
+  ActiveSupport::TestCase.fixture_paths = [File.expand_path("fixtures", __dir__)]
+  ActionDispatch::IntegrationTest.fixture_paths = ActiveSupport::TestCase.fixture_paths
+  ActiveSupport::TestCase.file_fixture_path = File.expand_path("fixtures", __dir__) + "/files"
   ActiveSupport::TestCase.fixtures :all
 end
 
 class ActiveSupport::TestCase
-  def assert_queries(expected_count)
-    ActiveRecord::Base.connection.materialize_transactions
-
-    queries = []
-    ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
-      queries << payload[:sql] unless %w[ SCHEMA TRANSACTION ].include?(payload[:name])
-    end
-
-    yield.tap do
-      assert_equal expected_count, queries.size, "#{queries.size} instead of #{expected_count} queries were executed. #{queries.inspect}"
-    end
-  end
-
-  def assert_no_queries(&block)
-    assert_queries(0, &block)
+  module QueryHelpers
+    include ActiveJob::TestHelper
+    include ActiveRecord::Assertions::QueryAssertions
   end
 
   private
     def create_file_blob(filename:, content_type:, metadata: nil)
       ActiveStorage::Blob.create_and_upload! io: file_fixture(filename).open, filename: filename, content_type: content_type, metadata: metadata
     end
+
+    def without_direct_upload_route(&block)
+      ActiveStorage.with(draw_direct_upload_route: false) do
+        Rails.application.reload_routes!
+        block.call
+      end
+    ensure
+      Rails.application.reload_routes!
+    end
 end
+
+# Encryption
+ActiveRecord::Encryption.configure \
+  primary_key: "test master key",
+  deterministic_key: "test deterministic key",
+  key_derivation_salt: "testing key derivation salt",
+  support_unencrypted_data: true
 
 require_relative "../../tools/test_common"

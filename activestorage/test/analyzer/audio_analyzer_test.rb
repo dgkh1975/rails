@@ -1,0 +1,53 @@
+# frozen_string_literal: true
+
+require "test_helper"
+require "database/setup"
+
+require "active_storage/analyzer/audio_analyzer"
+
+class ActiveStorage::Analyzer::AudioAnalyzerTest < ActiveSupport::TestCase
+  setup do
+    if !ENV["BUILDKITE"] && !system("command", "-v", ActiveStorage.paths[:ffprobe] || "ffprobe", out: File::NULL)
+      skip("ffprobe isn't available")
+    end
+  end
+
+  test "analyzing an audio" do
+    blob = create_file_blob(filename: "audio.mp3", content_type: "audio/mp3")
+    metadata = extract_metadata_from(blob)
+
+    assert (0.863379..0.914286).include?(metadata[:duration])
+
+    assert_equal 128000, metadata[:bit_rate]
+    assert_equal 44100, metadata[:sample_rate]
+    assert_not_nil metadata[:tags]
+    assert_equal "Lavc57.64", metadata[:tags][:encoder]
+  end
+
+  test "analyzing an audio file with ffprobe arguments that exclude the audio stream" do
+    blob = create_file_blob(filename: "audio.mp3", content_type: "audio/mp3")
+
+    ActiveStorage.with(ffprobe_arguments: "-select_streams v") do
+      metadata = extract_metadata_from(blob)
+
+      assert_not metadata[:duration]
+      assert_not metadata[:bit_rate]
+    end
+  end
+
+  test "analyzing an audio file with duplicate tags from ffprobe" do
+    blob = create_file_blob(filename: "audio_with_duplicate_tags.wav", content_type: "audio/x-wav")
+    metadata = assert_nothing_raised { extract_metadata_from(blob) }
+    assert_equal 128000, metadata[:bit_rate]
+  end
+
+  test "instrumenting analysis" do
+    blob = create_file_blob(filename: "audio.mp3", content_type: "audio/mp3")
+
+    assert_notifications_count("analyze.active_storage", 1) do
+      assert_notification("analyze.active_storage", analyzer: "ffprobe") do
+        blob.analyze
+      end
+    end
+  end
+end

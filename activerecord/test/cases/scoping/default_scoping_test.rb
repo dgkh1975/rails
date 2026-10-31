@@ -9,8 +9,12 @@ require "models/computer"
 require "models/cat"
 require "models/mentor"
 require "concurrent/atomic/cyclic_barrier"
+require "active_support/testing/ractors_assertions"
+require "active_support/core_ext/object/with"
 
 class DefaultScopingTest < ActiveRecord::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   fixtures :developers, :posts, :comments
 
   def test_default_scope
@@ -52,6 +56,21 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_nil DeveloperCalledJamis.unscoped.create!.name
   end
 
+  def test_default_scope_is_unscoped_on_update
+    jamis = developers(:jamis)
+
+    assert_raises(ActiveRecord::RecordNotFound) do
+      DeveloperCalledDavid.update(jamis.id, name: "Not Jamis")
+    end
+    assert_raises(ActiveRecord::RecordNotFound) do
+      DeveloperCalledDavid.update!(jamis.id, name: "Not Jamis")
+    end
+    assert_equal "Jamis", jamis.reload.name
+
+    DeveloperCalledDavid.unscoped.update(jamis.id, name: "Not Jamis")
+    assert_equal "Not Jamis", jamis.reload.name
+  end
+
   def test_default_scope_with_conditions_string
     assert_equal Developer.where(name: "David").map(&:id).sort, DeveloperCalledDavid.all.map(&:id).sort
     assert_nil DeveloperCalledDavid.create!.name
@@ -80,18 +99,97 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_equal 50000,   wheres["salary"]
   end
 
+  def test_combined_default_scope_without_and_with_all_queries_works
+    Mentor.create!
+    klass = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries
+
+    create_sql = capture_sql { klass.create!(name: "Steve") }.second
+
+    assert_match(/mentor_id/, create_sql)
+    assert_match(/firm_id/, create_sql)
+
+    developer = klass.find_by!(name: "Steve")
+
+    update_sql = capture_sql { developer.update(name: "Stephen") }.second
+
+    assert_no_match(/mentor_id/, update_sql)
+    assert_match(/firm_id/, update_sql)
+  end
+
+  def test_all_without_all_queries_is_not_deprecated
+    assert_not_deprecated(ActiveRecord.deprecator) do
+      DeveloperWithDefaultMentorScopeAllQueries.all
+    end
+  end
+
+  def test_all_with_explicit_nil_all_queries_is_deprecated
+    klass = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries
+
+    wheres = assert_deprecated(/The `all_queries` keyword argument to `ActiveRecord::Base\.all` is deprecated/, ActiveRecord.deprecator) do
+      klass.all(all_queries: nil).where_values_hash
+    end
+
+    assert_includes wheres, "mentor_id"
+    assert_includes wheres, "firm_id"
+  end
+
+  def test_all_with_false_all_queries_is_deprecated
+    klass = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries
+
+    wheres = assert_deprecated(/The `all_queries` keyword argument to `ActiveRecord::Base\.all` is deprecated/, ActiveRecord.deprecator) do
+      klass.all(all_queries: false).where_values_hash
+    end
+
+    assert_not_includes wheres, "mentor_id"
+    assert_not_includes wheres, "firm_id"
+  end
+
+  def test_all_with_all_queries_ignores_non_global_current_scope
+    klass = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries
+
+    wheres = assert_deprecated(/The `all_queries` keyword argument to `ActiveRecord::Base\.all` is deprecated/, ActiveRecord.deprecator) do
+      klass.where(salary: 80_000).scoping do
+        klass.all(all_queries: true).where_values_hash
+      end
+    end
+
+    assert_not_includes wheres, "mentor_id"
+    assert_includes wheres, "firm_id"
+    assert_not_includes wheres, "salary"
+  end
+
+  def test_all_with_all_queries_includes_global_current_scope
+    klass = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries
+
+    wheres = assert_deprecated(/The `all_queries` keyword argument to `ActiveRecord::Base\.all` is deprecated/, ActiveRecord.deprecator) do
+      klass.unscoped.where(salary: 80_000).scoping(all_queries: true) do
+        klass.all(all_queries: true).where_values_hash
+      end
+    end
+
+    assert_not_includes wheres, "mentor_id"
+    assert_includes wheres, "firm_id"
+    assert_includes wheres, "salary"
+  end
+
   def test_default_scope_runs_on_create
     Mentor.create!
-    create_sql = capture_sql { DeveloperwithDefaultMentorScopeNot.create!(name: "Eileen") }.first
+    create_sql = capture_sql { DeveloperwithDefaultMentorScopeNot.create!(name: "Eileen") }.second
 
     assert_match(/mentor_id/, create_sql)
   end
 
   def test_default_scope_with_all_queries_runs_on_create
     Mentor.create!
-    create_sql = capture_sql { DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen") }.first
+    create_sql = capture_sql { DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen") }.second
 
     assert_match(/mentor_id/, create_sql)
+  end
+
+  def test_nilable_default_scope_with_all_queries_runs_on_create
+    create_sql = capture_sql { DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita") }.first
+
+    assert_no_match(/AND$/, create_sql)
   end
 
   def test_default_scope_runs_on_select
@@ -110,6 +208,13 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_match(/mentor_id/, select_sql)
   end
 
+  def test_nilable_default_scope_with_all_queries_runs_on_select
+    DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita")
+    select_sql = capture_sql { DeveloperWithDefaultNilableFirmScopeAllQueries.find_by(name: "Nikita") }.first
+
+    assert_no_match(/AND$/, select_sql)
+  end
+
   def test_default_scope_doesnt_run_on_update
     Mentor.create!
     dev = DeveloperwithDefaultMentorScopeNot.create!(name: "Eileen")
@@ -121,9 +226,16 @@ class DefaultScopingTest < ActiveRecord::TestCase
   def test_default_scope_with_all_queries_runs_on_update
     Mentor.create!
     dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen")
-    update_sql = capture_sql { dev.update!(name: "Not Eileen") }.first
+    update_sql = capture_sql { dev.update!(name: "Not Eileen") }.second
 
     assert_match(/mentor_id/, update_sql)
+  end
+
+  def test_nilable_default_scope_with_all_queries_runs_on_update
+    dev = DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita")
+    update_sql = capture_sql { dev.update!(name: "Not Nikita") }.first
+
+    assert_no_match(/AND$/, update_sql)
   end
 
   def test_default_scope_doesnt_run_on_update_columns
@@ -142,6 +254,27 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_match(/mentor_id/, update_sql)
   end
 
+  def test_nilable_default_scope_with_all_queries_runs_on_update_columns
+    dev = DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita")
+    update_sql = capture_sql { dev.update_columns(name: "Not Nikita") }.first
+
+    assert_no_match(/AND$/, update_sql)
+  end
+
+  def test_default_scope_doesnt_run_on_increment
+    dev = DeveloperwithDefaultMentorScopeNot.create!(name: "Eileen")
+    update_sql = capture_sql { dev.increment!(:salary) }.first
+
+    assert_no_match(/mentor_id/, update_sql)
+  end
+
+  def test_default_scope_with_all_queries_runs_on_increment
+    dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen")
+    update_sql = capture_sql { dev.increment!(:salary) }.first
+
+    assert_match(/mentor_id/, update_sql)
+  end
+
   def test_default_scope_doesnt_run_on_destroy
     Mentor.create!
     dev = DeveloperwithDefaultMentorScopeNot.create!(name: "Eileen")
@@ -153,9 +286,16 @@ class DefaultScopingTest < ActiveRecord::TestCase
   def test_default_scope_with_all_queries_runs_on_destroy
     Mentor.create!
     dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen")
-    destroy_sql = capture_sql { dev.destroy }.first
+    destroy_sql = capture_sql { dev.destroy }.second
 
     assert_match(/mentor_id/, destroy_sql)
+  end
+
+  def test_nilable_default_scope_with_all_queries_runs_on_destroy
+    dev = DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita")
+    destroy_sql = capture_sql { dev.destroy }.first
+
+    assert_no_match(/AND$/, destroy_sql)
   end
 
   def test_default_scope_doesnt_run_on_reload
@@ -174,11 +314,49 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_match(/mentor_id/, reload_sql)
   end
 
+  def test_default_scope_with_all_queries_runs_on_reload_but_default_scope_without_all_queries_does_not
+    Mentor.create!
+    dev = DeveloperWithIncludedMentorDefaultScopeNotAllQueriesAndDefaultScopeFirmWithAllQueries.create!(name: "Eileen")
+    reload_sql = capture_sql { dev.reload }.first
+
+    assert_no_match(/mentor_id/, reload_sql)
+    assert_match(/firm_id/, reload_sql)
+  end
+
+  def test_nilable_default_scope_with_all_queries_runs_on_reload
+    dev = DeveloperWithDefaultNilableFirmScopeAllQueries.create!(name: "Nikita")
+    reload_sql = capture_sql { dev.reload }.first
+
+    assert_no_match(/AND$/, reload_sql)
+  end
+
   def test_default_scope_with_all_queries_doesnt_run_on_destroy_when_unscoped
     dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen", mentor_id: 2)
     reload_sql = capture_sql { dev.reload({ unscoped: true }) }.first
 
     assert_no_match(/mentor_id/, reload_sql)
+  end
+
+  def test_default_scope_with_all_queries_does_not_apply_current_scope_on_reload
+    dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen", salary: 80000)
+
+    reload_sql = DeveloperWithDefaultMentorScopeAllQueries.where(salary: 80000).scoping do
+      capture_sql { dev.reload }.first
+    end
+
+    assert_match(/mentor_id/, reload_sql)
+    assert_no_match(/salary/, reload_sql)
+  end
+
+  def test_default_scope_with_all_queries_applies_all_queries_current_scope_on_reload
+    dev = DeveloperWithDefaultMentorScopeAllQueries.create!(name: "Eileen", salary: 80000)
+
+    reload_sql = DeveloperWithDefaultMentorScopeAllQueries.where(salary: 80000).scoping(all_queries: true) do
+      capture_sql { dev.reload }.first
+    end
+
+    assert_match(/mentor_id/, reload_sql)
+    assert_match(/salary/, reload_sql)
   end
 
   def test_scope_overwrites_default
@@ -202,7 +380,7 @@ class DefaultScopingTest < ActiveRecord::TestCase
   def test_unscope_overrides_default_scope
     expected = Developer.all.collect { |dev| [dev.name, dev.id] }
     received = DeveloperCalledJamis.unscope(:where).collect { |dev| [dev.name, dev.id] }
-    assert_equal expected, received
+    assert_equal_unordered expected, received
   end
 
   def test_unscope_after_reordering_and_combining
@@ -344,6 +522,20 @@ class DefaultScopingTest < ActiveRecord::TestCase
     assert_equal expected, received
   end
 
+  def test_unscope_eager_load
+    expected = Developer.all.collect(&:name)
+    received = Developer.eager_load(:projects).select(:id).unscope(:eager_load, :select)
+    assert_equal expected, received.collect(&:name)
+    assert_equal false, received.first.projects.loaded?
+  end
+
+  def test_unscope_preloads
+    expected = Developer.all.collect(&:name)
+    received = Developer.preload(:projects).select(:id).unscope(:preload, :select)
+    assert_equal expected, received.collect(&:name)
+    assert_equal false, received.first.projects.loaded?
+  end
+
   def test_unscope_having
     expected = DeveloperOrderedBySalary.all.collect(&:name)
     received = DeveloperOrderedBySalary.having("name IN ('Jamis', 'David')").unscope(:having).collect(&:name)
@@ -362,7 +554,7 @@ class DefaultScopingTest < ActiveRecord::TestCase
 
   def test_unscope_errors_with_invalid_value
     assert_raises(ArgumentError) do
-      Developer.includes(:projects).where(name: "Jamis").unscope(:stupidly_incorrect_value)
+      Developer.includes(:projects).where(name: "Jamis").unscope(:incorrect_value)
     end
 
     assert_raises(ArgumentError) do
@@ -624,48 +816,105 @@ class DefaultScopingTest < ActiveRecord::TestCase
   end
 
   def test_with_abstract_class_scope_should_be_executed_in_correct_context
-    vegetarian_pattern = /#{Regexp.escape(Lion.connection.quote_table_name("lions.is_vegetarian"))}/i
-    gender_pattern     = /#{Regexp.escape(Lion.connection.quote_table_name("lions.gender"))}/i
-
-    assert_match vegetarian_pattern, Lion.all.to_sql
-    assert_match gender_pattern, Lion.female.to_sql
+    assert_match %r/#{Regexp.escape(quote_table_name("lions.is_vegetarian"))}/i, Lion.all.to_sql
+    assert_match %r/#{Regexp.escape(quote_table_name("lions.gender"))}/i, Lion.female.to_sql
   end
+
+  def test_default_scopes_are_ractor_shareable
+    model = ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+      Class.new(ActiveRecord::Base) do
+        def self.name = "ractor_safe_posts"
+        self.table_name = "posts"
+
+        default_scope -> { ractor_safe }
+
+        def self.ractor_safe
+          where(type: "ractor_safe")
+        end
+      end
+    end
+
+    select_sql = capture_sql { model.all.to_a }.first
+
+    assert_match(/type/, select_sql)
+    assert_ractor_shareable model.default_scopes
+  end
+
+  def test_scope_attributes_with_a_private_default_scope_override
+    model = model_with_private_default_scope
+
+    assert_includes model.all.to_sql, "alpha"
+    assert model.scope_attributes?
+    assert_equal "alpha", model.new.title
+  end
+
+  def test_find_reevaluates_a_private_default_scope_override
+    model = model_with_private_default_scope
+    alpha = model.unscoped.create!(title: "alpha", body: "")
+    beta = model.unscoped.create!(title: "beta", body: "")
+
+    assert_equal alpha, model.find(alpha.id)
+
+    model.scoped_title = "beta"
+
+    assert_equal beta, model.find(beta.id)
+    assert_raises(ActiveRecord::RecordNotFound) { model.find(alpha.id) }
+    assert_nil model.find_by(id: alpha.id)
+  end
+
+  private
+    def model_with_private_default_scope
+      Class.new(ActiveRecord::Base) do
+        def self.name = "post_with_private_default_scope"
+        self.table_name = "posts"
+
+        singleton_class.attr_accessor :scoped_title
+        self.scoped_title = "alpha"
+
+        def self.default_scope
+          where(title: scoped_title)
+        end
+        private_class_method :default_scope
+      end
+    end
 end
 
 class DefaultScopingWithThreadTest < ActiveRecord::TestCase
-  self.use_transactional_tests = false
+  unless in_memory_db?
+    self.use_transactional_tests = false
 
-  def test_default_scoping_with_threads
-    2.times do
-      Thread.new {
-        assert_includes DeveloperOrderedBySalary.all.to_sql, "salary DESC"
-        DeveloperOrderedBySalary.connection.close
-      }.join
+    def test_default_scoping_with_threads
+      2.times do
+        Thread.new {
+          assert_includes DeveloperOrderedBySalary.all.to_sql, "salary DESC"
+          DeveloperOrderedBySalary.lease_connection.close
+        }.join
+      end
+    end
+
+    def test_default_scope_is_threadsafe
+      2.times { ThreadsafeDeveloper.unscoped.create! }
+
+      threads = []
+      assert_not_equal 1, ThreadsafeDeveloper.unscoped.count
+
+      barrier_1 = Concurrent::CyclicBarrier.new(2)
+      barrier_2 = Concurrent::CyclicBarrier.new(2)
+
+      threads << Thread.new do
+        Thread.current[:default_scope_delay] = -> { barrier_1.wait; barrier_2.wait }
+        assert_equal 1, ThreadsafeDeveloper.all.to_a.count
+        ThreadsafeDeveloper.lease_connection.close
+      end
+      threads << Thread.new do
+        Thread.current[:default_scope_delay] = -> { barrier_2.wait }
+        barrier_1.wait
+        assert_equal 1, ThreadsafeDeveloper.all.to_a.count
+        ThreadsafeDeveloper.lease_connection.close
+      end
+      threads.each(&:join)
+    ensure
+      ThreadsafeDeveloper.unscoped.destroy_all
     end
   end
-
-  def test_default_scope_is_threadsafe
-    2.times { ThreadsafeDeveloper.unscoped.create! }
-
-    threads = []
-    assert_not_equal 1, ThreadsafeDeveloper.unscoped.count
-
-    barrier_1 = Concurrent::CyclicBarrier.new(2)
-    barrier_2 = Concurrent::CyclicBarrier.new(2)
-
-    threads << Thread.new do
-      Thread.current[:default_scope_delay] = -> { barrier_1.wait; barrier_2.wait }
-      assert_equal 1, ThreadsafeDeveloper.all.to_a.count
-      ThreadsafeDeveloper.connection.close
-    end
-    threads << Thread.new do
-      Thread.current[:default_scope_delay] = -> { barrier_2.wait }
-      barrier_1.wait
-      assert_equal 1, ThreadsafeDeveloper.all.to_a.count
-      ThreadsafeDeveloper.connection.close
-    end
-    threads.each(&:join)
-  ensure
-    ThreadsafeDeveloper.unscoped.destroy_all
-  end
-end unless in_memory_db?
+end

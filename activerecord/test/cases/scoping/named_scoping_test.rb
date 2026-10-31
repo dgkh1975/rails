@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "cases/helper"
+require "active_support/core_ext/object/with"
 require "models/post"
 require "models/topic"
 require "models/comment"
@@ -24,7 +25,7 @@ class NamedScopingTest < ActiveRecord::TestCase
   def test_found_items_are_cached
     all_posts = Topic.base
 
-    assert_queries(1) do
+    assert_queries_count(1) do
       all_posts.collect { true }
       all_posts.collect { true }
     end
@@ -46,6 +47,30 @@ class NamedScopingTest < ActiveRecord::TestCase
     assert_equal Topic.first,                   Topic.base.first
     assert_equal Topic.count,                   Topic.base.count
     assert_equal Topic.average(:replies_count), Topic.base.average(:replies_count)
+  end
+
+  def test_scope_defined_with_shareable_proc_is_ractor_safe
+    scope_class = Class.new(Topic)
+    ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+      assert_nothing_raised do
+        scope_class.scope :ractor_approved, -> { where(approved: true) }
+      end
+    end
+    assert scope_class.respond_to?(:ractor_approved)
+    assert_kind_of ActiveRecord::Relation, scope_class.ractor_approved
+    assert_match(/approved/, scope_class.ractor_approved.to_sql)
+  end
+
+  if RUBY_VERSION >= "4"
+    def test_scope_with_unshareable_proc_is_rejected_when_ractor_safe
+      scope_class = Class.new(Topic)
+      unshareable = +"approved"
+      ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+        assert_raises(Ractor::IsolationError) do
+          scope_class.scope :ractor_unsafe, -> { where(unshareable => true) }
+        end
+      end
+    end
   end
 
   def test_calling_merge_at_first_in_scope
@@ -227,7 +252,7 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_empty_should_not_load_results
     topics = Topic.base
-    assert_queries(2) do
+    assert_queries_count(2) do
       topics.empty?  # use count query
       topics.load    # force load
       topics.empty?  # use loaded (no query)
@@ -236,7 +261,7 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_any_should_not_load_results
     topics = Topic.base
-    assert_queries(2) do
+    assert_queries_count(2) do
       topics.any?    # use count query
       topics.load    # force load
       topics.any?    # use loaded (no query)
@@ -245,7 +270,7 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_any_should_call_proxy_found_if_using_a_block
     topics = Topic.base
-    assert_queries(1) do
+    assert_queries_count(1) do
       assert_not_called(topics, :empty?) do
         topics.any? { true }
       end
@@ -255,7 +280,7 @@ class NamedScopingTest < ActiveRecord::TestCase
   def test_any_should_not_fire_query_if_scope_loaded
     topics = Topic.base
     topics.load # force load
-    assert_no_queries { assert topics.any? }
+    assert_no_queries { assert_predicate topics, :any? }
   end
 
   def test_model_class_should_respond_to_any
@@ -266,7 +291,7 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_many_should_not_load_results
     topics = Topic.base
-    assert_queries(2) do
+    assert_queries_count(2) do
       topics.many?   # use count query
       topics.load    # force load
       topics.many?   # use loaded (no query)
@@ -275,7 +300,7 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_many_should_call_proxy_found_if_using_a_block
     topics = Topic.base
-    assert_queries(1) do
+    assert_queries_count(1) do
       assert_not_called(topics, :size) do
         topics.many? { true }
       end
@@ -285,7 +310,7 @@ class NamedScopingTest < ActiveRecord::TestCase
   def test_many_should_not_fire_query_if_scope_loaded
     topics = Topic.base
     topics.load # force load
-    assert_no_queries { assert topics.many? }
+    assert_no_queries { assert_predicate topics, :many? }
   end
 
   def test_many_should_return_false_if_none_or_one
@@ -363,7 +388,6 @@ class NamedScopingTest < ActiveRecord::TestCase
       :protected,
       :private,
       :name,
-      :parent,
       :superclass
     ]
 
@@ -428,8 +452,8 @@ class NamedScopingTest < ActiveRecord::TestCase
 
   def test_size_should_use_count_when_results_are_not_loaded
     topics = Topic.base
-    assert_queries(1) do
-      assert_sql(/COUNT/i) { topics.size }
+    assert_queries_count(1) do
+      assert_queries_match(/COUNT/i) { topics.size }
     end
   end
 
@@ -495,13 +519,13 @@ class NamedScopingTest < ActiveRecord::TestCase
   def test_scopes_batch_finders
     assert_equal 4, Topic.approved.count
 
-    assert_queries(5) do
-      Topic.approved.find_each(batch_size: 1) { |t| assert t.approved? }
+    assert_queries_count(5) do
+      Topic.approved.find_each(batch_size: 1) { |t| assert_predicate t, :approved? }
     end
 
-    assert_queries(3) do
+    assert_queries_count(3) do
       Topic.approved.find_in_batches(batch_size: 2) do |group|
-        group.each { |t| assert t.approved? }
+        group.each { |t| assert_predicate t, :approved? }
       end
     end
   end
@@ -509,26 +533,6 @@ class NamedScopingTest < ActiveRecord::TestCase
   def test_table_names_for_chaining_scopes_with_and_without_table_name_included
     assert_nothing_raised do
       Comment.for_first_post.for_first_author.to_a
-    end
-  end
-
-  def test_scopes_with_reserved_names
-    class << Topic
-      def public_method; end
-      public :public_method
-
-      def protected_method; end
-      protected :protected_method
-
-      def private_method; end
-      private :private_method
-    end
-
-    [:public_method, :protected_method, :private_method].each do |reserved_method|
-      assert Topic.respond_to?(reserved_method, true)
-      assert_called(ActiveRecord::Base.logger, :warn) do
-        silence_warnings { Topic.scope(reserved_method, -> { }) }
-      end
     end
   end
 
@@ -548,19 +552,19 @@ class NamedScopingTest < ActiveRecord::TestCase
   end
 
   def test_nested_scopes_queries_size
-    assert_queries(1) do
+    assert_queries_count(1) do
       Topic.approved.by_lifo.replied.written_before(Time.now).to_a
     end
   end
 
   # Note: these next two are kinda odd because they are essentially just testing that the
-  # query cache works as it should, but they are here for legacy reasons as they was previously
+  # query cache works as it should, but they are here for legacy reasons as there was previously
   # a separate cache on association proxies, and these show that that is not necessary.
   def test_scopes_are_cached_on_associations
     post = posts(:welcome)
 
     Post.cache do
-      assert_queries(1) { post.comments.containing_the_letter_e.to_a }
+      assert_queries_count(1) { post.comments.containing_the_letter_e.to_a }
       assert_no_queries { post.comments.containing_the_letter_e.to_a }
     end
   end
@@ -569,10 +573,10 @@ class NamedScopingTest < ActiveRecord::TestCase
     post = posts(:welcome)
 
     Post.cache do
-      one = assert_queries(1) { post.comments.limit_by(1).to_a }
+      one = assert_queries_count(1) { post.comments.limit_by(1).to_a }
       assert_equal 1, one.size
 
-      two = assert_queries(1) { post.comments.limit_by(2).to_a }
+      two = assert_queries_count(1) { post.comments.limit_by(2).to_a }
       assert_equal 2, two.size
 
       assert_no_queries { post.comments.limit_by(1).to_a }
@@ -614,7 +618,7 @@ class NamedScopingTest < ActiveRecord::TestCase
   end
 
   def test_subclass_merges_scopes_properly
-    assert_equal 1, SpecialComment.where(body: "go crazy").created.count
+    assert_equal 1, SpecialComment.where(body: "go wild").created.count
   end
 
   def test_model_class_should_respond_to_extending
@@ -642,8 +646,18 @@ class NamedScopingTest < ActiveRecord::TestCase
       scope :including_annotate_in_scope, Proc.new { annotate("from-scope") }
     end
 
-    assert_sql(%r{/\* from-scope \*/}) do
-      assert Topic.including_annotate_in_scope.to_a, Topic.all.to_a
+    assert_queries_match(%r{/\* from-scope \*/}) do
+      assert_equal_unordered Topic.including_annotate_in_scope.to_a, Topic.all.to_a
     end
+  end
+
+  def test_default_extensions_does_not_build_scope_without_default_scope
+    assert_not_called(Post, :scope_for_association) do
+      assert_equal [], Post.default_extensions
+    end
+  end
+
+  def test_default_extensions_with_default_scope
+    assert_equal [Comment::OopsExtension], Comment.default_extensions
   end
 end

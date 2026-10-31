@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 6.0 Release Notes
 ===============================
@@ -11,7 +11,7 @@ Highlights in Rails 6.0:
 * Action Cable Testing
 
 These release notes cover only the major changes. To learn about various bug
-fixes and changes, please refer to the change logs or check out the [list of
+fixes and changes, please refer to the changelogs or check out the [list of
 commits](https://github.com/rails/rails/commits/6-0-stable) in the main Rails
 repository on GitHub.
 

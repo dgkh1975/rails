@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "rails/generators/erb"
 require "rails/generators/resource_helpers"
 
@@ -22,7 +23,7 @@ module Erb # :nodoc:
           end
         end
 
-        template "partial.html.erb", File.join("app/views", controller_file_path, "_#{singular_table_name}.html.erb")
+        template "partial.html.erb", File.join("app/views", controller_file_path, "_#{singular_name}.html.erb")
       end
 
     private

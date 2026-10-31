@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "support/system_helper"
 require "selenium/webdriver"
 
 class SetDriverToRackTestTest < DrivenByRackTest
@@ -14,6 +15,14 @@ class OverrideSeleniumSubclassToRackTestTest < DrivenBySeleniumWithChrome
 
   test "uses rack_test" do
     assert_equal :rack_test, Capybara.current_driver
+  end
+end
+
+class OverrideDriverWithExplicitName < DrivenBySeleniumWithChrome
+  driven_by :selenium, options: { name: :best_driver }
+
+  test "uses specified driver name" do
+    assert_equal :best_driver, Capybara.current_driver
   end
 end
 
@@ -32,15 +41,5 @@ end
 class SetDriverToSeleniumHeadlessFirefoxTest < DrivenBySeleniumWithHeadlessFirefox
   test "uses selenium headless firefox" do
     assert_equal :selenium, Capybara.current_driver
-  end
-end
-
-class SetHostTest < DrivenByRackTest
-  test "overrides host" do
-    assert_deprecated do
-      host! "http://example.com"
-    end
-
-    assert_equal "http://example.com", Capybara.app_host
   end
 end

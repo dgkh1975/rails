@@ -3,8 +3,12 @@
 module ActiveRecord
   module Associations
     class JoinDependency # :nodoc:
-      autoload :JoinBase,        "active_record/associations/join_dependency/join_base"
-      autoload :JoinAssociation, "active_record/associations/join_dependency/join_association"
+      extend ActiveSupport::Autoload
+
+      eager_autoload do
+        autoload :JoinBase
+        autoload :JoinAssociation
+      end
 
       class Aliases # :nodoc:
         def initialize(tables)
@@ -50,6 +54,8 @@ module ActiveRecord
         case associations
         when Symbol, String
           hash[associations.to_sym] ||= {}
+        when Reflection::AbstractReflection
+          hash[associations] ||= {}
         when Array
           associations.each do |assoc|
             walk_tree assoc, hash
@@ -57,7 +63,7 @@ module ActiveRecord
         when Hash
           associations.each do |k, v|
             cache = hash[k] ||= {}
-            walk_tree v, cache
+            walk_tree v, cache if v
           end
         else
           raise ConfigurationError, associations.inspect
@@ -68,6 +74,7 @@ module ActiveRecord
         tree = self.class.make_tree associations
         @join_root = JoinBase.new(base, table, build(tree, base))
         @join_type = join_type
+        @remappers = {}
       end
 
       def base_klass
@@ -98,8 +105,11 @@ module ActiveRecord
         }
       end
 
+      EMPTY_HASH = {}.freeze
+      private_constant :EMPTY_HASH
+
       def instantiate(result_set, strict_loading_value, &block)
-        primary_key = aliases.column_alias(join_root, join_root.primary_key)
+        primary_key = Array(join_root.primary_key).map { |column| aliases.column_alias(join_root, column) }
 
         seen = Hash.new { |i, parent|
           i[parent] = Hash.new { |j, child_class|
@@ -111,19 +121,19 @@ module ActiveRecord
         parents = model_cache[join_root]
 
         column_aliases = aliases.column_aliases(join_root)
-        column_names = []
 
-        result_set.columns.each do |name|
-          column_names << name unless /\At\d+_r\d+\z/.match?(name)
+        column_names = result_set.columns.reject do |name|
+          /\At\d+_r\d+\z/.match?(name)
         end
 
         if column_names.empty?
-          column_types = {}
+          column_types = EMPTY_HASH
         else
           column_types = result_set.column_types
           unless column_types.empty?
             attribute_types = join_root.attribute_types
-            column_types = column_types.slice(*column_names).delete_if { |k, _| attribute_types.key?(k) }
+            column_types = column_types.slice(*column_names).delete_if { |k, _| attribute_types.key?(k) }.freeze
+            column_types = EMPTY_HASH if column_types.empty?
           end
           column_aliases += column_names.map! { |name| Aliases::Column.new(name, name) }
         end
@@ -135,12 +145,17 @@ module ActiveRecord
           class_name: join_root.base_klass.name
         }
 
+        primary_key_indexes = primary_key.map { |name| result_set.column_indexes.fetch(name) }.freeze
+        remapper = ActiveModel::IndexedRow::Remapper.new(result_set.column_indexes, column_aliases.map(&:alias), column_aliases.map(&:name))
+
         message_bus.instrument("instantiation.active_record", payload) do
-          result_set.each { |row_hash|
-            parent_key = primary_key ? row_hash[primary_key] : row_hash
-            parent = parents[parent_key] ||= join_root.instantiate(row_hash, column_aliases, column_types, &block)
-            construct(parent, join_root, row_hash, seen, model_cache, strict_loading_value)
-          }
+          result_set.indexed_rows.each do |indexed_row|
+            row = indexed_row.row
+            parent_key = primary_key_indexes.empty? ? row : row.values_at(*primary_key_indexes)
+
+            parent = parents[parent_key] ||= join_root.instantiate(remapper.build(indexed_row), column_types, &block)
+            construct(parent, join_root, indexed_row, seen, model_cache, strict_loading_value)
+          end
         end
 
         parents.values
@@ -164,8 +179,7 @@ module ActiveRecord
         def aliases
           @aliases ||= Aliases.new join_root.each_with_index.map { |join_part, i|
             column_names = if join_part == join_root && !join_root_alias
-              primary_key = join_root.primary_key
-              primary_key ? [primary_key] : []
+              Array(join_root.primary_key)
             else
               join_part.column_names
             end
@@ -186,12 +200,13 @@ module ActiveRecord
         def make_constraints(parent, child, join_type)
           foreign_table = parent.table
           foreign_klass = parent.base_klass
-          child.join_constraints(foreign_table, foreign_klass, join_type, alias_tracker) do |reflection|
-            table, terminated = @joined_tables[reflection]
+          child.join_constraints(foreign_table, foreign_klass, join_type, alias_tracker) do |reflection, remaining_reflection_chain|
+            joined_table_key = [foreign_table, remaining_reflection_chain]
+            table, terminated = @joined_tables[joined_table_key]
             root = reflection == child.reflection
 
             if table && (!root || !terminated)
-              @joined_tables[reflection] = [table, root] if root
+              @joined_tables[joined_table_key] = [table, root] if root
               next table, true
             end
 
@@ -202,7 +217,7 @@ module ActiveRecord
               root ? name : "#{name}_join"
             end
 
-            @joined_tables[reflection] ||= [table, root] if join_type == Arel::Nodes::OuterJoin
+            @joined_tables[joined_table_key] ||= [table, root] if join_type == Arel::Nodes::OuterJoin
             table
           end.concat child.children.flat_map { |c| make_constraints(child, c, join_type) }
         end
@@ -223,13 +238,15 @@ module ActiveRecord
 
         def build(associations, base_klass)
           associations.map do |name, right|
-            reflection = find_reflection base_klass, name
+            reflection = name.is_a?(Reflection::AbstractReflection) ? name : find_reflection(base_klass, name)
             reflection.check_validity!
             reflection.check_eager_loadable!
 
             if reflection.polymorphic?
               raise EagerLoadPolymorphicError.new(reflection)
             end
+
+            Deprecation.guard(reflection) { "referenced in query to join its table" }
 
             JoinAssociation.new(reflection, build(right, reflection.klass))
           end
@@ -248,35 +265,46 @@ module ActiveRecord
               next
             end
 
-            key = aliases.column_alias(node, node.primary_key)
-            id = row[key]
-            if id.nil?
+            if node.primary_key
+              keys = Array(node.primary_key).map { |column| aliases.column_alias(node, column) }
+              id = keys.map { |key| row[key] }
+            else
+              keys = node.destination_key(parent.base_klass).map { |column| aliases.column_alias(node, column) }
+              id = keys.map { nil } # Avoid id-based model caching.
+            end
+
+            if keys.any? { |key| row[key].nil? }
               nil_association = ar_parent.association(node.reflection.name)
               nil_association.loaded!
               next
             end
 
-            model = seen[ar_parent][node][id]
-
-            if model
-              construct(model, node, row, seen, model_cache, strict_loading_value)
-            else
+            unless model = seen[ar_parent][node][id]
               model = construct_model(ar_parent, node, row, model_cache, id, strict_loading_value)
-
-              seen[ar_parent][node][id] = model
-              construct(model, node, row, seen, model_cache, strict_loading_value)
+              seen[ar_parent][node][id] = model if id
             end
+
+            construct(model, node, row, seen, model_cache, strict_loading_value)
+          end
+        end
+
+        def remapper(node, indexes)
+          @remappers[node] ||= begin
+            column_aliases = aliases.column_aliases(node)
+            ActiveModel::IndexedRow::Remapper.new(indexes, column_aliases.map(&:alias), column_aliases.map(&:name))
           end
         end
 
         def construct_model(record, node, row, model_cache, id, strict_loading_value)
           other = record.association(node.reflection.name)
 
-          model = model_cache[node][id] ||=
-            node.instantiate(row, aliases.column_aliases(node)) do |m|
+          unless model = model_cache[node][id]
+            model = node.instantiate(remapper(node, row.indexes).build(row)) do |m|
               m.strict_loading! if strict_loading_value
               other.set_inverse_instance(m)
             end
+            model_cache[node][id] = model if id
+          end
 
           if node.reflection.collection?
             other.target.push(model)

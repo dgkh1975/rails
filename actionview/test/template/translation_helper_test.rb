@@ -20,6 +20,7 @@ class TranslationHelperTest < ActiveSupport::TestCase
       translations: {
         templates: {
           found: { foo: "Foo" },
+          found_with_scope: { foo: { bar: "Foo Bar From Scope" } },
           found_yield_single_argument: { foo: "Foo" },
           found_yield_block: { foo: "Foo" },
           array: { foo: { bar: "Foo Bar" } },
@@ -37,11 +38,12 @@ class TranslationHelperTest < ActiveSupport::TestCase
           one: "<a>One %{count}</a>",
           other: "<a>Other %{count}</a>"
         }
-      }
+      },
+      scoped: { foo: "Scoped Foo" },
+      foo: { translations: { templates: { double_relative: { bar: "Double Relative!" } } } }
     )
     view_paths = ActionController::Base.view_paths
     view_paths.each(&:clear_cache)
-    ActionView::LookupContext.fallbacks.each(&:clear_cache)
     @view = ::ActionView::Base.with_empty_template_cache.with_view_paths(view_paths, {})
   end
 
@@ -66,7 +68,7 @@ class TranslationHelperTest < ActiveSupport::TestCase
 
   def test_delegates_localize_to_i18n
     @time = Time.utc(2008, 7, 8, 12, 18, 38)
-    assert_called_with(I18n, :localize, [@time, locale: "en"]) do
+    assert_called_with(I18n, :localize, [@time], locale: "en") do
       localize @time, locale: "en"
     end
     assert_equal "Tue, 08 Jul 2008 12:18:38 +0000", localize(@time, locale: "en")
@@ -118,25 +120,6 @@ class TranslationHelperTest < ActiveSupport::TestCase
     assert_equal expected, translate(:"translations.missing", year: "2015", scope: %i(scoped))
   end
 
-  def test_raises_missing_translation_message_with_raise_config_option
-    ActionView::Base.raise_on_missing_translations = true
-
-    assert_raise(I18n::MissingTranslationData) do
-      translate("translations.missing")
-    end
-  ensure
-    ActionView::Base.raise_on_missing_translations = false
-  end
-
-  def test_raise_arg_overrides_raise_config_option
-    ActionView::Base.raise_on_missing_translations = true
-
-    expected = "translation missing: en.translations.missing"
-    assert_equal expected, translate(:"translations.missing", raise: false)
-  ensure
-    ActionView::Base.raise_on_missing_translations = false
-  end
-
   def test_raises_missing_translation_message_with_raise_option
     assert_raise(I18n::MissingTranslationData) do
       translate(:"translations.missing", raise: true)
@@ -159,11 +142,6 @@ class TranslationHelperTest < ActiveSupport::TestCase
     I18n.exception_handler = old_exception_handler
   end
 
-  def test_hash_default
-    default = { separator: ".", delimiter: "," }
-    assert_equal default, translate(:'special.number.format', default: default)
-  end
-
   def test_translation_returning_an_array
     expected = %w(foo bar)
     assert_equal expected, translate(:"translations.array")
@@ -171,6 +149,41 @@ class TranslationHelperTest < ActiveSupport::TestCase
 
   def test_finds_translation_scoped_by_partial
     assert_equal "Foo", view.render(template: "translations/templates/found").strip
+  end
+
+  def test_finds_translation_scoped_by_partial_via_scope_option
+    assert_equal "Foo Bar From Scope", view.render(template: "translations/templates/found_with_scope").strip
+  end
+
+  def test_relative_key_takes_precedence_over_relative_scope
+    assert_equal "Double Relative!", view.render(template: "translations/templates/double_relative").strip
+  end
+
+  def test_relative_scope_option_raises_without_virtual_path
+    error = assert_raises(RuntimeError) do
+      translate("foo", scope: ".bar")
+    end
+    assert_match(/Cannot use scope: "\.bar" shortcut because path is not available/, error.message)
+  end
+
+  def test_relative_symbol_scope_option_raises_without_virtual_path
+    error = assert_raises(RuntimeError) do
+      translate("foo", scope: :".bar")
+    end
+    assert_match(/Cannot use scope: :"\.bar" shortcut because path is not available/, error.message)
+  end
+
+  def test_absolute_string_scope_option_is_unaffected
+    assert_equal "Scoped Foo", translate(:foo, scope: "scoped")
+  end
+
+  def test_absolute_symbol_scope_option_is_unaffected
+    assert_equal "Scoped Foo", translate(:foo, scope: :scoped)
+  end
+
+  def test_array_scope_option_is_unaffected
+    expected = '<span class="translation_missing" title="translation missing: en.scoped.translations.missing, year: 2015">Missing</span>'
+    assert_equal expected, translate(:"translations.missing", year: "2015", scope: %i(scoped))
   end
 
   def test_finds_translation_scoped_by_partial_yielding_single_argument_block
@@ -195,6 +208,28 @@ class TranslationHelperTest < ActiveSupport::TestCase
 
   def test_default_lookup_scoped_by_partial
     assert_equal "Foo", view.render(template: "translations/templates/default").strip
+  end
+
+  def test_missing_translation_reported_to_i18n_exception_handler
+    previous_handler = I18n.exception_handler
+
+    calls = []
+    I18n.exception_handler = ->(*args) { calls << args }
+    view.render(template: "translations/templates/missing")
+
+    first_call = calls.first
+    assert_not_nil first_call
+    exception = first_call.first
+    assert_instance_of I18n::MissingTranslation, exception
+    assert_equal "translations.templates.missing.missing", exception.key
+
+    assert_equal 1, calls.size
+
+    assert_nothing_raised do
+      previous_handler.call(*first_call)
+    end
+  ensure
+    I18n.exception_handler = previous_handler
   end
 
   def test_missing_translation_scoped_by_partial
@@ -329,6 +364,27 @@ class TranslationHelperTest < ActiveSupport::TestCase
     assert_equal "A Generic String", translation
   end
 
+  def test_translate_with_interpolated_string_default
+    translation = translate(:"translations.missing", default: "An %{kind} String", kind: "Interpolated")
+    assert_equal "An Interpolated String", translation
+  end
+
+  def test_translate_with_hash_default
+    hash = { one: "%{count} thing", other: "%{count} things" }
+    assert_equal hash, translate(:"translations.missing", default: hash)
+  end
+
+  def test_translate_with_hash_default_and_count
+    hash = { one: "%{count} thing", other: "%{count} things" }
+    assert_equal "1 thing", translate(:"translations.missing", default: hash, count: 1)
+    assert_equal "2 things", translate(:"translations.missing", default: hash, count: 2)
+  end
+
+  def test_translate_with_proc_default
+    translation = translate(:"translations.missing", default: Proc.new { "From Proc" })
+    assert_equal "From Proc", translation
+  end
+
   def test_translate_with_object_default
     translation = translate(:'translations.missing', default: 123)
     assert_equal 123, translation
@@ -389,5 +445,27 @@ class TranslationHelperTest < ActiveSupport::TestCase
     options = {}
     translate(:"translations.missing", **options)
     assert_equal({}, options)
+  end
+
+  def test_translate_caching_backend
+    caching_backend = Class.new(I18n::Backend::Simple) do
+      include I18n::Backend::Cache
+    end
+
+    previous_backend = I18n.backend
+    previous_cache_store = I18n.cache_store
+
+    I18n.backend = caching_backend.new
+    I18n.backend.store_translations(:en, translations: { foo: "Foo" })
+    I18n.cache_store = ActiveSupport::Cache.lookup_store(:memory_store)
+
+    assert_equal "Foo", translate(:"translations.foo")
+
+    expected = '<span class="translation_missing" title="translation missing: en.translations.missing">Missing</span>'
+    assert_equal expected, translate(:"translations.missing")
+    assert_equal expected, translate(:"translations.missing") # returns cached translation
+  ensure
+    I18n.backend = previous_backend
+    I18n.cache_store = previous_cache_store
   end
 end

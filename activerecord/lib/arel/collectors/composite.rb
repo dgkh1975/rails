@@ -1,13 +1,21 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Collectors
     class Composite
       attr_accessor :preparable
+      attr_reader :retryable
 
       def initialize(left, right)
         @left = left
         @right = right
+      end
+
+      def retryable=(retryable)
+        left.retryable = retryable
+        right.retryable = retryable
+        @retryable = retryable
       end
 
       def <<(str)
@@ -22,9 +30,9 @@ module Arel # :nodoc: all
         self
       end
 
-      def add_binds(binds, &block)
-        left.add_binds(binds, &block)
-        right.add_binds(binds, &block)
+      def add_binds(binds, proc_for_binds = nil, &block)
+        left.add_binds(binds, proc_for_binds, &block)
+        right.add_binds(binds, proc_for_binds, &block)
         self
       end
 

@@ -86,45 +86,58 @@ module FakeRecord
         "'#{thing.to_s.gsub("'", "\\\\'")}'"
       end
     end
+
+    def cast_bound_value(thing)
+      thing
+    end
   end
 
   class ConnectionPool
-    attr_reader :connection
-
     def initialize
       @connection = Connection.new
     end
 
+    def lease_connection
+      @connection
+    end
+
     def with_connection
-      yield connection
+      yield @connection
     end
 
     def table_exists?(name)
-      connection.tables.include? name.to_s
-    end
-
-    def columns_hash
-      connection.columns_hash
+      @connection.tables.include? name.to_s
     end
 
     def schema_cache
-      connection
+      @connection
     end
 
     def quote(thing)
-      connection.quote thing
+      @connection.quote thing
     end
   end
 
   class Base
     attr_accessor :connection_pool
+    singleton_class.attr_accessor :table_name
+
+    class << self
+      def type_caster
+        nil
+      end
+    end
 
     def initialize
       @connection_pool = ConnectionPool.new
     end
 
-    def connection
-      connection_pool.connection
+    def with_connection(...)
+      connection_pool.with_connection(...)
+    end
+
+    def lease_connection
+      connection_pool.lease_connection
     end
   end
 end

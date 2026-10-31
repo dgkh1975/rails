@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 3.0 Release Notes
 ===============================
@@ -155,7 +155,7 @@ Documentation
 
 The documentation in the Rails tree is being updated with all the API changes, additionally, the [Rails Edge Guides](https://edgeguides.rubyonrails.org/) are being updated one by one to reflect the changes in Rails 3.0. The guides at [guides.rubyonrails.org](https://guides.rubyonrails.org/) however will continue to contain only the stable version of Rails (at this point, version 2.3.5, until 3.0 is released).
 
-More Information: - [Rails Documentation Projects](https://weblog.rubyonrails.org/2009/1/15/rails-documentation-projects)
+More Information: - [Rails Documentation Projects](https://rubyonrails.org/2009/1/15/rails-documentation-projects)
 
 
 Internationalization
@@ -250,7 +250,7 @@ Deprecations:
 More Information:
 
 * [Render Options in Rails 3](https://blog.engineyard.com/2010/render-options-in-rails-3)
-* [Three reasons to love ActionController::Responder](https://weblog.rubyonrails.org/2009/8/31/three-reasons-love-responder)
+* [Three reasons to love ActionController::Responder](https://rubyonrails.org/2009/8/31/three-reasons-love-responder)
 
 
 ### Action Dispatch
@@ -338,7 +338,7 @@ Helpers that do something else, like `cache` or `content_for`, are not affected 
 #### Other Changes
 
 * You no longer need to call `h(string)` to escape HTML output, it is on by default in all view templates. If you want the unescaped string, call `raw(string)`.
-* Helpers now output HTML 5 by default.
+* Helpers now output HTML5 by default.
 * Form label helper now pulls values from I18n with a single value, so `f.label :name` will pull the `:name` translation.
 * I18n select label on should now be :en.helpers.select instead of :en.support.select.
 * You no longer need to place a minus sign at the end of a Ruby interpolation inside an ERB template to remove the trailing carriage return in the HTML output.

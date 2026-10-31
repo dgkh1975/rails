@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
-  class Service::Configurator #:nodoc:
+  class Service::Configurator # :nodoc:
     attr_reader :configurations
 
     def self.build(service_name, configurations)
@@ -19,6 +20,12 @@ module ActiveStorage
       )
     end
 
+    def inspect # :nodoc:
+      attrs = configurations.any? ?
+        " configurations=[#{configurations.keys.map(&:inspect).join(", ")}]" : ""
+      "#<#{self.class}#{attrs}>"
+    end
+
     private
       def config_for(name)
         configurations.fetch name do
@@ -27,8 +34,11 @@ module ActiveStorage
       end
 
       def resolve(class_name)
-        require "active_storage/service/#{class_name.to_s.underscore}_service"
-        ActiveStorage::Service.const_get(:"#{class_name.camelize}Service")
+        service_name = :"#{class_name.camelize}Service"
+        unless ActiveStorage::Service.const_defined?(service_name)
+          require "active_storage/service/#{class_name.to_s.underscore}_service"
+        end
+        ActiveStorage::Service.const_get(service_name)
       rescue LoadError
         raise "Missing service adapter for #{class_name.inspect}"
       end

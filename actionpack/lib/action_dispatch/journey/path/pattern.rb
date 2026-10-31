@@ -4,15 +4,24 @@ module ActionDispatch
   module Journey # :nodoc:
     module Path # :nodoc:
       class Pattern # :nodoc:
-        attr_reader :spec, :requirements, :anchored
+        REGEXP_CACHE = {} # rubocop:disable Style/MutableConstant
+
+        class << self
+          def dedup_regexp(regexp)
+            REGEXP_CACHE[regexp.source] ||= regexp
+          end
+        end
+
+        attr_reader :ast, :names, :requirements, :anchored, :spec
 
         def initialize(ast, requirements, separators, anchored)
-          @spec         = ast
+          @ast          = ast
+          @spec         = ast.root
           @requirements = requirements
           @separators   = separators
           @anchored     = anchored
 
-          @names          = nil
+          @names          = ast.names
           @optional_names = nil
           @required_names = nil
           @re             = nil
@@ -25,23 +34,23 @@ module ActionDispatch
 
         def eager_load!
           required_names
+          optional_names
+          requirements_for_missing_keys_check
           offsets
           to_regexp
-          nil
+          @ast = nil if @ast
         end
 
-        def ast
-          @spec.find_all(&:symbol?).each do |node|
-            re = @requirements[node.to_sym]
-            node.regexp = re if re
-          end
+        def freeze
+          eager_load!
 
-          @spec
+          super
         end
 
         def requirements_anchored?
-          # each required param must not be surrounded by a literal, otherwise it isn't simple to chunk-match the url piecemeal
-          terminals = ast.find_all { |t| t.is_a?(Nodes::Terminal) }
+          # each required param must not be surrounded by a literal, otherwise it isn't
+          # simple to chunk-match the url piecemeal
+          terminals = ast.terminals
 
           terminals.each_with_index { |s, index|
             next if index < 1
@@ -58,10 +67,6 @@ module ActionDispatch
           }
 
           true
-        end
-
-        def names
-          @names ||= spec.find_all(&:symbol?).map(&:name)
         end
 
         def required_names
@@ -83,7 +88,7 @@ module ActionDispatch
           end
 
           def accept(node)
-            %r{\A#{visit node}\Z}
+            Pattern.dedup_regexp(%r{\A#{visit node}\Z})
           end
 
           def visit_CAT(node)
@@ -126,7 +131,7 @@ module ActionDispatch
         class UnanchoredRegexp < AnchoredRegexp # :nodoc:
           def accept(node)
             path = visit node
-            path == "/" ? %r{\A/} : %r{\A#{path}(?:\b|\Z|/)}
+            path == "/" ? %r{\A/} : Pattern.dedup_regexp(%r{\A#{path}(?:\b|\Z|/)})
           end
         end
 
@@ -141,10 +146,6 @@ module ActionDispatch
 
           def captures
             Array.new(length - 1) { |i| self[i + 1] }
-          end
-
-          def named_captures
-            @names.zip(captures).to_h
           end
 
           def [](x)
@@ -185,7 +186,7 @@ module ActionDispatch
 
         def requirements_for_missing_keys_check
           @requirements_for_missing_keys_check ||= requirements.transform_values do |regex|
-            /\A#{regex}\Z/
+            Pattern.dedup_regexp(/\A#{regex}\Z/)
           end
         end
 
@@ -195,22 +196,22 @@ module ActionDispatch
           end
 
           def offsets
-            return @offsets if @offsets
+            @offsets ||= begin
+              offsets = [0]
 
-            @offsets = [0]
+              spec.find_all(&:symbol?).each do |node|
+                node = node.to_sym
 
-            spec.find_all(&:symbol?).each do |node|
-              node = node.to_sym
-
-              if @requirements.key?(node)
-                re = /#{Regexp.union(@requirements[node])}|/
-                @offsets.push((re.match("").length - 1) + @offsets.last)
-              else
-                @offsets << @offsets.last
+                if @requirements.key?(node)
+                  re = Pattern.dedup_regexp(/#{Regexp.union(@requirements[node])}|/)
+                  offsets.push((re.match("").length - 1) + offsets.last)
+                else
+                  offsets << offsets.last
+                end
               end
-            end
 
-            @offsets
+              offsets
+            end
           end
       end
     end

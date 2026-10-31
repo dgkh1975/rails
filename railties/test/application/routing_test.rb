@@ -22,6 +22,17 @@ module ApplicationTests
       assert_equal 200, last_response.status
     end
 
+    test "rails/welcome is not duplicated when routes reload in development" do
+      app("development")
+
+      3.times { Rails.application.reload_routes! }
+
+      welcome_routes = Rails.application.routes.routes.select do |route|
+        route.defaults[:controller] == "rails/welcome" && route.defaults[:action] == "index"
+      end
+      assert_equal 1, welcome_routes.size
+    end
+
     test "rails/info in development" do
       app("development")
       get "/rails/info"
@@ -30,14 +41,18 @@ module ApplicationTests
 
     test "rails/info/routes in development" do
       app("development")
-      get "/rails/info/routes"
-      assert_equal 200, last_response.status
+      quietly do
+        get "/rails/info/routes"
+        assert_equal 200, last_response.status
+      end
     end
 
     test "rails/info/properties in development" do
       app("development")
-      get "/rails/info/properties"
-      assert_equal 200, last_response.status
+      quietly do
+        get "/rails/info/properties"
+        assert_equal 200, last_response.status
+      end
     end
 
     test "/rails/info routes are accessible with globbing route present" do
@@ -108,30 +123,53 @@ module ApplicationTests
 
     test "rails/welcome in production" do
       app("production")
-      get "/"
-      assert_equal 404, last_response.status
+      quietly do
+        get("/", {}, "HTTPS" => "on")
+        assert_equal 404, last_response.status
+      end
     end
 
     test "rails/info in production" do
       app("production")
-      get "/rails/info"
-      assert_equal 404, last_response.status
+      quietly do
+        get("/rails/info", {}, "HTTPS" => "on")
+        assert_equal 404, last_response.status
+      end
     end
 
     test "rails/info/routes in production" do
       app("production")
-      get "/rails/info/routes"
-      assert_equal 404, last_response.status
+      quietly do
+        get("/rails/info/routes", {}, "HTTPS" => "on")
+        assert_equal 404, last_response.status
+      end
     end
 
     test "rails/info/properties in production" do
       app("production")
-      get "/rails/info/properties"
-      assert_equal 404, last_response.status
+      quietly do
+        get("/rails/info/properties", {}, "HTTPS" => "on")
+        assert_equal 404, last_response.status
+      end
+    end
+
+    test "rails/health in production" do
+      app("production")
+
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get "up" => "rails/health#show", as: :rails_health_check
+        end
+      RUBY
+
+      get("/up", {}, "HTTPS" => "on")
+      assert_equal 200, last_response.status
     end
 
     test "simple controller" do
       simple_controller
+
+      app "development"
 
       get "/foo"
       assert_equal "foo", last_response.body
@@ -156,9 +194,11 @@ module ApplicationTests
 
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get ':controller(/:action)'
+          get 'foo', to: 'foo#index'
         end
       RUBY
+
+      app "development"
 
       get "/foo"
       assert_equal "bar", last_response.body
@@ -173,6 +213,8 @@ module ApplicationTests
           resource :user
         end
       RUBY
+
+      app "development"
 
       get "/blog/archives"
       assert_equal "/archives", last_response.body
@@ -193,6 +235,8 @@ module ApplicationTests
           get '/foo' => 'foo#index'
         end
       RUBY
+
+      app "development"
 
       get "/foo"
       assert_equal "/blog", last_response.body
@@ -217,9 +261,12 @@ module ApplicationTests
 
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get ':controller(/:action)'
+          get 'foo', to: 'foo#index'
+          get 'bar', to: 'bar#index'
         end
       RUBY
+
+      app "development"
 
       get "/foo"
       assert_equal "foo", last_response.body
@@ -254,6 +301,8 @@ module ApplicationTests
         end
       RUBY
 
+      app "development"
+
       get "/foo"
       assert_equal "foo", last_response.body
 
@@ -264,7 +313,7 @@ module ApplicationTests
     test "routes appending blocks" do
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
-          get ':controller/:action'
+          get 'lose' => lambda { |e| [200, {'Content-Type'=>'text/plain'}, ['LOSE']] }
         end
       RUBY
 
@@ -289,6 +338,31 @@ module ApplicationTests
       assert_equal "WIN", last_response.body
     end
 
+    test "routes appending blocks after reload" do
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get 'lose' => lambda { |e| [200, {'Content-Type'=>'text/plain'}, ['LOSE']] }
+        end
+      RUBY
+
+      add_to_config <<-R
+        config.before_eager_load do |app|
+          app.reload_routes!
+        end
+
+        config.after_initialize do |app|
+          app.routes.append do
+            get '/win' => lambda { |e| [200, {'Content-Type'=>'text/plain'}, ['WIN']] }
+          end
+        end
+      R
+
+      app "production"
+
+      get "/win"
+      assert_equal "WIN", last_response.body
+    end
+
     test "routes drawing from config/routes" do
       app_file "config/routes.rb", <<-RUBY
         AppTemplate::Application.routes.draw do
@@ -297,7 +371,7 @@ module ApplicationTests
       RUBY
 
       app_file "config/routes/external.rb", <<-RUBY
-        get ':controller/:action'
+        get 'success/index', to: 'success#index'
       RUBY
 
       controller :success, <<-RUBY
@@ -370,13 +444,15 @@ module ApplicationTests
 
         app(mode)
 
-        get "/foo"
+        https = (mode == "production" ? "on" : "off")
+
+        get("/foo", {}, "HTTPS" => https)
         assert_equal "bar", last_response.body
 
-        get "/custom"
+        get("/custom", {}, "HTTPS" => https)
         assert_equal "http://www.microsoft.com", last_response.body
 
-        get "/mapping"
+        get("/mapping", {}, "HTTPS" => https)
         assert_equal "/profile", last_response.body
 
         app_file "config/routes.rb", <<-RUBY
@@ -396,13 +472,13 @@ module ApplicationTests
 
         sleep 0.1
 
-        get "/foo"
+        get("/foo", {}, "HTTPS" => https)
         assert_equal expected_action, last_response.body
 
-        get "/custom"
+        get("/custom", {}, "HTTPS" => https)
         assert_equal expected_url, last_response.body
 
-        get "/mapping"
+        get("/mapping", {}, "HTTPS" => https)
         assert_equal expected_mapping, last_response.body
       end
     end
@@ -511,7 +587,7 @@ module ApplicationTests
       get "/bar"
       assert_equal 404, last_response.status
       assert_raises NoMethodError do
-        assert_equal "/bar", Rails.application.routes.url_helpers.bar_path
+        Rails.application.routes.url_helpers.bar_path
       end
 
       app_file "config/routes.rb", <<-RUBY
@@ -560,19 +636,19 @@ module ApplicationTests
       get "/bar"
       assert_equal 404, last_response.status
       assert_raises NoMethodError do
-        assert_equal "/bar", Rails.application.routes.url_helpers.bar_path
+        Rails.application.routes.url_helpers.bar_path
       end
 
       get "/custom"
       assert_equal 404, last_response.status
       assert_raises NoMethodError do
-        assert_equal "http://www.apple.com", Rails.application.routes.url_helpers.custom_url
+        Rails.application.routes.url_helpers.custom_url
       end
 
       get "/mapping"
       assert_equal 404, last_response.status
       assert_raises NoMethodError do
-        assert_equal "/profile", Rails.application.routes.url_helpers.polymorphic_path(User.new)
+        Rails.application.routes.url_helpers.polymorphic_path(User.new)
       end
     end
 
@@ -645,11 +721,13 @@ module ApplicationTests
       assert_equal "/users", Rails.application.routes.url_helpers.polymorphic_path(User.new)
 
       assert_raises NoMethodError do
-        assert_equal "http://www.microsoft.com", Rails.application.routes.url_helpers.microsoft_url
+        Rails.application.routes.url_helpers.microsoft_url
       end
     end
 
     test "resource routing with irregular inflection" do
+      app("development")
+
       app_file "config/initializers/inflection.rb", <<-RUBY
         ActiveSupport::Inflector.inflections do |inflect|
           inflect.irregular 'yazi', 'yazilar'
@@ -678,6 +756,8 @@ module ApplicationTests
     end
 
     test "reloading routes removes methods and doesn't undefine them" do
+      app("development")
+
       app_file "config/routes.rb", <<-RUBY
         Rails.application.routes.draw do
           get '/url', to: 'url#index'
@@ -733,6 +813,100 @@ module ApplicationTests
 
       get "/url"
       assert_equal "/foo", last_response.body
+    end
+
+    test "request to rails/welcome for api_only app is successful" do
+      add_to_config <<-RUBY
+        config.api_only = true
+        config.action_dispatch.show_exceptions = :none
+        config.action_controller.allow_forgery_protection = true
+      RUBY
+
+      app "development"
+
+      get "/"
+      assert_equal 200, last_response.status
+    end
+
+    test "request to rails/welcome is successful when default_protect_from_forgery is false" do
+      add_to_config <<-RUBY
+        config.action_dispatch.show_exceptions = :none
+        config.action_controller.default_protect_from_forgery = false
+      RUBY
+
+      app "development"
+
+      get "/"
+      assert_equal 200, last_response.status
+    end
+
+    test "routes reloader uses configured file_watcher" do
+      add_to_config <<-RUBY
+        config.file_watcher = ActiveSupport::EventedFileUpdateChecker
+      RUBY
+
+      app "development"
+
+      assert_instance_of ActiveSupport::EventedFileUpdateChecker, Rails.application.routes_reloader.send(:updater)
+    end
+
+    test "a route to a missing controller logs a warning on boot when eager loading" do
+      app_file "config/environments/development.rb", <<-RUBY
+        Rails.application.configure { config.eager_load = true }
+      RUBY
+
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get "/photos", to: "photos#index"
+        end
+      RUBY
+
+      assert_nothing_raised { app("development") }
+
+      log = File.read("#{app_path}/log/development.log")
+      assert_match %r{GET /photos\(\.:format\) references a missing controller: .*PhotosController}, log
+    end
+
+    test "a route to a missing controller is not reported on boot when not eager loading" do
+      app_file "config/environments/development.rb", <<-RUBY
+        Rails.application.configure { config.eager_load = false }
+      RUBY
+
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get "/photos", to: "photos#index"
+        end
+      RUBY
+
+      app("development")
+
+      log_path = "#{app_path}/log/development.log"
+      assert_no_match(/references a missing controller/, File.exist?(log_path) ? File.read(log_path) : "")
+    end
+
+    test "routes to existing controllers boot when eager loading" do
+      app_file "config/environments/development.rb", <<-RUBY
+        Rails.application.configure { config.eager_load = true }
+      RUBY
+
+      app_file "app/controllers/photos_controller.rb", <<-RUBY
+        class PhotosController < ActionController::Base
+          def index
+            render plain: "photos"
+          end
+        end
+      RUBY
+
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get "/photos", to: "photos#index"
+        end
+      RUBY
+
+      app("development")
+
+      get "/photos"
+      assert_equal "photos", last_response.body
     end
   end
 end

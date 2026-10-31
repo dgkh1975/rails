@@ -2,6 +2,8 @@
 
 require_relative "abstract_unit"
 require "active_support/core_ext/kernel/singleton_class"
+require "active_support/core_ext/object/with"
+require "active_support/testing/ractors_assertions"
 
 module CallbacksTest
   class Record
@@ -189,6 +191,8 @@ module CallbacksTest
     before_save Proc.new { |r| r.history << "b00m" }, if: Proc.new { |r| false }
     before_save Proc.new { |r| r.history << [:before_save, :proc] }, unless: Proc.new { |r| false }
     before_save Proc.new { |r| r.history << "b00m" }, unless: Proc.new { |r| true }
+    before_save Proc.new { |r| r.history << "b00m" }, unless: proc(&:history)
+    before_save Proc.new { |r| r.history << "b00m" }, unless: lambda(&:history)
     # symbol
     before_save Proc.new { |r| r.history << [:before_save, :symbol] }, if: :yes
     before_save Proc.new { |r| r.history << "b00m" }, if: :no
@@ -199,9 +203,7 @@ module CallbacksTest
     before_save Proc.new { |r| r.history << "b00m" }, if: :yes, unless: :yes
 
     def yes; true; end
-    def other_yes; true; end
     def no; false; end
-    def other_no; false; end
 
     def save
       run_callbacks :save
@@ -235,7 +237,7 @@ module CallbacksTest
     def no; false; end
     def yes; true; end
 
-    def method_missing(sym, *)
+    def method_missing(sym, ...)
       case sym
       when /^log_(.*)/
         @history << $1
@@ -256,7 +258,7 @@ module CallbacksTest
       end
     end
 
-    def respond_to_missing?(sym)
+    def respond_to_missing?(sym, include_private = false)
       sym.match?(/^(log|wrap)_/) || super
     end
   end
@@ -473,18 +475,33 @@ module CallbacksTest
       # callbacks that have been invoked, if there are any (plus
       # whatever the callbacks do themselves, of course).
 
-      assert_equal [
-        "block in save",
-        "block in run_callbacks",
-        "tweedle_deedle",
-        "block in run_callbacks",
-        "w0tyes",
-        "block in run_callbacks",
-        "tweedle_dum",
-        "block in run_callbacks",
-        "run_callbacks",
-        "save"
-      ], call_stack.map(&:label)
+      if RUBY_VERSION >= "3.4"
+        assert_equal [
+          "block in CallbacksTest::MySlate#save",
+          "block in ActiveSupport::Callbacks#run_callbacks",
+          "CallbacksTest::AroundPerson#tweedle_deedle",
+          "block in ActiveSupport::Callbacks#run_callbacks",
+          "CallbacksTest::AroundPerson#w0tyes",
+          "block in ActiveSupport::Callbacks#run_callbacks",
+          "CallbacksTest::AroundPerson#tweedle_dum",
+          "block in ActiveSupport::Callbacks#run_callbacks",
+          "ActiveSupport::Callbacks#run_callbacks",
+          "CallbacksTest::MySlate#save",
+        ].join("\n"), call_stack.map(&:label).join("\n")
+      else
+        assert_equal [
+          "block in save",
+          "block in run_callbacks",
+          "tweedle_deedle",
+          "block in run_callbacks",
+          "w0tyes",
+          "block in run_callbacks",
+          "tweedle_dum",
+          "block in run_callbacks",
+          "run_callbacks",
+          "save",
+        ].join("\n"), call_stack.map(&:label).join("\n")
+      end
     end
 
     def test_short_call_stack
@@ -503,11 +520,19 @@ module CallbacksTest
       # there should be just one line. run_callbacks yields directly
       # back to its caller.
 
-      assert_equal [
-        "block in save",
-        "run_callbacks",
-        "save"
-      ], call_stack.map(&:label)
+      if RUBY_VERSION >= "3.4"
+        assert_equal [
+          "block in CallbacksTest::Person#save",
+          "ActiveSupport::Callbacks#run_callbacks",
+          "CallbacksTest::Person#save",
+        ].join("\n"), call_stack.map(&:label).join("\n")
+      else
+        assert_equal [
+          "block in save",
+          "run_callbacks",
+          "save",
+        ].join("\n"), call_stack.map(&:label).join("\n")
+      end
     end
   end
 
@@ -556,6 +581,8 @@ module CallbacksTest
   end
 
   class CallbacksTest < ActiveSupport::TestCase
+    include ActiveSupport::Testing::RactorsAssertions
+
     def test_save_person
       person = Person.new
       assert_equal [], person.history
@@ -572,6 +599,112 @@ module CallbacksTest
         [:after_save, :proc],
         [:after_save, :symbol]
       ], person.history
+    end
+
+    if RUBY_VERSION >= "4.0"
+      def test_callbacks_are_ractor_shareable
+        [:raise, :warn].each do |unshareable_proc_action|
+          ActiveSupport::Ractors.with(unshareable_proc_action:) do
+            klass = Class.new do
+              include ActiveSupport::Callbacks
+
+              define_callbacks :save, terminator: ->(_target, result_lambda) { result_lambda.call == false }
+
+              set_callback :save, :before, -> { events << :before }, if: -> { true }
+              set_callback :save, :around, ->(_record, block) {
+                events << :around_before
+                block.call
+                events << :around_after
+              }
+              set_callback :save, :after, ->(record) { record.events << :after }, unless: -> { false }
+
+              attr_reader :events
+
+              def initialize
+                @events = []
+              end
+
+              def save
+                run_callbacks(:save) { events << :save }
+              end
+            end
+
+            assert_ractor_shareable klass
+
+            assert_equal [:before, :around_before, :save, :after, :around_after], Ractor.new(klass) { |callback_class|
+              record = callback_class.new
+              record.save
+              record.events
+            }.value
+          end
+        end
+      end
+
+      def test_user_supplied_callback_procs_use_unshareable_proc_action
+        ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+          object = Object.new
+
+          assert_raises(Ractor::IsolationError) do
+            Class.new do
+              include ActiveSupport::Callbacks
+              define_callbacks :save
+              set_callback :save, :before, -> { object }
+            end
+          end
+        end
+      end
+
+      def test_user_supplied_callback_condition_procs_use_unshareable_proc_action
+        ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+          object = Object.new
+
+          assert_raises(Ractor::IsolationError) do
+            Class.new do
+              include ActiveSupport::Callbacks
+              define_callbacks :save
+              set_callback :save, :before, :save, if: -> { object }
+            end
+          end
+        end
+      end
+
+      def test_user_supplied_callback_terminator_procs_use_unshareable_proc_action
+        ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+          object = Object.new
+
+          assert_raises(Ractor::IsolationError) do
+            Class.new do
+              include ActiveSupport::Callbacks
+              define_callbacks :save, terminator: ->(_target, _result_lambda) { object }
+            end
+          end
+        end
+      end
+
+      def test_skip_callback_with_proc_filter_when_ractor_shareable
+        ActiveSupport::Ractors.with(unshareable_proc_action: :raise) do
+          filter_proc = ->(record) { record.events << :before_proc }
+
+          klass = Class.new do
+            include ActiveSupport::Callbacks
+            define_callbacks :save
+            set_callback :save, :before, filter_proc
+            attr_accessor :events
+            def initialize; @events = []; end
+            def save; run_callbacks(:save) { @events << :save }; end
+          end
+
+          assert_ractor_shareable klass
+
+          klass.skip_callback(:save, :before, filter_proc)
+
+          assert_equal [:save], Ractor.new(klass) { |k|
+            record = k.new
+            record.save
+            record.events
+          }.value
+        end
+      end
     end
   end
 
@@ -654,6 +787,31 @@ module CallbacksTest
   class CallbackTerminatorSkippingAfterCallbacks < AbstractCallbackTerminator
     define_callbacks :save, terminator: ->(_, result_lambda) { result_lambda.call == :halt },
                             skip_after_callbacks_if_terminated: true
+    set_save_callbacks
+  end
+
+  # A terminator object implementing +call_direct+ receives the callback and
+  # its arguments instead of a thunk.
+  class DirectCallbackTerminator
+    attr_reader :direct_calls
+
+    def initialize
+      @direct_calls = 0
+    end
+
+    def call(_target, _result_lambda)
+      raise "the thunk-based interface must not be used when call_direct is available"
+    end
+
+    def call_direct(target, user_callback, value)
+      @direct_calls += 1
+      user_callback.call(target, value) == :halt
+    end
+  end
+
+  class CallbackDirectTerminator < AbstractCallbackTerminator
+    TERMINATOR = DirectCallbackTerminator.new
+    define_callbacks :save, terminator: TERMINATOR
     set_save_callbacks
   end
 
@@ -840,6 +998,24 @@ module CallbacksTest
       terminator = CallbackTerminatorSkippingAfterCallbacks.new
       terminator.save
       assert_equal ["first", "second"], terminator.history
+    end
+  end
+
+  class CallbackDirectTerminatorTest < ActiveSupport::TestCase
+    def test_direct_terminator_receives_the_callback_without_a_thunk
+      terminator = CallbackDirectTerminator.new
+      direct_calls_before = CallbackDirectTerminator::TERMINATOR.direct_calls
+      terminator.save
+      assert_equal ["first", "second", "third", "first"], terminator.history
+      assert_equal 2, CallbackDirectTerminator::TERMINATOR.direct_calls - direct_calls_before
+      assert_not terminator.saved
+    end
+
+    def test_direct_termination_invokes_hook
+      terminator = CallbackDirectTerminator.new
+      terminator.save
+      assert_equal :second, terminator.halted
+      assert_equal :save, terminator.callback_name
     end
   end
 
@@ -1129,15 +1305,6 @@ module CallbacksTest
       }
     end
 
-    def test_skip_lambda # raises error
-      calls = []
-      callback = ->(o) { calls << o }
-      klass = build_class(callback)
-      assert_raises(ArgumentError) { klass.skip callback }
-      klass.new.run
-      assert_equal 10, calls.length
-    end
-
     def test_skip_symbol # removes all
       calls = []
       klass = build_class(:bar)
@@ -1194,6 +1361,78 @@ module CallbacksTest
       assert_raises(ArgumentError) do
         klass.before_save "tweedle"
       end
+    end
+  end
+
+  class AllSaveCallbacks
+    include ActiveSupport::Callbacks
+
+    attr_reader :history
+    define_callbacks :save
+
+    def initialize
+      @history = []
+    end
+
+    set_callback :save, :before, :before_save_1
+    set_callback :save, :before, :before_save_2
+    set_callback :save, :around, :around_save_1
+    set_callback :save, :around, :around_save_2
+    set_callback :save, :after, :after_save_1
+    set_callback :save, :after, :after_save_2
+
+    def before_save_1
+      @history << __method__.to_s
+    end
+
+    def before_save_2
+      @history << __method__.to_s
+    end
+
+    def around_save_1
+      @history << __method__.to_s + "_before"
+      yield
+      @history << __method__.to_s + "_after"
+    end
+
+    def around_save_2
+      @history << __method__.to_s + "_before"
+      yield
+      @history << __method__.to_s + "_after"
+    end
+
+    def after_save_1
+      @history << __method__.to_s
+    end
+
+    def after_save_2
+      @history << __method__.to_s
+    end
+  end
+
+  class RunSpecificCallbackTest < ActiveSupport::TestCase
+    def test_run_callbacks_only_before
+      klass = AllSaveCallbacks.new
+      klass.run_callbacks :save, :before
+      assert_equal ["before_save_1", "before_save_2"], klass.history
+    end
+
+    def test_run_callbacks_only_around
+      klass = AllSaveCallbacks.new
+      klass.run_callbacks :save, :around
+      assert_equal [
+        "around_save_1_before",
+        "around_save_2_before",
+        "around_save_2_after",
+        "around_save_1_after"
+        ],
+        klass.history
+    end
+
+    def test_run_callbacks_only_after
+      klass = AllSaveCallbacks.new
+      klass.run_callbacks :save, :after
+      assert_equal ["after_save_2", "after_save_1"], klass.history
     end
   end
 end

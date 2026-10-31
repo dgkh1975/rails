@@ -1,19 +1,20 @@
 # frozen_string_literal: true
 
 module ActionText
+  # DEPRECATED
   class TrixAttachment
     TAG_NAME = "figure"
     SELECTOR = "[data-trix-attachment]"
 
-    COMPOSED_ATTRIBUTES = %w( caption presentation )
+    COMPOSED_ATTRIBUTES = %w( caption presentation ).freeze
     ATTRIBUTES = %w( sgid contentType url href filename filesize width height previewable content ) + COMPOSED_ATTRIBUTES
     ATTRIBUTE_TYPES = {
       "previewable" => ->(value) { value.to_s == "true" },
-      "filesize"    => ->(value) { Integer(value.to_s) rescue value },
-      "width"       => ->(value) { Integer(value.to_s) rescue nil },
-      "height"      => ->(value) { Integer(value.to_s) rescue nil },
+      "filesize"    => ->(value) { Integer(value.to_s, exception: false) || value },
+      "width"       => ->(value) { Integer(value.to_s, exception: false) },
+      "height"      => ->(value) { Integer(value.to_s, exception: false) },
       :default      => ->(value) { value.to_s }
-    }
+    }.freeze
 
     class << self
       def from_attributes(attributes)
@@ -39,10 +40,10 @@ module ActionText
         end
 
         def typecast_attribute_values(attributes)
-          attributes.map do |key, value|
+          attributes.to_h do |key, value|
             typecast = ATTRIBUTE_TYPES[key] || ATTRIBUTE_TYPES[:default]
             [key, typecast.call(value)]
-          end.to_h
+          end
         end
     end
 

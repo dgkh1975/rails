@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+# :markup: markdown
+# Active Storage \Preview
+# =======================
+#
 # Some non-image blobs can be previewed: that is, they can be presented as images. A video blob can be previewed by
 # extracting its first frame, and a PDF blob can be previewed by extracting its first page.
 #
@@ -9,27 +13,33 @@
 # subclassing ActiveStorage::Previewer and implementing the requisite methods. Consult the ActiveStorage::Previewer
 # documentation for more details on what's required of previewers.
 #
-# To choose the previewer for a blob, Active Storage calls +accept?+ on each registered previewer in order. It uses the
-# first previewer for which +accept?+ returns true when given the blob. In a Rails application, add or remove previewers
-# by manipulating +Rails.application.config.active_storage.previewers+ in an initializer:
+# To choose the previewer for a blob, Active Storage calls `accept?` on each registered previewer in order. It uses the
+# first previewer for which `accept?` returns true when given the blob. In a \Rails application, add or remove previewers
+# by manipulating `Rails.application.config.active_storage.previewers` in an initializer:
 #
-#   Rails.application.config.active_storage.previewers
-#   # => [ ActiveStorage::Previewer::PopplerPDFPreviewer, ActiveStorage::Previewer::MuPDFPreviewer, ActiveStorage::Previewer::VideoPreviewer ]
+# ```
+# Rails.application.config.active_storage.previewers
+# # => [ ActiveStorage::Previewer::PopplerPDFPreviewer, ActiveStorage::Previewer::MuPDFPreviewer, ActiveStorage::Previewer::VideoPreviewer ]
 #
-#   # Add a custom previewer for Microsoft Office documents:
-#   Rails.application.config.active_storage.previewers << DOCXPreviewer
-#   # => [ ActiveStorage::Previewer::PopplerPDFPreviewer, ActiveStorage::Previewer::MuPDFPreviewer, ActiveStorage::Previewer::VideoPreviewer, DOCXPreviewer ]
+# # Add a custom previewer for Microsoft Office documents:
+# Rails.application.config.active_storage.previewers << DOCXPreviewer
+# # => [ ActiveStorage::Previewer::PopplerPDFPreviewer, ActiveStorage::Previewer::MuPDFPreviewer, ActiveStorage::Previewer::VideoPreviewer, DOCXPreviewer ]
+# ```
 #
-# Outside of a Rails application, modify +ActiveStorage.previewers+ instead.
+# Outside of a \Rails application, modify `ActiveStorage.previewers` instead.
 #
 # The built-in previewers rely on third-party system libraries. Specifically, the built-in video previewer requires
-# {FFmpeg}[https://www.ffmpeg.org]. Two PDF previewers are provided: one requires {Poppler}[https://poppler.freedesktop.org],
-# and the other requires {muPDF}[https://mupdf.com] (version 1.8 or newer). To preview PDFs, install either Poppler or muPDF.
+# [FFmpeg](https://www.ffmpeg.org). Two PDF previewers are provided: one requires [Poppler](https://poppler.freedesktop.org),
+# and the other requires [muPDF](https://mupdf.com) (version 1.8 or newer). To preview PDFs, install either Poppler or muPDF.
 #
-# These libraries are not provided by Rails. You must install them yourself to use the built-in previewers. Before you
+# These libraries are not provided by \Rails. You must install them yourself to use the built-in previewers. Before you
 # install and use third-party software, make sure you understand the licensing implications of doing so.
 class ActiveStorage::Preview
+  include ActiveStorage::Blob::Servable
+
   class UnprocessedError < StandardError; end
+
+  delegate :filename, :content_type, to: :presentation
 
   attr_reader :blob, :variation
 
@@ -37,14 +47,17 @@ class ActiveStorage::Preview
     @blob, @variation = blob, ActiveStorage::Variation.wrap(variation_or_variation_key)
   end
 
-  # Processes the preview if it has not been processed yet. Returns the receiving Preview instance for convenience:
+  # Processes the preview if it has not been processed yet. Returns the receiving `ActiveStorage::Preview` instance for convenience:
   #
-  #   blob.preview(resize_to_limit: [100, 100]).processed.url
+  # ```
+  # blob.preview(resize_to_limit: [100, 100]).processed.url
+  # ```
   #
   # Processing a preview generates an image from its blob and attaches the preview image to the blob. Because the preview
   # image is stored with the blob, it is only generated once.
   def processed
     process unless processed?
+    variant.processed if variant?
     self
   end
 
@@ -60,47 +73,57 @@ class ActiveStorage::Preview
   # a stable URL that redirects to the URL returned by this method.
   def url(**options)
     if processed?
-      variant.url(**options)
+      presentation.url(**options)
     else
       raise UnprocessedError
     end
   end
-
-  alias_method :service_url, :url
-  deprecate service_url: :url
 
   # Returns a combination key of the blob and the variation that together identifies a specific variant.
   def key
     if processed?
-      variant.key
+      presentation.key
     else
       raise UnprocessedError
     end
   end
 
+  # Downloads the file associated with this preview's variant. If no block is
+  # given, the entire file is read into memory and returned. That'll use a lot
+  # of RAM for very large files. If a block is given, then the download is
+  # streamed and yielded in chunks. Raises ActiveStorage::Preview::UnprocessedError
+  # if the preview has not been processed yet.
   def download(&block)
     if processed?
-      variant.download(&block)
+      presentation.download(&block)
     else
       raise UnprocessedError
     end
+  end
+
+  def processed?
+    image.attached?
   end
 
   private
-    def processed?
-      image.attached?
-    end
-
     def process
       previewer.preview(service_name: blob.service_name) do |attachable|
-        ActiveRecord::Base.connected_to(role: ActiveRecord::Base.writing_role) do
+        ActiveRecord::Base.connected_to(role: ActiveRecord.writing_role) do
           image.attach(attachable)
         end
       end
     end
 
     def variant
-      image.variant(variation).processed
+      @variant ||= image.variant(variation)
+    end
+
+    def variant?
+      variation.transformations.present?
+    end
+
+    def presentation
+      variant? ? variant.processed : image
     end
 
 

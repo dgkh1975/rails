@@ -2,36 +2,49 @@
 
 module ActiveRecord
   module AttributeMethods
+    # Active Record Attribute Methods \Write
+    # ======================================
     module Write
       extend ActiveSupport::Concern
 
       included do
-        attribute_method_suffix "="
+        attribute_method_suffix "=", parameters: "value"
       end
 
       module ClassMethods # :nodoc:
         private
-          def define_method_attribute=(name, owner:)
+          def define_method_attribute=(canonical_name, owner:, as: canonical_name)
             ActiveModel::AttributeMethods::AttrNames.define_attribute_accessor_method(
-              owner, name, writer: true,
+              canonical_name, writer: true,
             ) do |temp_method_name, attr_name_expr|
-              owner <<
-                "def #{temp_method_name}(value)" <<
-                "  _write_attribute(#{attr_name_expr}, value)" <<
-                "end"
+              owner.define_cached_method(temp_method_name, as: "#{as}=", namespace: :active_record) do |batch|
+                batch <<
+                  "def #{temp_method_name}(value)" <<
+                  "  @attributes.write_from_user(#{attr_name_expr}, value)" <<
+                  "end"
+              end
             end
           end
       end
 
-      # Updates the attribute identified by <tt>attr_name</tt> with the
-      # specified +value+. Empty strings for Integer and Float columns are
-      # turned into +nil+.
+      # Updates the attribute identified by `attr_name` using the specified
+      # `value`. The attribute value will be type cast upon being read.
       def write_attribute(attr_name, value)
-        name = attr_name.to_s
-        name = self.class.attribute_aliases[name] || name
+        name = resolve_alias(attr_name.is_a?(Symbol) ? attr_name.name : attr_name.to_s)
 
-        name = @primary_key if name == "id" && @primary_key
-        @attributes.write_from_user(name, value)
+        return @attributes.write_from_user(name, value) unless name == "id" && @primary_key
+
+        if self.class.composite_primary_key?
+          @attributes.write_from_user("id", value)
+        else
+          if @primary_key != "id"
+            ActiveRecord.deprecator.warn(<<-MSG.squish)
+              Using write_attribute(:id, value) to write the primary key value is deprecated
+              and will be removed in Rails 9.0. Use #id= instead.
+            MSG
+          end
+          @attributes.write_from_user(@primary_key, value)
+        end
       end
 
       # This method exists to avoid the expensive primary_key check internally, without
@@ -42,11 +55,6 @@ module ActiveRecord
 
       alias :attribute= :_write_attribute
       private :attribute=
-
-      private
-        def write_attribute_without_type_cast(attr_name, value)
-          @attributes.write_cast_value(attr_name, value)
-        end
     end
   end
 end

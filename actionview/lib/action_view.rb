@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 #--
-# Copyright (c) 2004-2021 David Heinemeier Hansson
+# Copyright (c) David Heinemeier Hansson
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -26,7 +26,9 @@
 require "active_support"
 require "active_support/rails"
 require "action_view/version"
+require "action_view/deprecator"
 
+# :include: ../README.md
 module ActionView
   extend ActiveSupport::Autoload
 
@@ -35,15 +37,20 @@ module ActionView
   eager_autoload do
     autoload :Base
     autoload :Context
+    autoload :DependencyTracker
     autoload :Digestor
     autoload :Helpers
     autoload :LookupContext
     autoload :Layouts
+    autoload :PathRegistry
     autoload :PathSet
     autoload :RecordIdentifier
+    autoload :RenderParser
     autoload :Rendering
     autoload :RoutingUrlFor
     autoload :Template
+    autoload :TemplateDetails
+    autoload :TemplatePath
     autoload :UnboundTemplate
     autoload :ViewPaths
 
@@ -59,10 +66,7 @@ module ActionView
 
     autoload_at "action_view/template/resolver" do
       autoload :Resolver
-      autoload :PathResolver
       autoload :FileSystemResolver
-      autoload :OptimizedFileSystemResolver
-      autoload :FallbackFileSystemResolver
     end
 
     autoload_at "action_view/buffers" do
@@ -79,6 +83,7 @@ module ActionView
       autoload :MissingTemplate
       autoload :ActionViewError
       autoload :EncodingError
+      autoload :StrictLocalsError
       autoload :TemplateError
       autoload :SyntaxErrorInTemplate
       autoload :WrongEncodingError
@@ -88,10 +93,26 @@ module ActionView
   autoload :CacheExpiry
   autoload :TestCase
 
+  singleton_class.attr_reader :render_tracker
+
+  def self.render_tracker=(value)
+    @render_tracker = value
+    case value
+    when :ruby
+      DependencyTracker.register_tracker :erb, DependencyTracker::RubyTracker
+    else
+      DependencyTracker.register_tracker :erb, DependencyTracker::ERBTracker
+    end
+    value
+  end
+
+  self.render_tracker = :regex
+
   def self.eager_load!
     super
     ActionView::Helpers.eager_load!
     ActionView::Template.eager_load!
+    ActionView::DependencyTracker.eager_load!
   end
 end
 

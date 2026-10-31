@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "active_support/number_helper/number_converter"
@@ -7,6 +8,16 @@ module ActiveSupport
     class NumberToRoundedConverter < NumberConverter # :nodoc:
       self.namespace      = :precision
       self.validate_float = true
+
+      def self.separator_regexps(separator)
+        escaped_separator = Regexp.escape(separator)
+        [/(#{escaped_separator})(\d*[1-9])?0+\z/, /#{escaped_separator}\z/].freeze
+      end
+
+      COMMON_SEPARATOR_REGEXPS = {
+        "." => separator_regexps("."),
+        "," => separator_regexps(","),
+      }.freeze
 
       def convert
         helper = RoundingHelper.new(options)
@@ -20,20 +31,24 @@ module ActiveSupport
           end
 
           formatted_string =
-            if rounded_number.nan? || rounded_number.infinite? || rounded_number == rounded_number.to_i
-              "%00.#{precision}f" % rounded_number
-            else
+            if rounded_number.finite?
               s = rounded_number.to_s("F")
-              s << "0" * precision
               a, b = s.split(".", 2)
-              a << "."
-              a << b[0, precision]
+              if precision != 0
+                b << "0" * precision
+                a << "."
+                a << b[0, precision]
+              end
+              a
+            else
+              # Infinity/NaN
+              "%f" % rounded_number
             end
         else
           formatted_string = rounded_number
         end
 
-        delimited_number = NumberToDelimitedConverter.convert(formatted_string, options)
+        delimited_number = NumberToDelimitedConverter.convert_with_resolved_options(formatted_string, options)
         format_number(delimited_number)
       end
 
@@ -44,8 +59,9 @@ module ActiveSupport
 
         def format_number(number)
           if strip_insignificant_zeros
-            escaped_separator = Regexp.escape(options[:separator])
-            number.sub(/(#{escaped_separator})(\d*[1-9])?0+\z/, '\1\2').sub(/#{escaped_separator}\z/, "")
+            insignificant_zeros, trailing_separator =
+              COMMON_SEPARATOR_REGEXPS[options[:separator]] || self.class.separator_regexps(options[:separator])
+            number.sub(insignificant_zeros, '\1\2').sub(trailing_separator, "")
           else
             number
           end

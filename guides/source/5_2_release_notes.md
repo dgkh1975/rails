@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Ruby on Rails 5.2 Release Notes
 ===============================
@@ -12,7 +12,7 @@ Highlights in Rails 5.2:
 * Content Security Policy
 
 These release notes cover only the major changes. To learn about various bug
-fixes and changes, please refer to the change logs or check out the [list of
+fixes and changes, please refer to the changelogs or check out the [list of
 commits](https://github.com/rails/rails/commits/5-2-stable) in the main Rails
 repository on GitHub.
 
@@ -89,7 +89,7 @@ for your application. You can configure a global default policy and then
 override it on a per-resource basis and even use lambdas to inject per-request
 values into the header such as account subdomains in a multi-tenant application.
 You can read more about this in the
-[Securing Rails Applications](security.html#content-security-policy)
+[Securing Rails Applications](https://guides.rubyonrails.org/v5.2/security.html#content-security-policy)
 guide.
 
 Railties
@@ -262,7 +262,7 @@ Please refer to the [Changelog][action-pack] for detailed changes.
     [Commit](https://github.com/rails/rails/commit/619b1b6353a65e1635d10b8f8c6630723a5a6f1a),
     [Commit](https://github.com/rails/rails/commit/4ec8bf68ff92f35e79232fbd605012ce1f4e1e6e))
 
-*   Register most popular audio/video/font mime types supported by modern
+*   Register most popular audio/video/font MIME types supported by modern
     browsers.
     ([Pull Request](https://github.com/rails/rails/pull/31251))
 
@@ -526,7 +526,7 @@ Please refer to the [Changelog][active-record] for detailed changes.
     ([Commit](https://github.com/rails/rails/commit/63cf15877bae859ff7b4ebaf05186f3ca79c1863))
 
 *   Fixed a bug where column orders for an index weren't written to
-    `db/schema.rb` when using the sqlite adapter.
+    `db/schema.rb` when using the SQLite adapter.
     ([Pull Request](https://github.com/rails/rails/pull/30970))
 
 *   Fix `bin/rails db:migrate` with specified `VERSION`.
@@ -792,7 +792,7 @@ Please refer to the [Changelog][active-support] for detailed changes.
     `ActiveSupport::TimeZone::MAPPING`.
     ([Pull Request](https://github.com/rails/rails/pull/31176))
 
-*   Changed default behaviour of `ActiveSupport::SecurityUtils.secure_compare`,
+*   Changed default behavior of `ActiveSupport::SecurityUtils.secure_compare`,
     to make it not leak length information even for variable length string.
     Renamed old `ActiveSupport::SecurityUtils.secure_compare` to
     `fixed_length_secure_compare`, and started raising `ArgumentError` in

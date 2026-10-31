@@ -2,8 +2,7 @@
 
 require "active_support/callbacks"
 require "active_support/core_ext/module/attribute_accessors_per_thread"
-require "action_cable/server/worker/active_record_connection_management"
-require "concurrent"
+require "concurrent/executor/thread_pool_executor"
 
 module ActionCable
   module Server
@@ -19,14 +18,15 @@ module ActionCable
 
       def initialize(max_size: 5)
         @executor = Concurrent::ThreadPoolExecutor.new(
+          name: "ActionCable-server",
           min_threads: 1,
           max_threads: max_size,
           max_queue: 0,
         )
       end
 
-      # Stop processing work: any work that has not already started
-      # running will be discarded from the queue
+      # Stop accepting work. Work posted after this is rejected. Work already queued,
+      # including work waiting behind a connection's earlier jobs, still runs.
       def halt
         @executor.shutdown
       end
@@ -35,12 +35,10 @@ module ActionCable
         @executor.shuttingdown?
       end
 
-      def work(connection)
+      def work(connection, &block)
         self.connection = connection
 
-        run_callbacks :work do
-          yield
-        end
+        run_callbacks :work, &block
       ensure
         self.connection = nil
       end
@@ -49,8 +47,8 @@ module ActionCable
         async_invoke receiver, :instance_exec, *args, connection: connection, &block
       end
 
-      def async_invoke(receiver, method, *args, connection: receiver, &block)
-        @executor.post do
+      def async_invoke(receiver, method, *args, connection: receiver, executor: @executor, &block)
+        executor.post do
           invoke(receiver, method, *args, connection: connection, &block)
         end
       end

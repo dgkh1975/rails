@@ -14,18 +14,27 @@ module ActiveRecord
       end
 
       delegate :quote_column_name, :quote_table_name, :quote_default_expression, :type_to_sql,
-        :options_include_default?, :supports_indexes_in_create?, :supports_foreign_keys?, :foreign_key_options,
-        :quoted_columns_for_index, :supports_partial_index?, :supports_check_constraints?, :check_constraint_options,
+        :options_include_default?, :supports_indexes_in_create?, :use_foreign_keys?,
+        :quoted_columns_for_index, :supports_partial_index?, :supports_check_constraints?,
+        :supports_index_include?, :supports_exclusion_constraints?, :supports_unique_constraints?,
+        :supports_nulls_not_distinct?, :lookup_cast_type,
         to: :@conn, private: true
 
       private
         def visit_AlterTable(o)
-          sql = +"ALTER TABLE #{quote_table_name(o.name)} "
-          sql << o.adds.map { |col| accept col }.join(" ")
-          sql << o.foreign_key_adds.map { |fk| visit_AddForeignKey fk }.join(" ")
-          sql << o.foreign_key_drops.map { |fk| visit_DropForeignKey fk }.join(" ")
-          sql << o.check_constraint_adds.map { |con| visit_AddCheckConstraint con }.join(" ")
-          sql << o.check_constraint_drops.map { |con| visit_DropCheckConstraint con }.join(" ")
+          "ALTER TABLE #{quote_table_name(o.name)} #{o.operations.map { |op| accept(op) }.join(', ')}"
+        end
+
+        def visit_DropColumn(o)
+          "DROP COLUMN #{quote_column_name(o.name)}"
+        end
+
+        def visit_RenameColumn(o)
+          "RENAME COLUMN #{quote_column_name(o.from_name)} TO #{quote_column_name(o.to_name)}"
+        end
+
+        def visit_ChangeColumnNull(o)
+          "ALTER COLUMN #{quote_column_name(o.name)} #{o.null ? 'DROP' : 'SET'} NOT NULL"
         end
 
         def visit_ColumnDefinition(o)
@@ -51,12 +60,20 @@ module ActiveRecord
             statements.concat(o.indexes.map { |column_name, options| index_in_create(o.name, column_name, options) })
           end
 
-          if supports_foreign_keys?
-            statements.concat(o.foreign_keys.map { |to_table, options| foreign_key_in_create(o.name, to_table, options) })
+          if use_foreign_keys?
+            statements.concat(o.foreign_keys.map { |fk| accept fk })
           end
 
           if supports_check_constraints?
-            statements.concat(o.check_constraints.map { |expression, options| check_constraint_in_create(o.name, expression, options) })
+            statements.concat(o.check_constraints.map { |chk| accept chk })
+          end
+
+          if supports_exclusion_constraints?
+            statements.concat(o.exclusion_constraints.map { |exc| accept exc })
+          end
+
+          if supports_unique_constraints?
+            statements.concat(o.unique_constraints.map { |exc| accept exc })
           end
 
           create_sql << "(#{statements.join(', ')})" if statements.present?
@@ -70,10 +87,12 @@ module ActiveRecord
         end
 
         def visit_ForeignKeyDefinition(o)
+          quoted_columns = Array(o.column).map { |c| quote_column_name(c) }
+          quoted_primary_keys = Array(o.primary_key).map { |c| quote_column_name(c) }
           sql = +<<~SQL
             CONSTRAINT #{quote_column_name(o.name)}
-            FOREIGN KEY (#{quote_column_name(o.column)})
-              REFERENCES #{quote_table_name(o.to_table)} (#{quote_column_name(o.primary_key)})
+            FOREIGN KEY (#{quoted_columns.join(", ")})
+              REFERENCES #{quote_table_name(o.to_table)} (#{quoted_primary_keys.join(", ")})
           SQL
           sql << " #{action_sql('DELETE', o.on_delete)}" if o.on_delete
           sql << " #{action_sql('UPDATE', o.on_update)}" if o.on_update
@@ -81,12 +100,14 @@ module ActiveRecord
         end
 
         def visit_AddForeignKey(o)
-          "ADD #{accept(o)}"
+          "ADD #{accept(o.foreign_key)}"
         end
 
-        def visit_DropForeignKey(name)
-          "DROP CONSTRAINT #{quote_column_name(name)}"
+        def visit_DropConstraint(o)
+          "DROP CONSTRAINT #{quote_column_name(o.name)}"
         end
+        alias :visit_DropForeignKey :visit_DropConstraint
+        alias :visit_DropCheckConstraint :visit_DropConstraint
 
         def visit_CreateIndexDefinition(o)
           index = o.index
@@ -94,12 +115,14 @@ module ActiveRecord
           sql = ["CREATE"]
           sql << "UNIQUE" if index.unique
           sql << "INDEX"
-          sql << "IF NOT EXISTS" if o.if_not_exists
           sql << o.algorithm if o.algorithm
+          sql << "IF NOT EXISTS" if o.if_not_exists
           sql << index.type if index.type
           sql << "#{quote_column_name(index.name)} ON #{quote_table_name(index.table)}"
           sql << "USING #{index.using}" if supports_index_using? && index.using
           sql << "(#{quoted_columns(index)})"
+          sql << "INCLUDE (#{quoted_include_columns(index.include)})" if supports_index_include? && index.include
+          sql << "NULLS NOT DISTINCT" if supports_nulls_not_distinct? && index.nulls_not_distinct
           sql << "WHERE #{index.where}" if supports_partial_index? && index.where
 
           sql.join(" ")
@@ -110,11 +133,7 @@ module ActiveRecord
         end
 
         def visit_AddCheckConstraint(o)
-          "ADD #{accept(o)}"
-        end
-
-        def visit_DropCheckConstraint(name)
-          "DROP CONSTRAINT #{quote_column_name(name)}"
+          "ADD #{accept(o.check_constraint)}"
         end
 
         def quoted_columns(o)
@@ -135,7 +154,7 @@ module ActiveRecord
         end
 
         def add_column_options!(sql, options)
-          sql << " DEFAULT #{quote_default_expression(options[:default], options[:column])}" if options_include_default?(options)
+          sql << " DEFAULT #{quote_default_expression_for_column_definition(options[:default], options[:column])}" if options_include_default?(options)
           # must explicitly check for :null to allow change_column to work on migrations
           if options[:null] == false
             sql << " NOT NULL"
@@ -149,6 +168,11 @@ module ActiveRecord
           sql
         end
 
+        def quote_default_expression_for_column_definition(default, column_definition)
+          column_definition.cast_type = lookup_cast_type(column_definition.sql_type)
+          quote_default_expression(default, column_definition)
+        end
+
         def to_sql(sql)
           sql = sql.to_sql if sql.respond_to?(:to_sql)
           sql
@@ -157,19 +181,6 @@ module ActiveRecord
         # Returns any SQL string to go between CREATE and TABLE. May be nil.
         def table_modifier_in_create(o)
           " TEMPORARY" if o.temporary
-        end
-
-        def foreign_key_in_create(from_table, to_table, options)
-          prefix = ActiveRecord::Base.table_name_prefix
-          suffix = ActiveRecord::Base.table_name_suffix
-          to_table = "#{prefix}#{to_table}#{suffix}"
-          options = foreign_key_options(from_table, to_table, options)
-          accept ForeignKeyDefinition.new(from_table, to_table, options)
-        end
-
-        def check_constraint_in_create(table_name, expression, options)
-          options = check_constraint_options(table_name, expression, options)
-          accept CheckConstraintDefinition.new(table_name, expression, options)
         end
 
         def action_sql(action, dependency)

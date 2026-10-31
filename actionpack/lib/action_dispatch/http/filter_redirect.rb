@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "action_dispatch/http/filter_parameters"
+
 module ActionDispatch
   module Http
     module FilterRedirect
@@ -9,7 +11,7 @@ module ActionDispatch
         if location_filter_match?
           FILTERED
         else
-          location
+          parameter_filtered_location
         end
       end
 
@@ -30,6 +32,16 @@ module ActionDispatch
             location.match?(filter)
           end
         end
+      end
+
+      def parameter_filtered_location
+        uri = URI.parse(location)
+        unless uri.query.nil? || uri.query.empty?
+          uri.query = FilterParameters.filter_query_string(uri.query, request.parameter_filter)
+        end
+        uri.to_s
+      rescue URI::Error
+        FILTERED
       end
     end
   end

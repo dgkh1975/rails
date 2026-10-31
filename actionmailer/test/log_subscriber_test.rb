@@ -4,28 +4,39 @@ require "abstract_unit"
 require "mailers/base_mailer"
 require "active_support/log_subscriber/test_helper"
 require "action_mailer/log_subscriber"
+require "active_support/testing/event_reporter_assertions"
+require "action_mailer/structured_event_subscriber"
 
 class AMLogSubscriberTest < ActionMailer::TestCase
-  include ActiveSupport::LogSubscriber::TestHelper
+  include ActiveSupport::Testing::EventReporterAssertions
 
-  def setup
-    super
-    ActionMailer::LogSubscriber.attach_to :action_mailer
+  setup do
+    @logger = ActiveSupport::LogSubscriber::TestHelper::MockLogger.new
+    @old_logger = ActionMailer::LogSubscriber.logger
+    ActionMailer::LogSubscriber.logger = @logger
   end
 
-  class TestMailer < ActionMailer::Base
-    def receive(mail)
-      # Do nothing
+  teardown do
+    ActionMailer::LogSubscriber.logger = @old_logger
+  end
+
+  def run(*)
+    with_debug_event_reporting do
+      super
     end
   end
 
-  def set_logger(logger)
-    ActionMailer::Base.logger = logger
+  class BogusDelivery
+    def initialize(*)
+    end
+
+    def deliver!(mail)
+      raise "failed"
+    end
   end
 
   def test_deliver_is_notified
     BaseMailer.welcome(message_id: "123@abc").deliver_now
-    wait
 
     assert_equal(1, @logger.logged(:info).size)
     assert_match(/Delivered mail 123@abc/, @logger.logged(:info).first)
@@ -39,7 +50,6 @@ class AMLogSubscriberTest < ActionMailer::TestCase
 
   def test_deliver_message_when_perform_deliveries_is_false
     BaseMailer.welcome_without_deliveries(message_id: "123@abc").deliver_now
-    wait
 
     assert_equal(1, @logger.logged(:info).size)
     assert_match("Skipped delivery of mail 123@abc as `perform_deliveries` is false", @logger.logged(:info).first)
@@ -49,5 +59,17 @@ class AMLogSubscriberTest < ActionMailer::TestCase
     assert_match("Welcome", @logger.logged(:debug).second)
   ensure
     BaseMailer.deliveries.clear
+  end
+
+  def test_deliver_message_when_exception_happened
+    previous_delivery_method = BaseMailer.delivery_method
+    BaseMailer.delivery_method = BogusDelivery
+
+    assert_raises(RuntimeError) { BaseMailer.welcome(message_id: "123@abc").deliver_now }
+
+    assert_equal(1, @logger.logged(:info).size)
+    assert_equal('Failed delivery of mail 123@abc error_class=RuntimeError error_message="failed"', @logger.logged(:info).first)
+  ensure
+    BaseMailer.delivery_method = previous_delivery_method
   end
 end

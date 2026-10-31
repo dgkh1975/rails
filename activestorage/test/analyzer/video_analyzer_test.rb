@@ -6,6 +6,12 @@ require "database/setup"
 require "active_storage/analyzer/video_analyzer"
 
 class ActiveStorage::Analyzer::VideoAnalyzerTest < ActiveSupport::TestCase
+  setup do
+    if !ENV["BUILDKITE"] && !system("command", "-v", ActiveStorage.paths[:ffprobe] || "ffprobe", out: File::NULL)
+      skip("ffprobe isn't available")
+    end
+  end
+
   test "analyzing a video" do
     blob = create_file_blob(filename: "video.mp4", content_type: "video/mp4")
     metadata = extract_metadata_from(blob)
@@ -14,6 +20,8 @@ class ActiveStorage::Analyzer::VideoAnalyzerTest < ActiveSupport::TestCase
     assert_equal 480, metadata[:height]
     assert_equal [4, 3], metadata[:display_aspect_ratio]
     assert_equal 5.166648, metadata[:duration]
+    assert metadata[:audio]
+    assert metadata[:video]
     assert_not_includes metadata, :angle
   end
 
@@ -24,7 +32,16 @@ class ActiveStorage::Analyzer::VideoAnalyzerTest < ActiveSupport::TestCase
     assert_equal 480, metadata[:width]
     assert_equal 640, metadata[:height]
     assert_equal [4, 3], metadata[:display_aspect_ratio]
-    assert_equal 90, metadata[:angle]
+    assert_includes [90, -90], metadata[:angle]
+  end
+
+  test "analyzing a rotated HDR video" do
+    blob = create_file_blob(filename: "rotated_hdr_video.mov", content_type: "video/quicktime")
+    metadata = extract_metadata_from(blob)
+
+    assert_equal 1080.0, metadata[:width]
+    assert_equal 1920.0, metadata[:height]
+    assert_includes [90, -90], metadata[:angle]
   end
 
   test "analyzing a video with rectangular samples" do
@@ -52,6 +69,8 @@ class ActiveStorage::Analyzer::VideoAnalyzerTest < ActiveSupport::TestCase
     assert_equal 640, metadata[:width]
     assert_equal 480, metadata[:height]
     assert_equal 5.229000, metadata[:duration]
+    assert metadata[:audio]
+    assert metadata[:video]
   end
 
   test "analyzing a video without a video stream" do
@@ -60,6 +79,44 @@ class ActiveStorage::Analyzer::VideoAnalyzerTest < ActiveSupport::TestCase
 
     assert_not_includes metadata, :width
     assert_not_includes metadata, :height
-    assert_equal 1.022000, metadata[:duration]
+    assert_includes 1.000000..1.022000, metadata[:duration]
+    assert_not metadata[:video]
+    assert metadata[:audio]
+  end
+
+  test "analyzing a video without an audio stream" do
+    blob = create_file_blob(filename: "video_without_audio_stream.mp4", content_type: "video/mp4")
+    metadata = extract_metadata_from(blob)
+
+    assert metadata[:video]
+    assert_not metadata[:audio]
+  end
+
+  test "analyzing a video with ffprobe arguments that exclude the video stream" do
+    blob = create_file_blob(filename: "video.mp4", content_type: "video/mp4")
+
+    ActiveStorage.with(ffprobe_arguments: "-select_streams a") do
+      metadata = extract_metadata_from(blob)
+
+      assert metadata[:audio]
+      assert_not metadata[:video]
+      assert_not metadata[:width]
+    end
+  end
+
+  test "analyzing a video file with duplicate tags from ffprobe" do
+    blob = create_file_blob(filename: "video_with_duplicate_tags.avi", content_type: "video/vnd.avi")
+    metadata = assert_nothing_raised { extract_metadata_from(blob) }
+    assert metadata[:video]
+  end
+
+  test "instrumenting analysis" do
+    blob = create_file_blob(filename: "video.mp4", content_type: "video/mp4")
+
+    assert_notifications_count("analyze.active_storage", 1) do
+      assert_notification("analyze.active_storage", analyzer: "ffprobe") do
+        blob.analyze
+      end
+    end
   end
 end

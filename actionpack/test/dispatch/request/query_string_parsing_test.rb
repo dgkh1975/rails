@@ -18,9 +18,13 @@ class QueryStringParsingTest < ActionDispatch::IntegrationTest
       @app = app
     end
 
+    def populate_rack_cache(env)
+      Rack::Request.new(env).params
+    end
+
     def call(env)
       # Trigger a Rack parse so that env caches the query params
-      Rack::Request.new(env).params
+      populate_rack_cache(env)
       @app.call(env)
     end
   end
@@ -107,8 +111,8 @@ class QueryStringParsingTest < ActionDispatch::IntegrationTest
   end
 
   test "perform_deep_munge" do
-    old_perform_deep_munge = ActionDispatch::Request::Utils.perform_deep_munge
-    ActionDispatch::Request::Utils.perform_deep_munge = false
+    old_perform_deep_munge = ActionDispatch::Http::Utils.perform_deep_munge
+    ActionDispatch::Http::Utils.perform_deep_munge = false
     begin
       assert_parses({ "action" => nil }, "action")
       assert_parses({ "action" => { "foo" => nil } }, "action[foo]")
@@ -118,7 +122,7 @@ class QueryStringParsingTest < ActionDispatch::IntegrationTest
       assert_parses({ "action" => { "foo" => [{ "bar" => nil }] } }, "action[foo][][bar]")
       assert_parses({ "action" => ["1", nil] }, "action[]=1&action[]")
     ensure
-      ActionDispatch::Request::Utils.perform_deep_munge = old_perform_deep_munge
+      ActionDispatch::Http::Utils.perform_deep_munge = old_perform_deep_munge
     end
   end
 
@@ -145,11 +149,7 @@ class QueryStringParsingTest < ActionDispatch::IntegrationTest
 
   test "ambiguous query string returns a bad request" do
     with_routing do |set|
-      set.draw do
-        ActiveSupport::Deprecation.silence do
-          get ":action", to: ::QueryStringParsingTest::TestController
-        end
-      end
+      draw_root_action_routes(set, ::QueryStringParsingTest::TestController)
 
       get "/parse", headers: { "QUERY_STRING" => "foo[]=bar&foo[4]=bar" }
       assert_response :bad_request
@@ -157,16 +157,15 @@ class QueryStringParsingTest < ActionDispatch::IntegrationTest
   end
 
   private
+    def app
+      @app ||= self.class.build_app do |middleware|
+        middleware.use(EarlyParse)
+      end
+    end
+
     def assert_parses(expected, actual)
       with_routing do |set|
-        set.draw do
-          ActiveSupport::Deprecation.silence do
-            get ":action", to: ::QueryStringParsingTest::TestController
-          end
-        end
-        @app = self.class.build_app(set) do |middleware|
-          middleware.use(EarlyParse)
-        end
+        draw_root_action_routes(set, ::QueryStringParsingTest::TestController)
 
         get "/parse", params: actual
         assert_response :ok

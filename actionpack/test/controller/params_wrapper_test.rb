@@ -1,12 +1,13 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "active_support/testing/ractors_assertions"
 
 module Admin; class User; end; end
 
 module ParamsWrapperTestHelp
   def with_default_wrapper_options(&block)
-    @controller.class._set_wrapper_options(format: [:json])
+    @controller.class._wrapper_options = ActionController::ParamsWrapper::Options.from_hash(format: [:json])
     @controller.class.inherited(@controller.class)
     yield
   end
@@ -257,7 +258,8 @@ class ParamsWrapperTest < ActionController::TestCase
   end
 
   def test_derived_wrapped_keys_from_nested_attributes
-    def User.nested_attributes_options
+    assert_not_respond_to User, :nested_attributes_options
+    User.define_singleton_method(:nested_attributes_options) do
       { person: {} }
     end
 
@@ -266,6 +268,34 @@ class ParamsWrapperTest < ActionController::TestCase
         @request.env["CONTENT_TYPE"] = "application/json"
         post :parse, params: { "username" => "sikachu", "person_attributes" => { "title" => "Developer" } }
         assert_parameters("username" => "sikachu", "person_attributes" => { "title" => "Developer" }, "user" => { "username" => "sikachu", "person_attributes" => { "title" => "Developer" } })
+      end
+    end
+  ensure
+    User.singleton_class.undef_method(:nested_attributes_options)
+  end
+
+  class RactorTest < ActionController::TestCase
+    include ActiveSupport::Testing::Isolation
+    include ActiveSupport::Testing::RactorsAssertions
+    include ParamsWrapperTestHelp
+
+    tests UsersController
+
+    test "wrapping keeps working once the options have been made shareable" do
+      with_default_wrapper_options do
+        assert_called(User, :attribute_names, times: 2, returns: ["username"]) do
+          ActiveSupport::Ractors.make_shareable(UsersController._wrapper_options)
+          assert_ractor_shareable UsersController._wrapper_options
+
+          @request.env["CONTENT_TYPE"] = "application/json"
+          post :parse, params: { "username" => "sikachu", "title" => "Developer" }
+          assert_parameters("username" => "sikachu", "title" => "Developer", "user" => { "username" => "sikachu" })
+        end
+
+        assert_equal ["user", ["username", "color", "size"]], on_ractor {
+          options = UsersController._wrapper_options
+          [options.name, options.include]
+        }
       end
     end
   end

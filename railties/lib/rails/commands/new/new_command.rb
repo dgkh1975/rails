@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Rails
   module Command
     class NewCommand < Base # :nodoc:
+      self.bin = "rails"
+
       no_commands do
         def help
           Rails::Command.invoke :application, [ "--help" ]

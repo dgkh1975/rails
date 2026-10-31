@@ -1,15 +1,17 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "fileutils"
-require "pathname"
-require "digest/md5"
 require "active_support/core_ext/numeric/bytes"
 
 module ActiveStorage
+  # Active Storage \Disk \Service
+  # =============================
+  #
   # Wraps a local disk path as an Active Storage service. See ActiveStorage::Service for the generic API
   # documentation that applies to all services.
   class Service::DiskService < Service
-    attr_reader :root
+    attr_accessor :root
 
     def initialize(root:, public: false, **options)
       @root = root
@@ -58,7 +60,16 @@ module ActiveStorage
 
     def delete_prefixed(prefix)
       instrument :delete_prefixed, prefix: prefix do
-        Dir.glob(path_for("#{prefix}*")).each do |path|
+        prefix_path = path_for(prefix)
+
+        # File.expand_path (called within path_for) strips trailing slashes.
+        # Restore trailing separator if the original prefix had one, so that
+        # the glob "prefix/*" matches files inside the directory, not siblings
+        # whose names start with the prefix string.
+        prefix_path += "/" if prefix.end_with?("/")
+
+        escaped = escape_glob_metacharacters(prefix_path)
+        Dir.glob("#{escaped}*").each do |path|
           FileUtils.rm_rf(path)
         end
       end
@@ -72,7 +83,7 @@ module ActiveStorage
       end
     end
 
-    def url_for_direct_upload(key, expires_in:, content_type:, content_length:, checksum:)
+    def url_for_direct_upload(key, expires_in:, content_type:, content_length:, checksum:, custom_metadata: {})
       instrument :url, key: key do |payload|
         verified_token_with_expiration = ActiveStorage.verifier.generate(
           {
@@ -86,11 +97,9 @@ module ActiveStorage
           purpose: :blob_token
         )
 
-        generated_url = url_helpers.update_rails_disk_service_url(verified_token_with_expiration, host: current_host)
-
-        payload[:url] = generated_url
-
-        generated_url
+        url_helpers.update_rails_disk_service_url(verified_token_with_expiration, url_options).tap do |generated_url|
+          payload[:url] = generated_url
+        end
       end
     end
 
@@ -98,8 +107,49 @@ module ActiveStorage
       { "Content-Type" => content_type }
     end
 
-    def path_for(key) #:nodoc:
-      File.join root, folder_for(key), key
+    # Every filesystem operation in DiskService resolves paths through this method (or through
+    # make_path_for, which delegates here). This is the primary filesystem security check: all
+    # path-traversal protection is enforced here. New methods that touch the filesystem MUST use
+    # path_for or make_path_for -- never construct paths from `root` directly.
+    def path_for(key) # :nodoc:
+      if key.blank?
+        raise ActiveStorage::InvalidKeyError, "key is blank"
+      end
+
+      # Reject keys with dot segments as defense in depth. This prevents path traversal both outside
+      # and within the storage root. The root containment check below is a more fundamental check on
+      # path traversal outside of the disk service root.
+      begin
+        if key.split("/").intersect?(%w[. ..])
+          raise ActiveStorage::InvalidKeyError, "key has path traversal segments"
+        end
+      rescue Encoding::CompatibilityError
+        raise ActiveStorage::InvalidKeyError, "key has incompatible encoding"
+      end
+
+      begin
+        path = File.expand_path(File.join(root, folder_for(key), key))
+      rescue ArgumentError
+        # ArgumentError catches null bytes
+        raise ActiveStorage::InvalidKeyError, "key is an invalid string"
+      end
+
+      # The resolved path must be inside the root directory.
+      unless path.start_with?(File.expand_path(root) + "/")
+        raise ActiveStorage::InvalidKeyError, "key is outside of disk service root"
+      end
+
+      path
+    end
+
+    def compose(source_keys, destination_key, **)
+      File.open(make_path_for(destination_key), "w") do |destination_file|
+        source_keys.each do |source_key|
+          File.open(path_for(source_key), "rb") do |source_file|
+            IO.copy_stream(source_file, destination_file)
+          end
+        end
+      end
     end
 
     private
@@ -124,14 +174,11 @@ module ActiveStorage
           purpose: :blob_key
         )
 
-        current_uri = URI.parse(current_host)
+        if url_options.blank?
+          raise ArgumentError, "Cannot generate URL for #{filename} using Disk service, please set ActiveStorage::Current.url_options."
+        end
 
-        url_helpers.rails_disk_service_url(verified_key_with_expiration,
-          protocol: current_uri.scheme,
-          host: current_uri.host,
-          port: current_uri.port,
-          filename: filename
-        )
+        url_helpers.rails_disk_service_url(verified_key_with_expiration, filename: filename, **url_options)
       end
 
 
@@ -149,23 +196,29 @@ module ActiveStorage
         [ key[0..1], key[2..3] ].join("/")
       end
 
+      def escape_glob_metacharacters(path)
+        path.gsub(/[\[\]*?{}\\]/) { |c| "\\#{c}" }
+      end
+
       def make_path_for(key)
         path_for(key).tap { |path| FileUtils.mkdir_p File.dirname(path) }
       end
 
       def ensure_integrity_of(key, checksum)
-        unless Digest::MD5.file(path_for(key)).base64digest == checksum
-          delete key
-          raise ActiveStorage::IntegrityError
-        end
+        return if File.open(path_for(key), "rb") do |file|
+          compute_checksum(file)
+        end == checksum
+
+        delete key
+        raise ActiveStorage::IntegrityError
       end
 
       def url_helpers
         @url_helpers ||= Rails.application.routes.url_helpers
       end
 
-      def current_host
-        ActiveStorage::Current.host
+      def url_options
+        ActiveStorage::Current.url_options
       end
   end
 end

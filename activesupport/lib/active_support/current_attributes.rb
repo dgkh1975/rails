@@ -1,9 +1,16 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "active_support/callbacks"
+require "active_support/execution_context"
+require "active_support/core_ext/object/with"
 require "active_support/core_ext/enumerable"
+require "active_support/core_ext/module/delegation"
 
 module ActiveSupport
+  # Current Attributes
+  # ==================
+  #
   # Abstract super class that provides a thread-isolated attributes singleton, which resets automatically
   # before and after each request. This allows you to keep all the per-request attributes easily
   # available to the whole system.
@@ -12,74 +19,76 @@ module ActiveSupport
   # facilitate easy access to the global, per-request attributes without passing them deeply
   # around everywhere:
   #
-  #   # app/models/current.rb
-  #   class Current < ActiveSupport::CurrentAttributes
-  #     attribute :account, :user
-  #     attribute :request_id, :user_agent, :ip_address
+  # ```
+  # # app/models/current.rb
+  # class Current < ActiveSupport::CurrentAttributes
+  #   attribute :account, :user
+  #   attribute :request_id, :user_agent, :ip_address
   #
-  #     resets { Time.zone = nil }
+  #   resets { Time.zone = nil }
   #
-  #     def user=(user)
-  #       super
-  #       self.account = user.account
-  #       Time.zone    = user.time_zone
-  #     end
+  #   def user=(user)
+  #     super
+  #     self.account = user.account
+  #     Time.zone    = user.time_zone
+  #   end
+  # end
+  #
+  # # app/controllers/concerns/authentication.rb
+  # module Authentication
+  #   extend ActiveSupport::Concern
+  #
+  #   included do
+  #     before_action :authenticate
   #   end
   #
-  #   # app/controllers/concerns/authentication.rb
-  #   module Authentication
-  #     extend ActiveSupport::Concern
-  #
-  #     included do
-  #       before_action :authenticate
-  #     end
-  #
-  #     private
-  #       def authenticate
-  #         if authenticated_user = User.find_by(id: cookies.encrypted[:user_id])
-  #           Current.user = authenticated_user
-  #         else
-  #           redirect_to new_session_url
-  #         end
-  #       end
-  #   end
-  #
-  #   # app/controllers/concerns/set_current_request_details.rb
-  #   module SetCurrentRequestDetails
-  #     extend ActiveSupport::Concern
-  #
-  #     included do
-  #       before_action do
-  #         Current.request_id = request.uuid
-  #         Current.user_agent = request.user_agent
-  #         Current.ip_address = request.ip
+  #   private
+  #     def authenticate
+  #       if authenticated_user = User.find_by(id: cookies.encrypted[:user_id])
+  #         Current.user = authenticated_user
+  #       else
+  #         redirect_to new_session_url
   #       end
   #     end
-  #   end
+  # end
   #
-  #   class ApplicationController < ActionController::Base
-  #     include Authentication
-  #     include SetCurrentRequestDetails
-  #   end
+  # # app/controllers/concerns/set_current_request_details.rb
+  # module SetCurrentRequestDetails
+  #   extend ActiveSupport::Concern
   #
-  #   class MessagesController < ApplicationController
-  #     def create
-  #       Current.account.messages.create(message_params)
+  #   included do
+  #     before_action do
+  #       Current.request_id = request.uuid
+  #       Current.user_agent = request.user_agent
+  #       Current.ip_address = request.ip
   #     end
   #   end
+  # end
   #
-  #   class Message < ApplicationRecord
-  #     belongs_to :creator, default: -> { Current.user }
-  #     after_create { |message| Event.create(record: message) }
-  #   end
+  # class ApplicationController < ActionController::Base
+  #   include Authentication
+  #   include SetCurrentRequestDetails
+  # end
   #
-  #   class Event < ApplicationRecord
-  #     before_create do
-  #       self.request_id = Current.request_id
-  #       self.user_agent = Current.user_agent
-  #       self.ip_address = Current.ip_address
-  #     end
+  # class MessagesController < ApplicationController
+  #   def create
+  #     Current.account.messages.create(message_params)
   #   end
+  # end
+  #
+  # class Message < ApplicationRecord
+  #   belongs_to :creator, default: -> { Current.user }
+  #   after_create { |message| Event.create(record: message) }
+  # end
+  #
+  # class Event < ApplicationRecord
+  #   before_create do
+  #     self.request_id = Current.request_id
+  #     self.user_agent = Current.user_agent
+  #     self.ip_address = Current.ip_address
+  #   end
+  # end
+  # ```
   #
   # A word of caution: It's easy to overdo a global singleton like Current and tangle your model as a result.
   # Current should only be used for a few, top-level globals, like account, user, and request details.
@@ -96,50 +105,62 @@ module ActiveSupport
       end
 
       # Declares one or more attributes that will be given both class and instance accessor methods.
-      def attribute(*names)
-        generated_attribute_methods.module_eval do
+      #
+      # #### Options
+      #
+      # * `:default` - The default value for the attributes. If the value
+      #   is a proc or lambda, it will be called whenever an instance is
+      #   constructed. Otherwise, the value will be duplicated with `#dup`.
+      #   Default values are re-assigned when the attributes are reset.
+      def attribute(*names, default: (no_default = true))
+        names = names.map(&:to_sym)
+
+        invalid_attribute_names = names & INVALID_ATTRIBUTE_NAMES
+        if invalid_attribute_names.any?
+          raise ArgumentError, "Restricted attribute names: #{invalid_attribute_names.join(", ")}"
+        end
+
+        Delegation.generate(singleton_class, names, to: :instance, nilable: false, signature: "")
+        Delegation.generate(singleton_class, names.map { |n| "#{n}=" }, to: :instance, nilable: false, signature: "value")
+
+        ActiveSupport::CodeGenerator.batch(generated_attribute_methods, __FILE__, __LINE__) do |owner|
           names.each do |name|
-            define_method(name) do
-              attributes[name.to_sym]
+            owner.define_cached_method(name, namespace: :current_attributes) do |batch|
+              batch <<
+                "def #{name}" <<
+                "@attributes[:#{name}]" <<
+                "end"
             end
-
-            define_method("#{name}=") do |attribute|
-              attributes[name.to_sym] = attribute
+            owner.define_cached_method("#{name}=", namespace: :current_attributes) do |batch|
+              batch <<
+                "def #{name}=(value)" <<
+                "@attributes[:#{name}] = value" <<
+                "end"
             end
           end
         end
 
-        names.each do |name|
-          define_singleton_method(name) do
-            instance.public_send(name)
-          end
-
-          define_singleton_method("#{name}=") do |attribute|
-            instance.public_send("#{name}=", attribute)
-          end
-        end
+        self.defaults = no_default ? defaults.except(*names) : defaults.merge(names.index_with { default })
       end
 
-      # Calls this block before #reset is called on the instance. Used for resetting external collaborators that depend on current values.
-      def before_reset(&block)
-        set_callback :reset, :before, &block
+      # Calls this callback before #reset is called on the instance. Used for resetting external collaborators that depend on current values.
+      def before_reset(*methods, &block)
+        set_callback :reset, :before, *methods, &block
       end
 
-      # Calls this block after #reset is called on the instance. Used for resetting external collaborators, like Time.zone.
-      def resets(&block)
-        set_callback :reset, :after, &block
+      # Calls this callback after #reset is called on the instance. Used for resetting external collaborators, like Time.zone.
+      def resets(*methods, &block)
+        set_callback :reset, :after, *methods, &block
       end
       alias_method :after_reset, :resets
 
       delegate :set, :reset, to: :instance
 
-      def reset_all # :nodoc:
-        current_instances.each_value(&:reset)
-      end
-
       def clear_all # :nodoc:
-        reset_all
-        current_instances.clear
+        if (instances = current_instances) && !instances.empty?
+          instances.values.each(&:reset)
+          instances.clear
+        end
       end
 
       private
@@ -148,61 +169,82 @@ module ActiveSupport
         end
 
         def current_instances
-          Thread.current[:current_attributes_instances] ||= {}
+          ExecutionContext.current_attributes_instances
         end
 
         def current_instances_key
           @current_instances_key ||= name.to_sym
         end
 
-        def method_missing(name, *args, &block)
-          # Caches the method definition as a singleton method of the receiver.
-          #
-          # By letting #delegate handle it, we avoid an enclosure that'll capture args.
-          singleton_class.delegate name, to: :instance
+        def method_missing(name, ...)
+          instance.public_send(name, ...)
+        end
 
-          send(name, *args, &block)
+        def respond_to_missing?(name, _)
+          instance.respond_to?(name) || super
+        end
+
+        def method_added(name)
+          super
+
+          # We try to generate instance delegators early to not rely on method_missing.
+          return if name == :initialize
+
+          # If the added method isn't public, we don't delegate it.
+          return unless public_method_defined?(name)
+
+          # If we already have a class method by that name, we don't override it.
+          return if singleton_class.method_defined?(name) || singleton_class.private_method_defined?(name)
+
+          Delegation.generate(singleton_class, [name], to: :instance, as: self, nilable: false)
         end
     end
 
-    attr_accessor :attributes
+    class_attribute :defaults, instance_writer: false, default: {}.freeze
+
+    attr_writer :attributes
 
     def initialize
-      @attributes = {}
+      @attributes = resolve_defaults
+    end
+
+    def attributes
+      @attributes.dup
     end
 
     # Expose one or more attributes within a block. Old values are returned after the block concludes.
     # Example demonstrating the common use of needing to set Current attributes outside the request-cycle:
     #
-    #   class Chat::PublicationJob < ApplicationJob
-    #     def perform(attributes, room_number, creator)
-    #       Current.set(person: creator) do
-    #         Chat::Publisher.publish(attributes: attributes, room_number: room_number)
-    #       end
+    # ```
+    # class Chat::PublicationJob < ApplicationJob
+    #   def perform(attributes, room_number, creator)
+    #     Current.set(person: creator) do
+    #       Chat::Publisher.publish(attributes: attributes, room_number: room_number)
     #     end
     #   end
-    def set(set_attributes)
-      old_attributes = compute_attributes(set_attributes.keys)
-      assign_attributes(set_attributes)
-      yield
-    ensure
-      assign_attributes(old_attributes)
+    # end
+    # ```
+    def set(attributes, &block)
+      with(**attributes, &block)
     end
 
     # Reset all attributes. Should be called before and after actions, when used as a per-request singleton.
     def reset
       run_callbacks :reset do
-        self.attributes = {}
+        self.attributes = resolve_defaults
       end
     end
 
     private
-      def assign_attributes(new_attributes)
-        new_attributes.each { |key, value| public_send("#{key}=", value) }
+      def resolve_defaults
+        defaults.transform_values do |value|
+          Proc === value ? value.call : value.dup
+        end
       end
 
-      def compute_attributes(keys)
-        keys.index_with { |key| public_send(key) }
-      end
+      # Declaring an attribute by one of these names would shadow the methods
+      # CurrentAttributes itself relies on. Computed at the very end of the
+      # class body so that all the methods defined above are captured.
+      INVALID_ATTRIBUTE_NAMES = (methods(false) + private_methods(false) + instance_methods(false) + private_instance_methods(false)).uniq.sort.freeze # :nodoc:
   end
 end

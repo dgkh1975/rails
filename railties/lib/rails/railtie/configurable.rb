@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-require "active_support/concern"
 
+# :markup: markdown
 module Rails
   class Railtie
     module Configurable
@@ -27,8 +27,8 @@ module Rails
         end
 
         private
-          def method_missing(*args, &block)
-            instance.send(*args, &block)
+          def method_missing(...)
+            instance.send(...)
           end
       end
     end

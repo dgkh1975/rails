@@ -49,13 +49,13 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
   end
 
   test "to_s returns the string representation of the parameters hash" do
-    assert_equal '{"person"=>{"age"=>"32", "name"=>{"first"=>"David", "last"=>"Heinemeier Hansson"}, ' \
-      '"addresses"=>[{"city"=>"Chicago", "state"=>"Illinois"}]}}', @params.to_s
+    assert_equal({ "person" => { "age" => "32", "name" => { "first" => "David", "last" => "Heinemeier Hansson" },
+      "addresses" => [{ "city" => "Chicago", "state" => "Illinois" }] } }.inspect, @params.to_s)
   end
 
   test "each carries permitted status" do
     @params.permit!
-    @params.each { |key, value| assert(value.permitted?) if key == "person" }
+    @params.each { |key, value| assert_predicate(value, :permitted?) if key == "person" }
   end
 
   test "each carries unpermitted status" do
@@ -72,12 +72,12 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
 
   test "each without a block returns an enumerator" do
     assert_kind_of Enumerator, @params.each
-    assert_equal @params, @params.each.to_h
+    assert_equal @params, ActionController::Parameters.new(@params.each.to_h)
   end
 
   test "each_pair carries permitted status" do
     @params.permit!
-    @params.each_pair { |key, value| assert(value.permitted?) if key == "person" }
+    @params.each_pair { |key, value| assert_predicate(value, :permitted?) if key == "person" }
   end
 
   test "each_pair carries unpermitted status" do
@@ -94,7 +94,7 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
 
   test "each_pair without a block returns an enumerator" do
     assert_kind_of Enumerator, @params.each_pair
-    assert_equal @params, @params.each_pair.to_h
+    assert_equal @params, ActionController::Parameters.new(@params.each_pair.to_h)
   end
 
   test "each_value carries permitted status" do
@@ -149,6 +149,25 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
     assert_not_predicate @params[:person].except(:name), :permitted?
   end
 
+  test "without retains permitted status" do
+    @params.permit!
+    assert_predicate @params.without(:person), :permitted?
+    assert_predicate @params[:person].without(:name), :permitted?
+  end
+
+  test "without retains unpermitted status" do
+    assert_not_predicate @params.without(:person), :permitted?
+    assert_not_predicate @params[:person].without(:name), :permitted?
+  end
+
+  test "exclude? returns true if the given key is not present in the params" do
+    assert @params.exclude?(:address)
+  end
+
+  test "exclude? returns false if the given key is present in the params" do
+    assert_not @params.exclude?(:person)
+  end
+
   test "fetch retains permitted status" do
     @params.permit!
     assert_predicate @params.fetch(:person), :permitted?
@@ -158,6 +177,59 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
   test "fetch retains unpermitted status" do
     assert_not_predicate @params.fetch(:person), :permitted?
     assert_not_predicate @params[:person].fetch(:name), :permitted?
+  end
+
+  test "fetch yields string key to block when missing" do
+    key = @params.fetch("missing") { |missing_key| missing_key }
+
+    assert_equal "missing", key
+  end
+
+  test "fetch yields symbol key to block when missing" do
+    key = @params.fetch(:missing) { |missing_key| missing_key }
+
+    assert_equal :missing, key
+  end
+
+  test "fetch_values returns values for given keys" do
+    params = ActionController::Parameters.new(name: "Francesco", age: 22)
+    name, age = params.fetch_values(:name, :age)
+
+    assert_equal "Francesco", name
+    assert_equal 22, age
+  end
+
+  test "fetch_values raises ParameterMissing when string key not found" do
+    params = ActionController::Parameters.new(name: "Francesco")
+    error = assert_raises(ActionController::ParameterMissing) do
+      params.fetch_values(:name, "missing_key")
+    end
+    assert_equal "missing_key", error.param
+  end
+
+  test "fetch_values raises ParameterMissing when symbol key not found" do
+    params = ActionController::Parameters.new(name: "Francesco")
+    error = assert_raises(ActionController::ParameterMissing) do
+      params.fetch_values(:name, :missing_key)
+    end
+    assert_equal :missing_key, error.param
+  end
+
+  test "fetch_values with block returns block result for missing keys" do
+    params = ActionController::Parameters.new(name: "Francesco")
+    assert_equal ["Francesco", :age], params.fetch_values(:name, :age, &:itself)
+    assert_equal ["Francesco", "age"], params.fetch_values(:name, "age", &:itself)
+  end
+
+  test "fetch_values retains permitted status" do
+    @params.permit!
+    values = @params.fetch_values(:person)
+    assert_predicate values[0], :permitted?
+  end
+
+  test "fetch_values retains unpermitted status" do
+    values = @params.fetch_values(:person)
+    assert_not_predicate values[0], :permitted?
   end
 
   test "has_key? returns true if the given key is present in the params" do
@@ -216,6 +288,11 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
     assert_predicate @params.reject { |k| k == "person" }, :permitted?
   end
 
+  test "reject without a block returns an enumerator" do
+    assert_kind_of Enumerator, @params.reject
+    assert_kind_of ActionController::Parameters, @params.reject.each { |k, v| false }
+  end
+
   test "select retains permitted status" do
     @params.permit!
     assert_predicate @params.select { |k| k == "person" }, :permitted?
@@ -223,6 +300,11 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
 
   test "select retains unpermitted status" do
     assert_not_predicate @params.select { |k| k == "person" }, :permitted?
+  end
+
+  test "select without a block returns an enumerator" do
+    assert_kind_of Enumerator, @params.select
+    assert_kind_of ActionController::Parameters, @params.select.each { |k, v| true }
   end
 
   test "slice retains permitted status" do
@@ -260,6 +342,34 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
 
   test "deep_transform_keys retains unpermitted status" do
     assert_not_predicate @params.deep_transform_keys { |k| k }, :permitted?
+  end
+
+  test "deep_transform_values retains permitted status" do
+    @params.permit!
+    assert_predicate @params.deep_transform_values { |v| v }, :permitted?
+  end
+
+  test "deep_transform_values retains unpermitted status" do
+    assert_not_predicate @params.deep_transform_values { |v| v }, :permitted?
+  end
+
+  test "deep_transform_values yields only leaf values" do
+    yielded = []
+    @params.deep_transform_values { |v| yielded << v; v }
+
+    assert_includes yielded, "32"
+    assert_includes yielded, "David"
+    assert_includes yielded, "Heinemeier Hansson"
+    assert_includes yielded, "Chicago"
+    assert_includes yielded, "Illinois"
+    assert_not(yielded.any? { |v| v.is_a?(Hash) || v.is_a?(ActionController::Parameters) || v.is_a?(Array) })
+  end
+
+  test "deep_transform_values returns a new ActionController::Parameters" do
+    result = @params.deep_transform_values { |v| v }
+
+    assert_kind_of ActionController::Parameters, result
+    assert_not_same @params, result
   end
 
   test "transform_values retains permitted status" do
@@ -305,8 +415,8 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
   end
 
   test "values returns an array of the values of the params" do
-    params = ActionController::Parameters.new(city: "Chicago", state: "Illinois")
-    assert_equal ["Chicago", "Illinois"], params.values
+    params = ActionController::Parameters.new(city: "Chicago", state: "Illinois", person: ActionController::Parameters.new(first_name: "David"))
+    assert_equal ["Chicago", "Illinois", ActionController::Parameters.new(first_name: "David")], params.values
   end
 
   test "values_at retains permitted status" do
@@ -368,10 +478,19 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
   end
 
   test "inspect shows both class name, parameters and permitted flag" do
+    hash = {
+      "person" => {
+        "age" => "32",
+        "name" => {
+          "first" => "David",
+          "last" => "Heinemeier Hansson"
+        },
+        "addresses" => [{ "city" => "Chicago", "state" => "Illinois" }]
+      },
+    }
+
     assert_equal(
-      '#<ActionController::Parameters {"person"=>{"age"=>"32", '\
-        '"name"=>{"first"=>"David", "last"=>"Heinemeier Hansson"}, ' \
-        '"addresses"=>[{"city"=>"Chicago", "state"=>"Illinois"}]}} permitted: false>',
+      "#<ActionController::Parameters #{hash} permitted: false>",
       @params.inspect
     )
   end
@@ -392,9 +511,7 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
   test "#dig converts hashes to parameters" do
     assert_kind_of ActionController::Parameters, @params.dig(:person)
     assert_kind_of ActionController::Parameters, @params.dig(:person, :addresses, 0)
-    assert @params.dig(:person, :addresses).all? do |value|
-      value.is_a?(ActionController::Parameters)
-    end
+    assert @params.dig(:person, :addresses).all?(ActionController::Parameters)
   end
 
   test "mutating #dig return value mutates underlying parameters" do
@@ -403,5 +520,18 @@ class ParametersAccessorsTest < ActiveSupport::TestCase
 
     @params.dig(:person, :addresses)[0] = { city: "Boston", state: "Massachusetts" }
     assert_equal "Boston", @params.dig(:person, :addresses, 0, :city)
+  end
+
+  test "#extract_value splits param by delimiter" do
+    params = ActionController::Parameters.new(
+      id: "1_123",
+      tags: "ruby,rails,web",
+      blank_tags: ",ruby,,rails,"
+    )
+
+    assert_equal(["1", "123"], params.extract_value(:id))
+    assert_equal(["ruby", "rails", "web"], params.extract_value(:tags, delimiter: ","))
+    assert_equal(["", "ruby", "", "rails", ""], params.extract_value(:blank_tags, delimiter: ","))
+    assert_nil(params.extract_value(:non_existent_key))
   end
 end

@@ -1,12 +1,22 @@
 # frozen_string_literal: true
 
-require "active_support/core_ext/class/attribute"
+# :markup: markdown
 require "minitest"
 
 module Rails
   class TestUnitReporter < Minitest::StatisticsReporter
-    class_attribute :app_root
-    class_attribute :executable, default: "rails test"
+    @app_root = ENV["RAILS_TEST_PWD"]
+    singleton_class.attr_accessor :app_root
+
+    @executable = ENV.fetch("RAILS_TEST_EXECUTABLE", "bin/rails test")
+    singleton_class.attr_accessor :executable
+
+    def prerecord(test_class, test_name)
+      super
+      if options[:verbose]
+        io.print "%s#%s = " % [test_class.name, test_name]
+      end
+    end
 
     def record(result)
       super
@@ -52,7 +62,11 @@ module Rails
     end
 
     def relative_path_for(file)
-      file.sub(/^#{app_root}\/?/, "")
+      if app_root
+        File.expand_path(file).sub(/^#{app_root}\/?/, "")
+      else
+        file
+      end
     end
 
     private
@@ -65,8 +79,7 @@ module Rails
       end
 
       def format_line(result)
-        klass = result.respond_to?(:klass) ? result.klass : result.class
-        "%s#%s = %.2f s = %s" % [klass, result.name, result.time, result.result_code]
+        "%.2f s = %s" % [result.time, result.result_code]
       end
 
       def format_rerun_snippet(result)
@@ -76,15 +89,19 @@ module Rails
           result.method(result.name).source_location
         end
 
-        "#{executable} #{relative_path_for(location)}:#{line}"
+        "#{self.class.executable} #{relative_path_for(location)}:#{line}"
       end
 
       def app_root
         @app_root ||= self.class.app_root ||
-          if defined?(ENGINE_ROOT)
+          if ENV["RAILS_TEST_PWD"]
+            ENV["RAILS_TEST_PWD"]
+          elsif defined?(ENGINE_ROOT)
             ENGINE_ROOT
           elsif Rails.respond_to?(:root)
             Rails.root
+          else
+            Dir.pwd
           end
       end
 
@@ -98,7 +115,7 @@ module Rails
         "E" => codes[:red],
         "F" => codes[:red],
         "S" => codes[:yellow]
-      }
+      }.freeze
 
       def color_output(string, by:)
         if colored_output?

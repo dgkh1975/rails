@@ -1,16 +1,15 @@
 # frozen_string_literal: true
 
 require "cases/helper"
-require "active_record/explain_subscriber"
 require "active_record/explain_registry"
 
-if ActiveRecord::Base.connection.supports_explain?
+if ActiveRecord::Base.lease_connection.supports_explain?
   class ExplainSubscriberTest < ActiveRecord::TestCase
-    SUBSCRIBER = ActiveRecord::ExplainSubscriber.new
+    SUBSCRIBER = ActiveRecord::ExplainRegistry::Subscriber.new
 
     def setup
       ActiveRecord::ExplainRegistry.reset
-      ActiveRecord::ExplainRegistry.collect = true
+      ActiveRecord::ExplainRegistry.start
     end
 
     def test_collects_nothing_if_the_payload_has_an_exception
@@ -19,7 +18,7 @@ if ActiveRecord::Base.connection.supports_explain?
     end
 
     def test_collects_nothing_for_ignored_payloads
-      ActiveRecord::ExplainSubscriber::IGNORED_PAYLOADS.each do |ip|
+      ActiveRecord::ExplainRegistry::Subscriber::IGNORED_PAYLOADS.each do |ip|
         SUBSCRIBER.finish(nil, nil, name: ip)
       end
       assert_empty queries
@@ -52,6 +51,11 @@ if ActiveRecord::Base.connection.supports_explain?
 
     def test_collects_cte_queries
       SUBSCRIBER.finish(nil, nil, name: "SQL", sql: "with s as (values(3)) select 1 from s")
+      assert_equal 1, queries.size
+    end
+
+    def test_collects_queries_starting_with_comment
+      SUBSCRIBER.finish(nil, nil, name: "SQL", sql: "/* comment */ select 1 from users")
       assert_equal 1, queries.size
     end
 

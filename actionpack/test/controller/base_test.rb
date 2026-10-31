@@ -2,6 +2,7 @@
 
 require "abstract_unit"
 require "active_support/logger"
+require "active_support/testing/ractors_assertions"
 require "controller/fake_models"
 
 # Provide some controller to run the tests on.
@@ -13,10 +14,26 @@ end
 class EmptyController < ActionController::Base
 end
 
+class CatController < ActionController::Base
+end
+
+class DogController < ActionController::Base
+end
+
+class FishController < ActionController::Base
+end
+
 class SimpleController < ActionController::Base
+  def status
+    head :ok
+  end
+
   def hello
     self.response_body = "hello"
   end
+end
+
+class ChildController < SimpleController
 end
 
 class NonEmptyController < ActionController::Base
@@ -55,6 +72,12 @@ class UrlOptionsController < ActionController::Base
   end
 end
 
+class UrlOptionsMemoizationController < ActionController::Base
+  def index
+    head :ok
+  end
+end
+
 class RecordIdentifierIncludedController < ActionController::Base
   include ActionView::RecordIdentifier
 end
@@ -65,7 +88,32 @@ class ActionMissingController < ActionController::Base
   end
 end
 
+class WithoutRouterController < ActionController::Base
+  after_action :log_request_details
+
+  def index
+    head :ok
+  end
+
+  private
+    def log_request_details
+      request.route_uri_pattern
+    end
+end
+
+class WithoutRouterTest < ActionController::TestCase
+  tests WithoutRouterController
+
+  def test_request_route_uri_pattern_in_after_action_callback
+    assert_nothing_raised do
+      get :index
+    end
+  end
+end
+
 class ControllerClassTests < ActiveSupport::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   def test_controller_path
     assert_equal "empty", EmptyController.controller_path
     assert_equal EmptyController.controller_path, EmptyController.new.controller_path
@@ -73,9 +121,28 @@ class ControllerClassTests < ActiveSupport::TestCase
     assert_equal Submodule::ContainedEmptyController.controller_path, Submodule::ContainedEmptyController.new.controller_path
   end
 
+  def test_controller_path_is_eagerly_set_and_accessible_from_a_ractor
+    value = on_ractor do
+      CatController.controller_path
+    end
+
+    assert_equal("cat", value)
+  end
+
   def test_controller_name
     assert_equal "empty", EmptyController.controller_name
     assert_equal "contained_empty", Submodule::ContainedEmptyController.controller_name
+  end
+
+  def test_controller_name_set_on_the_main_ractor_is_accessible_from_a_ractor
+    assert_equal "dog", DogController.controller_name
+    assert_equal "dog", on_ractor { DogController.controller_name }
+  end
+
+  def test_controller_name_is_computed_on_eager_load_and_accessible_from_a_ractor
+    FishController.eager_load!
+
+    assert_equal "fish", on_ractor { FishController.controller_name }
   end
 
   def test_no_deprecation_when_action_view_record_identifier_is_included
@@ -83,14 +150,14 @@ class ControllerClassTests < ActiveSupport::TestCase
     record.save
 
     dom_id = nil
-    assert_not_deprecated do
+    assert_not_deprecated(ActionController.deprecator) do
       dom_id = RecordIdentifierIncludedController.new.dom_id(record)
     end
 
     assert_equal "comment_1", dom_id
 
     dom_class = nil
-    assert_not_deprecated do
+    assert_not_deprecated(ActionController.deprecator) do
       dom_class = RecordIdentifierIncludedController.new.dom_class(record)
     end
     assert_equal "comment", dom_class
@@ -98,6 +165,8 @@ class ControllerClassTests < ActiveSupport::TestCase
 end
 
 class ControllerInstanceTests < ActiveSupport::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   def setup
     @empty = EmptyController.new
     @empty.set_request!(ActionDispatch::Request.empty)
@@ -112,10 +181,26 @@ class ControllerInstanceTests < ActiveSupport::TestCase
     assert_predicate @empty, :performed?
   end
 
-  def test_action_methods
+  def test_empty_controller_action_methods
     @empty_controllers.each do |c|
       assert_equal Set.new, c.class.action_methods, "#{c.controller_path} should be empty!"
     end
+  end
+
+  def test_action_methods_with_inherited_shadowed_internal_method
+    assert_includes ActionController::Base.instance_methods, :status
+    assert_equal Set.new(["status", "hello"]), SimpleController.action_methods
+    assert_equal Set.new(["status", "hello"]), ChildController.action_methods
+  end
+
+  def test_action_methods_is_ractor_safe_by_default
+    SimpleController.action_methods
+
+    value = on_ractor do
+      SimpleController.action_methods
+    end
+
+    assert_equal Set.new(["status", "hello"]), value
   end
 
   def test_temporary_anonymous_controllers
@@ -133,7 +218,7 @@ class ControllerInstanceTests < ActiveSupport::TestCase
     ActionDispatch::Response.default_headers = {
       "X-Frame-Options" => "DENY",
       "X-Content-Type-Options" => "nosniff",
-      "X-XSS-Protection" => "1;"
+      "X-XSS-Protection" => "0"
     }
 
     response_headers = SimpleController.action("hello").call(
@@ -172,14 +257,12 @@ class PerformActionTest < ActionController::TestCase
     assert_equal "The action 'non_existent' could not be found for EmptyController", exception.message
   end
 
-  if defined?(DidYouMean) && DidYouMean.respond_to?(:correct_error)
-    def test_exceptions_have_suggestions_for_fix
-      use_controller SimpleController
-      exception = assert_raise AbstractController::ActionNotFound do
-        get :non_existent
-      end
-      assert_match "Did you mean?", exception.message
+  def test_exceptions_have_suggestions_for_fix
+    use_controller SimpleController
+    exception = assert_raise AbstractController::ActionNotFound do
+      get :ello
     end
+    assert_match "Did you mean?", exception.detailed_message
   end
 
   def test_action_missing_should_work
@@ -217,10 +300,7 @@ class UrlOptionsTest < ActionController::TestCase
     with_routing do |set|
       set.draw do
         get "from_view", to: "url_options#from_view", as: :from_view
-
-        ActiveSupport::Deprecation.silence do
-          get ":controller/:action"
-        end
+        get "default_url_options/index", to: "default_url_options#index"
       end
 
       get :from_view, params: { route: "from_view_url" }
@@ -242,6 +322,43 @@ class UrlOptionsTest < ActionController::TestCase
   end
 end
 
+class UrlOptionsMemoizationTest < ActionController::TestCase
+  tests UrlOptionsMemoizationController
+
+  def test_url_options_with_script_name_are_memoized_until_the_script_name_changes
+    with_routing do |set|
+      set.draw { get "index", to: "url_options_memoization#index" }
+      @request.env["action_dispatch.routes"] = set
+      @request.script_name = "/first"
+
+      get :index
+      options = @controller.url_options
+
+      assert_equal "/first", options[:script_name]
+      assert_same options, @controller.url_options
+
+      @controller.request.script_name = "/second"
+      assert_equal "/second", @controller.url_options[:script_name]
+    end
+  end
+
+  def test_url_options_follow_the_request_when_the_controller_is_recycled
+    with_routing do |set|
+      set.draw { get "index", to: "url_options_memoization#index" }
+
+      @request.env["action_dispatch.routes"] = set
+      @request.host = "first.example.com"
+      get :index
+      assert_equal "first.example.com", @controller.url_options[:host]
+
+      @request.env["action_dispatch.routes"] = set
+      @request.host = "second.example.com"
+      get :index
+      assert_equal "second.example.com", @controller.url_options[:host]
+    end
+  end
+end
+
 class DefaultUrlOptionsTest < ActionController::TestCase
   tests DefaultUrlOptionsController
 
@@ -254,10 +371,7 @@ class DefaultUrlOptionsTest < ActionController::TestCase
     with_routing do |set|
       set.draw do
         get "from_view", to: "default_url_options#from_view", as: :from_view
-
-        ActiveSupport::Deprecation.silence do
-          get ":controller/:action"
-        end
+        get "default_url_options/new", to: "default_url_options#new"
       end
 
       get :from_view, params: { route: "from_view_url" }
@@ -273,10 +387,6 @@ class DefaultUrlOptionsTest < ActionController::TestCase
       set.draw do
         scope("/:locale") do
           resources :descriptions
-        end
-
-        ActiveSupport::Deprecation.silence do
-          get ":controller/:action"
         end
       end
 
@@ -333,5 +443,17 @@ class EmptyUrlOptionsTest < ActionController::TestCase
 
       assert_equal "/things", @controller.things_path
     end
+  end
+end
+
+class BaseTest < ActiveSupport::TestCase
+  def test_included_modules_are_tracked
+    base_content = File.read("#{__dir__}/../../lib/action_controller/base.rb")
+    included_modules = base_content.scan(/(?<=include )[A-Z].*/)
+
+    assert_equal(
+      ActionController::Base::MODULES.map { |m| m.to_s.delete_prefix("ActionController::") },
+      included_modules
+    )
   end
 end

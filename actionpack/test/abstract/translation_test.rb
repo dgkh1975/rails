@@ -20,6 +20,10 @@ module AbstractController
               translation: {
                 index: {
                   foo: "bar",
+                  hello: "<a>Hello World</a>",
+                  hello_html: "<a>Hello World</a>",
+                  interpolated_html: "<a>Hello %{word}</a>",
+                  nested: { html: "<a>nested</a>" }
                 },
                 no_action: "no_action_tr",
               },
@@ -41,16 +45,6 @@ module AbstractController
 
       def test_action_controller_base_responds_to_l
         assert_respond_to @controller, :l
-      end
-
-      def test_raises_missing_translation_message_with_raise_config_option
-        AbstractController::Translation.raise_on_missing_translations = true
-
-        assert_raise(I18n::MissingTranslationData) do
-          @controller.t("translations.missing")
-        end
-      ensure
-        AbstractController::Translation.raise_on_missing_translations = false
       end
 
       def test_raises_missing_translation_message_with_raise_option
@@ -82,6 +76,41 @@ module AbstractController
         end
       end
 
+      def test_lazy_scope_lookup
+        @controller.stub :action_name, :index do
+          assert_equal "<a>nested</a>", @controller.t("html", scope: ".nested")
+        end
+      end
+
+      def test_lazy_scope_lookup_with_symbol
+        @controller.stub :action_name, :index do
+          assert_equal "<a>nested</a>", @controller.t("html", scope: :".nested")
+        end
+      end
+
+      def test_relative_key_takes_precedence_over_relative_scope
+        @controller.stub :action_name, :index do
+          matcher_called = false
+          matcher = ->(key, options) do
+            matcher_called = true
+            assert_equal "abstract_controller.testing.translation.index.bar", key
+            assert_equal ".foo", options[:scope]
+          end
+
+          I18n.stub(:translate, matcher) do
+            @controller.t(".bar", scope: ".foo")
+          end
+
+          assert matcher_called
+        end
+      end
+
+      def test_absolute_scope_lookup_is_unaffected
+        @controller.stub :action_name, :index do
+          assert_equal "bar", @controller.t("two", scope: "one")
+        end
+      end
+
       def test_default_translation
         @controller.stub :action_name, :index do
           assert_equal "bar", @controller.t("one.two")
@@ -89,10 +118,98 @@ module AbstractController
         end
       end
 
+      def test_default_translation_as_unsafe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".twoz", default: ["<tag>"])
+          assert_equal "<tag>", translation
+          assert_equal false, translation.html_safe?
+        end
+      end
+
+      def test_default_translation_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".twoz_html", default: ["<tag>"])
+          assert_equal "&lt;tag&gt;", translation
+          assert_equal true, translation.html_safe?
+        end
+      end
+
+      def test_default_translation_with_raise_as_unsafe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".twoz", raise: true, default: ["<tag>"])
+          assert_equal "<tag>", translation
+          assert_equal false, translation.html_safe?
+        end
+      end
+
+      def test_default_translation_with_raise_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".twoz_html", raise: true, default: ["<tag>"])
+          assert_equal "&lt;tag&gt;", translation
+          assert_equal true, translation.html_safe?
+        end
+      end
+
       def test_localize
         time, expected = Time.gm(2000), "Sat, 01 Jan 2000 00:00:00 +0000"
         I18n.stub :localize, expected do
           assert_equal expected, @controller.l(time)
+        end
+      end
+
+      def test_translate_does_not_mark_plain_text_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".hello")
+          assert_equal "<a>Hello World</a>", translation
+          assert_equal false, translation.html_safe?
+        end
+      end
+
+      def test_translate_marks_translations_with_a_html_suffix_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".hello_html")
+          assert_equal "<a>Hello World</a>", translation
+          assert_equal true, translation.html_safe?
+        end
+      end
+
+      def test_translate_marks_translation_with_nested_html_key
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".nested.html")
+          assert_equal "<a>nested</a>", translation
+          assert_equal true, translation.html_safe?
+        end
+      end
+
+      def test_translate_escapes_interpolations_in_translations_with_a_html_suffix
+        word_struct = Struct.new(:to_s)
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".interpolated_html", word: "<World>")
+          assert_equal "<a>Hello &lt;World&gt;</a>", translation
+          assert_equal true, translation.html_safe?
+
+          translation = @controller.t(".interpolated_html", word: word_struct.new("<World>"))
+          assert_equal "<a>Hello &lt;World&gt;</a>", translation
+          assert_equal true, translation.html_safe?
+        end
+      end
+
+      def test_translate_marks_translation_with_missing_html_key_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t("<tag>.html")
+          assert_equal false, translation.html_safe?
+          assert_equal "Translation missing: en.<tag>.html", translation
+        end
+      end
+      def test_translate_marks_translation_with_missing_nested_html_key_as_safe_html
+        @controller.stub :action_name, :index do
+          translation = @controller.t(".<tag>.html")
+          assert_equal false, translation.html_safe?
+          assert_equal(<<~MSG.strip, translation)
+            Translation missing. Options considered were:
+            - en.abstract_controller.testing.translation.index.<tag>.html
+            - en.abstract_controller.testing.translation.<tag>.html
+          MSG
         end
       end
     end

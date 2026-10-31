@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
-  class Service::Registry #:nodoc:
+  class Service::Registry # :nodoc:
     def initialize(configurations)
       @configurations = configurations.deep_symbolize_keys
       @services = {}
@@ -20,6 +21,12 @@ module ActiveStorage
           end
         end
       end
+    end
+
+    def inspect # :nodoc:
+      attrs = configurations.any? ?
+        " configurations=[#{configurations.keys.map(&:inspect).join(", ")}]" : ""
+      "#<#{self.class}#{attrs}>"
     end
 
     private

@@ -1,16 +1,20 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 module ActiveSupport
   class Deprecation
-    class DeprecationProxy #:nodoc:
-      def self.new(*args, &block)
+    class DeprecationProxy < ::BasicObject # :nodoc:
+      def self.new(*args, **kwargs, &block)
         object = args.first
 
         return object unless object
         super
       end
 
-      instance_methods.each { |m| undef_method m unless /^__|^object_id$/.match?(m) }
+      # BasicObject defines these few methods itself. Forward them to the
+      # target like everything else, so that comparing or evaluating against a
+      # deprecated object warns too.
+      [:==, :!=, :!, :equal?, :instance_eval, :instance_exec].each { |m| undef_method m }
 
       # Don't give a deprecation warning on inspect since test/unit and error
       # logs rely on it for diagnostics.
@@ -18,29 +22,36 @@ module ActiveSupport
         target.inspect
       end
 
+      alias_method :object_id, :__id__
+
       private
-        def method_missing(called, *args, &block)
-          warn caller_locations, called, args
-          target.__send__(called, *args, &block)
+        def method_missing(called, ...)
+          warn(::Kernel.caller_locations, called, ...)
+          target.__send__(called, ...)
         end
     end
 
-    # DeprecatedObjectProxy transforms an object into a deprecated one. It
-    # takes an object, a deprecation message and optionally a deprecator. The
-    # deprecator defaults to +ActiveSupport::Deprecator+ if none is specified.
+    # DeprecatedObjectProxy transforms an object into a deprecated one. It takes an object, a deprecation message, and
+    # a deprecator.
     #
-    #   deprecated_object = ActiveSupport::Deprecation::DeprecatedObjectProxy.new(Object.new, "This object is now deprecated")
-    #   # => #<Object:0x007fb9b34c34b0>
+    # ```
+    # deprecated_object = ActiveSupport::Deprecation::DeprecatedObjectProxy.new(Object.new, "This object is now deprecated", ActiveSupport::Deprecation.new)
+    # # => #<Object:0x007fb9b34c34b0>
     #
-    #   deprecated_object.to_s
-    #   DEPRECATION WARNING: This object is now deprecated.
-    #   (Backtrace)
-    #   # => "#<Object:0x007fb9b34c34b0>"
+    # deprecated_object.to_s
+    # DEPRECATION WARNING: This object is now deprecated.
+    # (Backtrace)
+    # # => "#<Object:0x007fb9b34c34b0>"
+    # ```
     class DeprecatedObjectProxy < DeprecationProxy
-      def initialize(object, message, deprecator = ActiveSupport::Deprecation.instance)
+      def initialize(object, message, deprecator)
         @object = object
         @message = message
         @deprecator = deprecator
+      end
+
+      def target=(object)
+        @object = object
       end
 
       private
@@ -48,45 +59,47 @@ module ActiveSupport
           @object
         end
 
-        def warn(callstack, called, args)
+        def warn(callstack, called, *, **)
           @deprecator.warn(@message, callstack)
         end
     end
 
-    # DeprecatedInstanceVariableProxy transforms an instance variable into a
-    # deprecated one. It takes an instance of a class, a method on that class
-    # and an instance variable. It optionally takes a deprecator as the last
-    # argument. The deprecator defaults to +ActiveSupport::Deprecator+ if none
-    # is specified.
+    # DeprecatedInstanceVariableProxy transforms an instance variable into a deprecated one. It takes an instance of a
+    # class, a method on that class, an instance variable, and a deprecator as a keyword argument.
     #
-    #   class Example
-    #     def initialize
-    #       @request = ActiveSupport::Deprecation::DeprecatedInstanceVariableProxy.new(self, :request, :@request)
-    #       @_request = :special_request
-    #     end
+    # Trying to use the deprecated instance variable will result in a deprecation warning, pointing to the method as a
+    # replacement.
     #
-    #     def request
-    #       @_request
-    #     end
-    #
-    #     def old_request
-    #       @request
-    #     end
+    # ```
+    # class Example
+    #   def initialize
+    #     @request = ActiveSupport::Deprecation::DeprecatedInstanceVariableProxy.new(self, :request, :@request, deprecator: ActiveSupport::Deprecation.new)
+    #     @_request = :special_request
     #   end
     #
-    #   example = Example.new
-    #   # => #<Example:0x007fb9b31090b8 @_request=:special_request, @request=:special_request>
+    #   def request
+    #     @_request
+    #   end
     #
-    #   example.old_request.to_s
-    #   # => DEPRECATION WARNING: @request is deprecated! Call request.to_s instead of
-    #      @request.to_s
-    #      (Backtrace information…)
-    #      "special_request"
+    #   def old_request
+    #     @request
+    #   end
+    # end
     #
-    #   example.request.to_s
-    #   # => "special_request"
+    # example = Example.new
+    # # => #<Example:0x007fb9b31090b8 @_request=:special_request, @request=:special_request>
+    #
+    # example.old_request.to_s
+    # # => DEPRECATION WARNING: @request is deprecated! Call request.to_s instead of
+    #    @request.to_s
+    #    (Backtrace information…)
+    #    "special_request"
+    #
+    # example.request.to_s
+    # # => "special_request"
+    # ```
     class DeprecatedInstanceVariableProxy < DeprecationProxy
-      def initialize(instance, method, var = "@#{method}", deprecator = ActiveSupport::Deprecation.instance)
+      def initialize(instance, method, var = "@#{method}", deprecator:)
         @instance = instance
         @method = method
         @var = var
@@ -98,28 +111,29 @@ module ActiveSupport
           @instance.__send__(@method)
         end
 
-        def warn(callstack, called, args)
+        def warn(callstack, called, *args, **kwargs)
+          args << kwargs unless kwargs.empty?
           @deprecator.warn("#{@var} is deprecated! Call #{@method}.#{called} instead of #{@var}.#{called}. Args: #{args.inspect}", callstack)
         end
     end
 
-    # DeprecatedConstantProxy transforms a constant into a deprecated one. It
-    # takes the names of an old (deprecated) constant and of a new constant
-    # (both in string form) and optionally a deprecator. The deprecator defaults
-    # to +ActiveSupport::Deprecator+ if none is specified. The deprecated constant
-    # now returns the value of the new one.
+    # DeprecatedConstantProxy transforms a constant into a deprecated one. It takes the full names of an old
+    # (deprecated) constant and of a new constant (both in string form) and a deprecator. The deprecated constant now
+    # returns the value of the new one.
     #
-    #   PLANETS = %w(mercury venus earth mars jupiter saturn uranus neptune pluto)
+    # ```
+    # PLANETS = %w(mercury venus earth mars jupiter saturn uranus neptune pluto)
     #
-    #   # (In a later update, the original implementation of `PLANETS` has been removed.)
+    # # (In a later update, the original implementation of `PLANETS` has been removed.)
     #
-    #   PLANETS_POST_2006 = %w(mercury venus earth mars jupiter saturn uranus neptune)
-    #   PLANETS = ActiveSupport::Deprecation::DeprecatedConstantProxy.new('PLANETS', 'PLANETS_POST_2006')
+    # PLANETS_POST_2006 = %w(mercury venus earth mars jupiter saturn uranus neptune)
+    # PLANETS = ActiveSupport::Deprecation::DeprecatedConstantProxy.new("PLANETS", "PLANETS_POST_2006", ActiveSupport::Deprecation.new)
     #
-    #   PLANETS.map { |planet| planet.capitalize }
-    #   # => DEPRECATION WARNING: PLANETS is deprecated! Use PLANETS_POST_2006 instead.
-    #        (Backtrace information…)
-    #        ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
+    # PLANETS.map { |planet| planet.capitalize }
+    # # => DEPRECATION WARNING: PLANETS is deprecated! Use PLANETS_POST_2006 instead.
+    #      (Backtrace information…)
+    #      ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
+    # ```
     class DeprecatedConstantProxy < Module
       def self.new(*args, **options, &block)
         object = args.first
@@ -128,10 +142,9 @@ module ActiveSupport
         super
       end
 
-      def initialize(old_const, new_const, deprecator = ActiveSupport::Deprecation.instance, message: "#{old_const} is deprecated! Use #{new_const} instead.")
+      def initialize(old_const, new_const, deprecator, message: "#{old_const} is deprecated! Use #{new_const} instead.")
         Kernel.require "active_support/inflector/methods"
 
-        @old_const = old_const
         @new_const = new_const
         @deprecator = deprecator
         @message = message
@@ -151,11 +164,28 @@ module ActiveSupport
 
       # Returns the class of the new constant.
       #
-      #   PLANETS_POST_2006 = %w(mercury venus earth mars jupiter saturn uranus neptune)
-      #   PLANETS = ActiveSupport::Deprecation::DeprecatedConstantProxy.new('PLANETS', 'PLANETS_POST_2006')
-      #   PLANETS.class # => Array
+      # ```
+      # PLANETS_POST_2006 = %w(mercury venus earth mars jupiter saturn uranus neptune)
+      # PLANETS = ActiveSupport::Deprecation::DeprecatedConstantProxy.new('PLANETS', 'PLANETS_POST_2006', ActiveSupport::Deprecation.new)
+      # PLANETS.class # => Array
+      # ```
       def class
         target.class
+      end
+
+      def append_features(base)
+        @deprecator.warn(@message, caller_locations)
+        base.include(target)
+      end
+
+      def prepend_features(base)
+        @deprecator.warn(@message, caller_locations)
+        base.prepend(target)
+      end
+
+      def extended(base)
+        @deprecator.warn(@message, caller_locations)
+        base.extend(target)
       end
 
       private
@@ -168,9 +198,9 @@ module ActiveSupport
           target.const_get(name)
         end
 
-        def method_missing(called, *args, &block)
+        def method_missing(...)
           @deprecator.warn(@message, caller_locations)
-          target.__send__(called, *args, &block)
+          target.__send__(...)
         end
     end
   end

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   module Attributes
     class Attribute < Struct.new :relation, :name
@@ -26,15 +27,11 @@ module Arel # :nodoc: all
       def able_to_type_cast?
         relation.able_to_type_cast?
       end
-    end
 
-    class String    < Attribute; end
-    class Time      < Attribute; end
-    class Boolean   < Attribute; end
-    class Decimal   < Attribute; end
-    class Float     < Attribute; end
-    class Integer   < Attribute; end
-    class Undefined < Attribute; end
+      def fetch_attribute(&)
+        yield self
+      end
+    end
   end
 
   Attribute = Attributes::Attribute

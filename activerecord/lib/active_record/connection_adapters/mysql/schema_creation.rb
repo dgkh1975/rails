@@ -7,12 +7,27 @@ module ActiveRecord
         delegate :add_sql_comment!, :mariadb?, to: :@conn, private: true
 
         private
-          def visit_DropForeignKey(name)
-            "DROP FOREIGN KEY #{name}"
+          def visit_AlterTable(o)
+            sql = +super
+            sql << ", #{o.algorithm}" if o.algorithm
+            sql << ", #{o.lock}" if o.lock
+            sql
           end
 
-          def visit_DropCheckConstraint(name)
-            "DROP #{mariadb? ? 'CONSTRAINT' : 'CHECK'} #{name}"
+          def visit_DropForeignKey(o)
+            "DROP FOREIGN KEY #{o.name}"
+          end
+
+          def visit_DropCheckConstraint(o)
+            "DROP #{mariadb? ? 'CONSTRAINT' : 'CHECK'} #{o.name}"
+          end
+
+          def visit_AddIndex(o)
+            "ADD #{accept(o.index)}"
+          end
+
+          def visit_DropIndex(o)
+            "DROP INDEX #{quote_column_name(o.name)}"
           end
 
           def visit_AddColumnDefinition(o)
@@ -24,9 +39,19 @@ module ActiveRecord
             add_column_position!(change_column_sql, column_options(o.column))
           end
 
+          def visit_ChangeColumnDefaultDefinition(o)
+            sql = +"ALTER COLUMN #{quote_column_name(o.column.name)} "
+            if o.default.nil? && !o.column.null
+              sql << "DROP DEFAULT"
+            else
+              sql << "SET DEFAULT #{quote_default_expression(o.default, o.column)}"
+            end
+          end
+
           def visit_CreateIndexDefinition(o)
             sql = visit_IndexDefinition(o.index, true)
             sql << " #{o.algorithm}" if o.algorithm
+            sql << " #{o.lock}" if o.lock
             sql
           end
 
@@ -40,6 +65,8 @@ module ActiveRecord
             sql << "USING #{o.using}" if o.using
             sql << "ON #{quote_table_name(o.table)}" if create
             sql << "(#{quoted_columns(o)})"
+            sql << "INVISIBLE" if o.disabled? && !mariadb?
+            sql << "IGNORED" if o.disabled? && mariadb?
 
             add_sql_comment!(sql.join(" "), o.comment)
           end

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "active_support/core_ext/array/extract"
 
 module ActiveRecord
@@ -12,8 +13,8 @@ module ActiveRecord
       def call(attribute, value)
         return attribute.in([]) if value.empty?
 
-        values = value.map { |x| x.is_a?(Base) ? x.id : x }
-        nils = values.extract!(&:nil?)
+        values = value.map { |x| x.respond_to?(:id) ? x.id : x }
+        nils = values.compact!
         ranges = values.extract! { |v| v.is_a?(Range) }
 
         values_predicate =
@@ -23,7 +24,7 @@ module ActiveRecord
           else Arel::Nodes::HomogeneousIn.new(values, attribute, :in)
           end
 
-        unless nils.empty?
+        if nils
           values_predicate = values_predicate.or(attribute.eq(nil))
         end
 
@@ -31,7 +32,9 @@ module ActiveRecord
           values_predicate
         else
           array_predicates = ranges.map! { |range| predicate_builder.build(attribute, range) }
-          array_predicates.inject(values_predicate, &:or)
+          values_predicate.or(
+            Arel::Nodes::Grouping.new Arel::Nodes::Or.new(array_predicates)
+          )
         end
       end
 

@@ -12,11 +12,11 @@ class SchemaAuthorizationTest < ActiveRecord::PostgreSQLTestCase
   COLUMNS = [
     "id serial primary key",
     "name character varying(50)"
-  ]
-  USERS = ["rails_pg_schema_user1", "rails_pg_schema_user2"]
+  ].freeze
+  USERS = ["u1", "u2"].map { |u| "#{ARTest.test_configuration_hashes["arunit"]["database"]}_#{u}" }.freeze
 
   def setup
-    @connection = ActiveRecord::Base.connection
+    @connection = ActiveRecord::Base.lease_connection
     @connection.execute "SET search_path TO '$user',public"
     set_session_auth
     USERS.each do |u|
@@ -63,7 +63,7 @@ class SchemaAuthorizationTest < ActiveRecord::PostgreSQLTestCase
     end
   end
 
-  if ActiveRecord::Base.connection.prepared_statements
+  if ActiveRecord::Base.lease_connection.prepared_statements
     def test_auth_with_bind
       assert_nothing_raised do
         set_session_auth

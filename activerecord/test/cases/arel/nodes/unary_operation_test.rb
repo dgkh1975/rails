@@ -24,7 +24,7 @@ module Arel
         ordering = operation.desc
         assert_kind_of Descending, ordering
         assert_equal operation, ordering.expr
-        assert ordering.descending?
+        assert_predicate ordering, :descending?
       end
 
       def test_equality_with_same_ivars
@@ -34,6 +34,11 @@ module Arel
 
       def test_inequality_with_different_ivars
         array = [UnaryOperation.new(:-, 1), UnaryOperation.new(:-, 2)]
+        assert_equal 2, array.uniq.size
+      end
+
+      def test_inequality_with_different_operator
+        array = [UnaryOperation.new(:-, 1), UnaryOperation.new(:~, 1)]
         assert_equal 2, array.uniq.size
       end
     end

@@ -2,9 +2,20 @@
 
 require "abstract_unit"
 require "action_view/dependency_tracker"
+require "active_support/testing/ractors_assertions"
 
 class NeckbeardTracker
   def self.call(name, template)
+    ["foo/#{name}"]
+  end
+end
+
+class BowtieTracker
+  def supports_view_paths?
+    true
+  end
+
+  def call(name, template, view_paths = nil)
     ["foo/#{name}"]
   end
 end
@@ -14,6 +25,17 @@ class FakeTemplate
 
   def initialize(source, handler = Neckbeard)
     @source, @handler = source, handler
+    if handler == :erb
+      @handler = ActionView::Template::Handlers::ERB.new
+    end
+  end
+
+  def type
+    ["text/html"]
+  end
+
+  def encode!
+    source
   end
 end
 
@@ -32,13 +54,29 @@ class DependencyTrackerTest < ActionView::TestCase
 
   def teardown
     ActionView::Template.unregister_template_handler :neckbeard
-    tracker.remove_tracker(:neckbeard)
+    tracker.remove_tracker(Neckbeard)
   end
 
   def test_finds_tracker_by_template_handler
     template = FakeTemplate.new("boo/hoo")
     dependencies = tracker.find_dependencies("boo/hoo", template)
     assert_equal ["foo/boo/hoo"], dependencies
+  end
+
+  def test_changing_render_tracker_re_registers_erb_tracker
+    erb_handler = ActionView::Template.handler_for_extension("erb")
+    trackers = ActionView::DependencyTracker.instance_variable_get(:@trackers)
+    original = ActionView.render_tracker
+
+    ActionView.render_tracker = :ruby
+    assert_equal ActionView::DependencyTracker::RubyTracker, trackers[erb_handler],
+      "Expected RubyTracker after setting render_tracker to :ruby"
+
+    ActionView.render_tracker = :regex
+    assert_equal ActionView::DependencyTracker::ERBTracker, trackers[erb_handler],
+      "Expected ERBTracker after setting render_tracker to :regex"
+  ensure
+    ActionView.render_tracker = original
   end
 
   def test_returns_empty_array_if_no_tracker_is_found
@@ -48,71 +86,91 @@ class DependencyTrackerTest < ActionView::TestCase
   end
 end
 
-class ERBTrackerTest < Minitest::Test
-  def make_tracker(name, template)
-    ActionView::DependencyTracker::ERBTracker.new(name, template)
-  end
-
+# Tests run with both ERBTracker and RubyTracker
+module SharedTrackerTests
   def test_dependency_of_erb_template_with_number_in_filename
-    template = FakeTemplate.new("<%# render 'messages/message123' %>", :erb)
+    template = FakeTemplate.new("<%= render 'messages/message123' %>", :erb)
     tracker = make_tracker("messages/_message123", template)
 
     assert_equal ["messages/message123"], tracker.dependencies
   end
 
   def test_dependency_of_template_partial_with_layout
-    template = FakeTemplate.new("<%# render partial: 'messages/show', layout: 'messages/layout' %>", :erb)
+    template = FakeTemplate.new("<%= render partial: 'messages/show', layout: 'messages/layout' %>", :erb)
     tracker = make_tracker("multiple/_dependencies", template)
 
-    assert_equal ["messages/layout", "messages/show"], tracker.dependencies
+    assert_equal ["messages/layout", "messages/show"], tracker.dependencies.sort
   end
 
   def test_dependency_of_template_layout_standalone
-    template = FakeTemplate.new("<%# render layout: 'messages/layout' do %>", :erb)
+    template = FakeTemplate.new("<%= render layout: 'messages/layout' do %>", :erb)
     tracker = make_tracker("messages/layout", template)
 
     assert_equal ["messages/layout"], tracker.dependencies
   end
 
   def test_finds_dependency_in_correct_directory
-    template = FakeTemplate.new("<%# render(message.topic) %>", :erb)
+    template = FakeTemplate.new("<%= render(message.topic) %>", :erb)
     tracker = make_tracker("messages/_message", template)
 
     assert_equal ["topics/topic"], tracker.dependencies
   end
 
   def test_finds_dependency_in_correct_directory_with_underscore
-    template = FakeTemplate.new("<%# render(message_type.messages) %>", :erb)
+    template = FakeTemplate.new("<%= render(message_type.messages) %>", :erb)
     tracker = make_tracker("message_types/_message_type", template)
 
     assert_equal ["messages/message"], tracker.dependencies
   end
 
   def test_dependency_of_erb_template_with_no_spaces_after_render
-    template = FakeTemplate.new("<%# render'messages/message' %>", :erb)
+    template = FakeTemplate.new("<%= render'messages/message' %>", :erb)
     tracker = make_tracker("messages/_message", template)
 
     assert_equal ["messages/message"], tracker.dependencies
   end
 
   def test_finds_no_dependency_when_render_begins_the_name_of_an_identifier
-    template = FakeTemplate.new("<%# rendering 'it useless' %>", :erb)
+    template = FakeTemplate.new("<%= rendering 'it useless' %>", :erb)
     tracker = make_tracker("resources/_resource", template)
 
     assert_equal [], tracker.dependencies
   end
 
   def test_finds_no_dependency_when_render_ends_the_name_of_another_method
-    template = FakeTemplate.new("<%# surrender 'to reason' %>", :erb)
+    template = FakeTemplate.new("<%= surrender 'to reason' %>", :erb)
     tracker = make_tracker("resources/_resource", template)
 
     assert_equal [], tracker.dependencies
   end
 
+  def test_finds_no_dependency_when_render_is_not_a_ruby_call
+    template = FakeTemplate.new("<div class='render foo'>", :erb)
+    tracker = make_tracker("resources/_resource", template)
+
+    assert_equal [], tracker.dependencies
+  end
+
+  def test_find_dependencies_and_respect_erb_tag_boundaries
+    template = FakeTemplate.new("<p>Hello</p> <% link_to abc %> <%= render 'single/quote' %>", :erb)
+    tracker = make_tracker("resources/_resource", template)
+
+    assert_equal ["single/quote"], tracker.dependencies
+  end
+
+  def test_find_all_dependencies_and_respect_erb_tag_boundaries
+    template = FakeTemplate.new("<p>Hello</p> <%=
+      render object: @all_posts,
+             partial: 'posts' %> <% link_to abc %> <%= render 'single/quote' %>", :erb)
+    tracker = make_tracker("resources/_resource", template)
+
+    assert_equal ["resources/posts", "single/quote"], tracker.dependencies
+  end
+
   def test_finds_dependency_on_multiline_render_calls
-    template = FakeTemplate.new("<%#
-      render :object => @all_posts,
-             :partial => 'posts' %>", :erb)
+    template = FakeTemplate.new("<%=
+      render object: @all_posts,
+             partial: 'posts' %>", :erb)
 
     tracker = make_tracker("some/_little_posts", template)
 
@@ -121,21 +179,21 @@ class ERBTrackerTest < Minitest::Test
 
   def test_finds_multiple_unrelated_odd_dependencies
     template = FakeTemplate.new("
-      <%# render('shared/header', title: 'Title') %>
+      <%= render('application/header', title: 'Title') %>
       <h2>Section title</h2>
-      <%# render@section %>
+      <%= render@section %>
     ", :erb)
 
     tracker = make_tracker("multiple/_dependencies", template)
 
-    assert_equal ["shared/header", "sections/section"], tracker.dependencies
+    assert_equal ["application/header", "sections/section"], tracker.dependencies
   end
 
   def test_finds_dependencies_for_all_kinds_of_identifiers
     template = FakeTemplate.new("
-      <%# render $globals %>
-      <%# render @instance_variables %>
-      <%# render @@class_variables %>
+      <%= render $globals %>
+      <%= render @instance_variables %>
+      <%= render @@class_variables %>
     ", :erb)
 
     tracker = make_tracker("identifiers/_all", template)
@@ -148,14 +206,14 @@ class ERBTrackerTest < Minitest::Test
   end
 
   def test_finds_dependencies_on_method_chains
-    template = FakeTemplate.new("<%# render @parent.child.grandchildren %>", :erb)
+    template = FakeTemplate.new("<%= render @parent.child.grandchildren %>", :erb)
     tracker = make_tracker("method/_chains", template)
 
     assert_equal ["grandchildren/grandchild"], tracker.dependencies
   end
 
   def test_finds_dependencies_with_special_characters
-    template = FakeTemplate.new("<%# render @pokémon, partial: 'ピカチュウ' %>", :erb)
+    template = FakeTemplate.new("<%= render partial: 'ピカチュウ', object: @pokémon %>", :erb)
     tracker = make_tracker("special/_characters", template)
 
     assert_equal ["special/ピカチュウ"], tracker.dependencies
@@ -163,8 +221,8 @@ class ERBTrackerTest < Minitest::Test
 
   def test_finds_dependencies_with_quotes_within
     template = FakeTemplate.new(%{
-      <%# render "single/quote's" %>
-      <%# render 'double/quote"s' %>
+      <%= render "single/quote's" %>
+      <%= render 'double/quote"s' %>
     }, :erb)
 
     tracker = make_tracker("quotes/_single_and_double", template)
@@ -193,13 +251,228 @@ class ERBTrackerTest < Minitest::Test
     ], tracker.dependencies
   end
 
+  def test_finds_dependencies_with_bare_assoc_hash_on_constant
+    template = FakeTemplate.new(%{
+      <%= render SomeConstant.message(this: "that") %>
+    }, :erb)
+
+    tracker = make_tracker("assoc_hash/const", template)
+
+    assert_equal [
+      "messages/message",
+    ], tracker.dependencies
+  end
+
   def test_dependencies_with_interpolation
     template = FakeTemplate.new(%q{
-      <%# render "double/#{quote}" %>
-      <%# render 'single/#{quote}' %>
+      <%= render "double/#{quote}" %>
+      <%= render 'single/#{quote}' %>
     }, :erb)
     tracker = make_tracker("interpolation/_string", template)
 
     assert_equal ["single/\#{quote}"], tracker.dependencies
+  end
+
+  def test_dependencies_with_interpolation_are_resolved_with_view_paths
+    view_paths = ActionView::PathSet.new([File.expand_path("../fixtures/digestor", __dir__)])
+
+    template = FakeTemplate.new('<%= render "events/#{quote}" %>', :erb)
+
+    tracker = make_tracker("interpolation/_string", template, view_paths)
+
+    assert_equal ["events/_completed", "events/_event", "events/index"], tracker.dependencies
+  end
+
+  def test_dependencies_with_interpolation_non_trailing
+    view_paths = ActionView::PathSet.new([File.expand_path("../fixtures/digestor", __dir__)])
+
+    template = FakeTemplate.new('<%= render "#{type}/comments" %>', :erb)
+
+    tracker = make_tracker("interpolation/_string", template, view_paths)
+
+    assert_equal [ "*/comments" ], tracker.dependencies
+  end
+
+  def test_dependencies_with_interpolation_expr
+    view_paths = ActionView::PathSet.new([File.expand_path("../fixtures/digestor", __dir__)])
+
+    template = FakeTemplate.new('<%= render "orders/#{variable || "default"}" %>', :erb)
+
+    tracker = make_tracker("interpolation/_string", template, view_paths)
+
+    # unsupported
+    assert_equal [], tracker.dependencies
+  end
+end
+
+class ERBTrackerTest < ActiveSupport::TestCase
+  include SharedTrackerTests
+
+  def make_tracker(name, template, view_paths = nil)
+    ActionView::DependencyTracker::ERBTracker.new(name, template, view_paths)
+  end
+end
+
+class RubyTrackerTest < Minitest::Test
+  include SharedTrackerTests
+
+  def make_tracker(name, template, view_paths = nil)
+    ActionView::DependencyTracker::RubyTracker.new(name, template, view_paths)
+  end
+
+  def test_dependencies_skip_unknown_options
+    template = FakeTemplate.new(%{
+      <%= render partial: "unknown_render_call", unknown_render_option: "yes" %>
+    }, :erb)
+    tracker = make_tracker("interpolation/_string", template)
+
+    assert_equal [], tracker.dependencies
+  end
+
+  def test_dependencies_finds_spacer_templates
+    template = FakeTemplate.new(%{
+      <%= render partial: "messages/message", collection: books, spacer_template: "messages/message_spacer" %>
+    }, :erb)
+    tracker = make_tracker("messages/show", template)
+
+    assert_equal ["messages/message_spacer", "messages/message"], tracker.dependencies
+  end
+
+  def test_dependencies_skip_commented_out_renders
+    template = FakeTemplate.new(%{
+      <%# render "messages/legacy_message" %>
+    }, :erb)
+    tracker = make_tracker("messages/show", template)
+
+    assert_equal [], tracker.dependencies
+  end
+
+  def test_dependencies_encode_binary_non_ascii_source_before_handler
+    handler = lambda do |_template, source|
+      # Mimic Temple::Filters::StaticMerger concatenating a UTF-8 literal with
+      # template content. This raises Encoding::CompatibilityError when +source+
+      # is still tagged ASCII-8BIT and contains bytes > 0x7F.
+      _ = source + "介護"
+      'render "posts/child"'
+    end
+
+    binary_source = (+"= render \"posts/child\"\n介護").force_encoding(Encoding::BINARY)
+    template = ActionView::Template.new(
+      binary_source,
+      "posts/show",
+      handler,
+      virtual_path: "posts/show",
+      format: :html,
+      locals: []
+    )
+
+    tracker = make_tracker("posts/show", template)
+
+    assert_equal ["posts/child"], tracker.dependencies
+  end
+end
+
+class DependencyTrackerRactorTest < ActiveSupport::TestCase
+  include ActiveSupport::Testing::Isolation
+  include ActiveSupport::Testing::RactorsAssertions
+
+  def trackers
+    ActionView::DependencyTracker.instance_variable_get(:@trackers)
+  end
+
+  def test_default_registry_is_shareable_after_share_registry
+    ActionView::DependencyTracker.share_registry
+    assert_ractor_shareable trackers
+  end
+
+  def test_class_handlers_stay_unfrozen_and_registry_is_shareable
+    # Mirrors how coffee-rails registers: a class handler keyed to a tracker.
+    handler = Class.new do
+      def self.call(template, source = nil)
+        source
+      end
+    end
+    ActionView::Template.register_template_handler(:fake_lang, handler)
+    ActionView::DependencyTracker.register_tracker(:fake_lang, ActionView::DependencyTracker::ERBTracker)
+
+    ActionView::DependencyTracker.share_registry
+
+    assert_not handler.frozen?, "class handlers must stay unfrozen so they keep their class-level state"
+    assert_ractor_shareable trackers
+  ensure
+    ActionView::Template.unregister_template_handler(:fake_lang)
+  end
+
+  def test_instance_level_tracker_stays_mutable_until_share_registry
+    handler = Class.new do
+      def self.call(template, source = nil)
+        source
+      end
+    end
+    ActionView::Template.register_template_handler(:bowtie, handler)
+    tracker = BowtieTracker.new
+    ActionView::DependencyTracker.register_tracker(:bowtie, tracker)
+
+    ActionView::DependencyTracker.eager_load!
+    assert_predicate trackers, :frozen?
+    assert_not tracker.frozen?, "eager_load! must not freeze the trackers themselves"
+
+    ActionView::DependencyTracker.share_registry
+    assert_ractor_shareable trackers
+  ensure
+    ActionView::Template.unregister_template_handler(:bowtie)
+  end
+
+  def test_registering_a_tracker_after_freeze_registry_is_deprecated
+    ActionView::DependencyTracker.eager_load!
+
+    handler = Class.new do
+      def self.call(template, source = nil)
+        source
+      end
+    end
+    ActionView::Template.register_template_handler(:bowtie, handler)
+
+    assert_deprecated(ActionView.deprecator) do
+      ActionView::DependencyTracker.register_tracker(:bowtie, BowtieTracker.new)
+    end
+
+    assert_instance_of BowtieTracker, trackers[ActionView::Template.handler_for_extension(:bowtie)]
+  ensure
+    ActionView::Template.unregister_template_handler(:bowtie)
+  end
+
+  def test_freeze_registry_tolerates_unshareable_trackers_and_handler_keys
+    mutable_handler = Object.new
+    def mutable_handler.call(template, source = nil)
+      source
+    end
+    ActionView::Template.register_template_handler(:bowtie, mutable_handler)
+
+    tracker = BowtieTracker.new
+    tracker.instance_variable_set(:@mutex, Mutex.new)
+
+    assert_not_deprecated(ActionView.deprecator) do
+      ActionView::DependencyTracker.register_tracker(:bowtie, tracker)
+    end
+
+    ActionView::DependencyTracker.eager_load!
+
+    assert_predicate trackers, :frozen?
+    assert_not mutable_handler.frozen?, "eager_load! must not freeze handler keys"
+    assert_not tracker.frozen?, "eager_load! must tolerate unshareable trackers"
+  ensure
+    ActionView::Template.unregister_template_handler(:bowtie)
+  end
+
+  if RUBY_VERSION >= "4.0"
+    def test_find_dependencies_is_callable_from_a_non_main_ractor
+      ActionView::DependencyTracker.share_registry
+      unregistered_handler = Object.new.freeze
+      template = Struct.new(:source, :handler).new("nope", unregistered_handler).freeze
+
+      result = Ractor.new(template) { |t| ActionView::DependencyTracker.find_dependencies("x", t) }.value
+      assert_equal [], result
+    end
   end
 end

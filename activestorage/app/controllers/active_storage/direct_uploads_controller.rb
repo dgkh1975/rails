@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 # Creates a new blob on the server side in anticipation of a direct-to-service upload from the client side.
 # When the client-side upload is completed, the signed_blob_id can be submitted as part of the form to reference
 # the blob that was created up front.
@@ -11,7 +12,7 @@ class ActiveStorage::DirectUploadsController < ActiveStorage::BaseController
 
   private
     def blob_args
-      params.require(:blob).permit(:filename, :byte_size, :checksum, :content_type, metadata: {}).to_h.symbolize_keys
+      params.expect(blob: [:filename, :byte_size, :checksum, :content_type, metadata: {}]).to_h.symbolize_keys
     end
 
     def direct_upload_json(blob)

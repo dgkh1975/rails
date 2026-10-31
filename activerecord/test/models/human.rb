@@ -4,9 +4,11 @@ class Human < ActiveRecord::Base
   self.table_name = "humans"
 
   has_one :face, inverse_of: :human
-  has_one :autosave_face, class_name: "Face", autosave: true, foreign_key: :human_id, inverse_of: :autosave_human
+  has_one :autosave_face, class_name: "Face", autosave: true, inverse_of: :autosave_human
   has_one :polymorphic_face, class_name: "Face", as: :polymorphic_human, inverse_of: :polymorphic_human
   has_one :polymorphic_face_without_inverse, class_name: "Face", as: :poly_human_without_inverse
+  has_one :polymorphic_face_with_partial_select, -> { select(:id, :polymorphic_human_id, :human_id) },
+    class_name: "Face", as: :polymorphic_human, inverse_of: :polymorphic_human
   has_many :interests, inverse_of: :human
   has_many :interests_with_callbacks,
     class_name: "Interest",
@@ -24,7 +26,7 @@ class Human < ActiveRecord::Base
     after_add: :add_called,
     inverse_of: :polymorphic_human
   # These are "broken" inverse_of associations for the purposes of testing
-  has_one :confused_face, class_name: "Face", inverse_of: :confused_human
+  has_one :confused_face, class_name: "Face", inverse_of: :cnffused_human
   has_many :secret_interests, class_name: "Interest", inverse_of: :secret_human
   has_one :mixed_case_monkey
 

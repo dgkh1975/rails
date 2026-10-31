@@ -10,7 +10,11 @@ module ActiveRecord
     module TestHelper
       attr_reader :connection, :table_name
 
-      CONNECTION_METHODS = %w[add_column remove_column rename_column add_index change_column rename_table column_exists? index_exists? add_reference add_belongs_to remove_reference remove_references remove_belongs_to]
+      def self.included(base)
+        base.skip_under_ractor_proxy
+      end
+
+      CONNECTION_METHODS = %w[add_column remove_column rename_column add_index change_column rename_table column_exists? index_exists? add_reference add_belongs_to remove_reference remove_references remove_belongs_to].freeze
 
       class TestModel < ActiveRecord::Base
         self.table_name = :test_models
@@ -18,7 +22,7 @@ module ActiveRecord
 
       def setup
         super
-        @connection = ActiveRecord::Base.connection
+        @connection = ActiveRecord::Base.lease_connection
         connection.create_table :test_models do |t|
           t.timestamps null: true
         end

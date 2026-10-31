@@ -2,38 +2,44 @@
 
 module ActiveRecord
   module Associations
-    # = Active Record Associations
+    # Active Record Associations
+    # ==========================
     #
     # This is the root class of all associations ('+ Foo' signifies an included module Foo):
     #
-    #   Association
-    #     SingularAssociation
-    #       HasOneAssociation + ForeignAssociation
-    #         HasOneThroughAssociation + ThroughAssociation
-    #       BelongsToAssociation
-    #         BelongsToPolymorphicAssociation
-    #     CollectionAssociation
-    #       HasManyAssociation + ForeignAssociation
-    #         HasManyThroughAssociation + ThroughAssociation
+    # ```
+    # Association
+    #   SingularAssociation
+    #     HasOneAssociation + ForeignAssociation
+    #       HasOneThroughAssociation + ThroughAssociation
+    #     BelongsToAssociation
+    #       BelongsToPolymorphicAssociation
+    #   CollectionAssociation
+    #     HasManyAssociation + ForeignAssociation
+    #       HasManyThroughAssociation + ThroughAssociation
+    # ```
     #
     # Associations in Active Record are middlemen between the object that
-    # holds the association, known as the <tt>owner</tt>, and the associated
-    # result set, known as the <tt>target</tt>. Association metadata is available in
-    # <tt>reflection</tt>, which is an instance of <tt>ActiveRecord::Reflection::AssociationReflection</tt>.
+    # holds the association, known as the `owner`, and the associated
+    # result set, known as the `target`. Association metadata is available in
+    # `reflection`, which is an instance of `ActiveRecord::Reflection::AssociationReflection`.
     #
     # For example, given
     #
-    #   class Blog < ActiveRecord::Base
-    #     has_many :posts
-    #   end
+    # ```
+    # class Blog < ActiveRecord::Base
+    #   has_many :posts
+    # end
     #
-    #   blog = Blog.first
+    # blog = Blog.first
+    # ```
     #
-    # The association of <tt>blog.posts</tt> has the object +blog+ as its
-    # <tt>owner</tt>, the collection of its posts as <tt>target</tt>, and
-    # the <tt>reflection</tt> object represents a <tt>:has_many</tt> macro.
-    class Association #:nodoc:
-      attr_reader :owner, :target, :reflection
+    # The association of `blog.posts` has the object `blog` as its
+    # `owner`, the collection of its posts as `target`, and
+    # the `reflection` object represents a `:has_many` macro.
+    class Association # :nodoc:
+      attr_accessor :owner
+      attr_reader :reflection, :disable_joins
 
       delegate :options, to: :reflection
 
@@ -41,27 +47,35 @@ module ActiveRecord
         reflection.check_validity!
 
         @owner, @reflection = owner, reflection
+        @disable_joins = @reflection.options[:disable_joins] || false
 
         reset
         reset_scope
+
+        @skip_strict_loading = nil
       end
 
-      # Resets the \loaded flag to +false+ and sets the \target to +nil+.
+      def target
+        if @target.is_a?(Promise)
+          @target = @target.value
+        end
+        @target
+      end
+
+      # Resets the \loaded flag to `false` and sets the \target to `nil`.
       def reset
         @loaded = false
-        @target = nil
         @stale_state = nil
-        @inversed = false
       end
 
       def reset_negative_cache # :nodoc:
         reset if loaded? && target.nil?
       end
 
-      # Reloads the \target and returns +self+ on success.
-      # The QueryCache is cleared if +force+ is true.
+      # Reloads the \target and returns `self` on success.
+      # The QueryCache is cleared if `force` is true.
       def reload(force = false)
-        klass.connection.clear_query_cache if force && klass
+        klass.connection_pool.clear_query_cache if force && klass
         reset
         reset_scope
         load_target
@@ -73,11 +87,10 @@ module ActiveRecord
         @loaded
       end
 
-      # Asserts the \target has been loaded setting the \loaded flag to +true+.
+      # Asserts the \target has been loaded setting the \loaded flag to `true`.
       def loaded!
         @loaded = true
         @stale_state = stale_state
-        @inversed = false
       end
 
       # The target is stale if the target no longer points to the record(s) that the
@@ -87,25 +100,37 @@ module ActiveRecord
       #
       # Note that if the target has not been loaded, it is not considered stale.
       def stale_target?
-        !@inversed && loaded? && @stale_state != stale_state
+        loaded? && @stale_state != stale_state
       end
 
-      # Sets the target of this association to <tt>\target</tt>, and the \loaded flag to +true+.
+      # Sets the target of this association to `\target`, and the \loaded flag to `true`.
       def target=(target)
         @target = target
         loaded!
       end
 
-      def scope
-        if (scope = klass.current_scope) && scope.try(:proxy_association) == self
+      def scope(routes = nil)
+        if disable_joins
+          DisableJoinsAssociationScope.create.scope(self, routes)
+        elsif (scope = klass.current_scope) && scope.try(:proxy_association) == self
           scope.spawn
+        elsif scope = klass.global_current_scope
+          target_scope.merge!(association_scope(routes)).merge!(scope)
         else
-          target_scope.merge!(association_scope)
+          target_scope.merge!(association_scope(routes))
         end
       end
 
       def reset_scope
         @association_scope = nil
+      end
+
+      def set_strict_loading(record)
+        if owner.strict_loading_n_plus_one_only? && reflection.macro == :has_many
+          record.strict_loading!
+        else
+          record.strict_loading!(false, mode: owner.strict_loading_mode)
+        end
       end
 
       # Set the inverse association, if possible
@@ -132,15 +157,11 @@ module ActiveRecord
 
       def inversed_from(record)
         self.target = record
-        @inversed = !!record
       end
 
       def inversed_from_queries(record)
         if inversable?(record)
           self.target = record
-          @inversed = true
-        else
-          @inversed = false
         end
       end
 
@@ -162,21 +183,28 @@ module ActiveRecord
 
       # Loads the \target if needed and returns it.
       #
-      # This method is abstract in the sense that it relies on +find_target+,
+      # This method is abstract in the sense that it relies on `find_target`,
       # which is expected to be provided by descendants.
       #
       # If the \target is already \loaded it is just returned. Thus, you can call
-      # +load_target+ unconditionally to get the \target.
+      # `load_target` unconditionally to get the \target.
       #
       # ActiveRecord::RecordNotFound is rescued within the method, and it is
-      # not reraised. The proxy is \reset and +nil+ is the return value.
+      # not reraised. The proxy is \reset and `nil` is the return value.
       def load_target
-        @target = find_target if (@stale_state && stale_target?) || find_target?
+        @target = find_target(async: false) if (@stale_state && stale_target?) || find_target?
 
         loaded! unless loaded?
         target
       rescue ActiveRecord::RecordNotFound
         reset
+      end
+
+      def async_load_target # :nodoc:
+        @target = find_target(async: true) if (@stale_state && stale_target?) || find_target?
+
+        loaded! unless loaded?
+        nil
       end
 
       # We can't dump @reflection and @through_reflection since it contains the scope proc
@@ -191,7 +219,7 @@ module ActiveRecord
         @reflection = @owner.class._reflect_on_association(reflection_name)
       end
 
-      def initialize_attributes(record, except_from_scope_attributes = nil) #:nodoc:
+      def initialize_attributes(record, except_from_scope_attributes = nil) # :nodoc:
         except_from_scope_attributes ||= {}
         skip_assign = [reflection.foreign_key, reflection.type].compact
         assigned_keys = record.changed_attribute_names_to_save
@@ -209,22 +237,65 @@ module ActiveRecord
         _create_record(attributes, true, &block)
       end
 
+      def violates_strict_loading?
+        return unless find_target?
+
+        return if @skip_strict_loading
+
+        return unless owner.validation_context.nil?
+
+        return reflection.strict_loading? if reflection.options.key?(:strict_loading)
+
+        owner.strict_loading? && !owner.strict_loading_n_plus_one_only?
+      end
+
+      # Whether the association represents a single record
+      # or a collection of records.
+      def collection?
+        false
+      end
+
       private
-        def find_target
-          if (owner.strict_loading? || reflection.strict_loading?) && owner.validation_context.nil?
+        # Reader and writer methods call this so that consistent errors are presented
+        # when the association target class does not exist.
+        def ensure_klass_exists!
+          klass
+        end
+
+        def find_target(async: false)
+          if violates_strict_loading?
             Base.strict_loading_violation!(owner: owner.class, reflection: reflection)
           end
 
-          scope = self.scope
-          return scope.to_a if skip_statement_cache?(scope)
-
-          sc = reflection.association_scope_cache(klass, owner) do |params|
-            as = AssociationScope.create { params.bind }
-            target_scope.merge!(as.scope(self))
+          routes = reflection.association_route_chain(origin_class: owner.class, destination_class: klass)
+          scope = self.scope(routes)
+          if skip_statement_cache?(scope)
+            if async
+              return scope.load_async.then(&:to_a)
+            else
+              return scope.to_a
+            end
           end
 
-          binds = AssociationScope.get_bind_values(owner, reflection.chain)
-          sc.execute(binds, klass.connection) { |record| set_inverse_instance(record) }
+          sc = reflection.association_scope_cache(klass, routes) do |params|
+            as = AssociationScope.create { |_, column| params.bind(column) }
+            target_scope.merge!(as.scope(self, routes))
+          end
+
+          klass.with_connection do |c|
+            sc.execute(owner.method(:read_attr), c, async: async) do |record|
+              set_inverse_instance(record)
+              set_strict_loading(record)
+            end
+          end
+        end
+
+        def skip_strict_loading(&block)
+          skip_strict_loading_was = @skip_strict_loading
+          @skip_strict_loading = true
+          yield
+        ensure
+          @skip_strict_loading = skip_strict_loading_was
         end
 
         # The scope for this association.
@@ -233,9 +304,13 @@ module ActiveRecord
         # scope method is called. This is because at that point the call may be surrounded
         # by scope.scoping { ... } or unscoped { ... } etc, which affects the scope which
         # actually gets built.
-        def association_scope
+        def association_scope(routes = nil)
           if klass
-            @association_scope ||= AssociationScope.scope(self)
+            @association_scope ||= if disable_joins
+              DisableJoinsAssociationScope.scope(self, routes)
+            else
+              AssociationScope.scope(self, routes)
+            end
           end
         end
 
@@ -265,9 +340,9 @@ module ActiveRecord
           false
         end
 
-        # Raises ActiveRecord::AssociationTypeMismatch unless +record+ is of
+        # Raises ActiveRecord::AssociationTypeMismatch unless `record` is of
         # the kind of the class of the associated objects. Meant to be used as
-        # a sanity check when you are about to assign an associated record.
+        # a safety check when you are about to assign an associated record.
         def raise_on_type_mismatch!(record)
           unless record.is_a?(reflection.klass)
             fresh_class = reflection.class_name.safe_constantize
@@ -300,14 +375,20 @@ module ActiveRecord
 
         # Returns true if record contains the foreign_key
         def foreign_key_for?(record)
-          record._has_attribute?(reflection.foreign_key)
+          # Through reflections have no single route to take the key from.
+          if reflection.through_reflection?
+            reflection.foreign_key_definition.all? { |key| record.has_attribute?(key) }
+          else
+            route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+            route._reference_destination_key.all? { |key| record._has_attribute?(key) }
+          end
         end
 
         # This should be implemented to return the values of the relevant key(s) on the owner,
         # so that when stale_state is different from the value stored on the last find_target,
         # the target is stale.
         #
-        # This is only relevant to certain associations, which is why it returns +nil+ by default.
+        # This is only relevant to certain associations, which is why it returns `nil` by default.
         def stale_state
         end
 
@@ -323,7 +404,7 @@ module ActiveRecord
           reflection.has_scope? ||
             scope.eager_loading? ||
             klass.scope_attributes? ||
-            reflection.source_reflection.active_record.default_scopes.any?
+            reflection.source_reflection.active_record.has_default_scope?
         end
 
         def enqueue_destroy_association(options)
@@ -340,12 +421,8 @@ module ActiveRecord
         end
 
         def matches_foreign_key?(record)
-          if foreign_key_for?(record)
-            record.read_attribute(reflection.foreign_key) == owner.id ||
-              (foreign_key_for?(owner) && owner.read_attribute(reflection.foreign_key) == record.id)
-          else
-            owner.read_attribute(reflection.foreign_key) == record.id
-          end
+          route = reflection.association_route(origin_class: owner.class, destination_class: record.class)
+          route.key_values_match?(owner, record)
         end
     end
   end

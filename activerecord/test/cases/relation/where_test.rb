@@ -16,12 +16,38 @@ require "models/price_estimate"
 require "models/topic"
 require "models/treasure"
 require "models/vertex"
+require "models/cpk"
 require "support/stubs/strong_parameters"
 
 module ActiveRecord
   class WhereTest < ActiveRecord::TestCase
     fixtures :authors, :author_addresses, :categories, :categorizations, :cars, :treasures, :price_estimates,
       :binaries, :edges, :essays, :posts, :comments, :topics
+
+    class AliasedSponsor < ActiveRecord::Base
+      self.table_name = "sponsors"
+      alias_attribute :kind, :sponsorable_type
+    end
+
+    class AliasedMember < ActiveRecord::Base
+      self.table_name = "members"
+      has_one :sponsor, as: :sponsorable, foreign_type: :kind, class_name: "ActiveRecord::WhereTest::AliasedSponsor"
+    end
+
+    class AbstractMember < ActiveRecord::Base
+      self.abstract_class = true
+      self.table_name = "members"
+      has_one :sponsor, as: :sponsorable, class_name: "ActiveRecord::WhereTest::AliasedSponsor"
+    end
+
+    class MemberWithInheritedSponsor < AbstractMember
+    end
+
+    class CustomPolymorphicNameMember < AliasedMember
+      def self.polymorphic_name
+        "custom_member"
+      end
+    end
 
     def test_type_casting_nested_joins
       comment = comments(:eager_other_comment1)
@@ -31,10 +57,6 @@ module ActiveRecord
     def test_where_with_through_association
       assert_equal [authors(:david)], Author.joins(:comments).where(comments: comments(:greetings))
       assert_equal [authors(:bob)], Author.joins(:categories).where(categories: categories(:technology))
-    end
-
-    def test_where_with_aliased_association
-      assert_equal [comments(:does_it_hurt)], Comment.where(entry: posts(:thinking))
     end
 
     def test_type_cast_is_not_evaluated_at_relation_build_time
@@ -93,6 +115,137 @@ module ActiveRecord
 
     def test_rewhere_on_root
       assert_equal posts(:welcome), Post.rewhere(title: "Welcome to the weblog").first
+    end
+
+    def test_where_with_tuple_syntax
+      first_topic = topics(:first)
+      third_topic = topics(:third)
+
+      key = [:title, :author_name]
+
+      conditions = [
+        [first_topic.title, first_topic.author_name],
+        [third_topic.title, third_topic.author_name],
+      ]
+
+      assert_equal [first_topic], Topic.where([:id] => [[first_topic.id]])
+      assert_equal [first_topic, third_topic].sort, Topic.where(key => conditions).sort
+    end
+
+    def test_where_with_tuple_syntax_on_composite_models
+      book_one = Cpk::Book.create!(id: [1, 2])
+      book_two = Cpk::Book.create!(id: [3, 4])
+
+      assert_equal [book_one], Cpk::Book.where([:author_id, :id] => [[1, 2]])
+      assert_equal [book_one, book_two].sort, Cpk::Book.where(Cpk::Book.primary_key => [[1, 2], [3, 4]]).sort
+      assert_empty Cpk::Book.where([:author_id, :id] => [[1, 4], [3, 2]])
+    end
+
+    def test_where_with_tuple_syntax_and_composite_records
+      book_one = Cpk::Book.create!(id: [1, 2])
+      book_two = Cpk::Book.create!(id: [3, 4])
+
+      assert_equal [book_one], Cpk::Book.where([:author_id, :id] => book_one)
+      assert_equal [book_one, book_two].sort, Cpk::Book.where(Cpk::Book.primary_key => [book_one, book_two]).sort
+      assert_equal [book_one, book_two].sort, Cpk::Book.where([:author_id, :id] => [book_one, [3, 4]]).sort
+    end
+
+    def test_where_with_tuple_syntax_and_delegated_composite_records
+      book_one = Cpk::Book.create!(id: [1, 2])
+      book_two = Cpk::Book.create!(id: [3, 4])
+      decorator = Class.new(SimpleDelegator)
+
+      assert_equal [book_one, book_two].sort,
+        Cpk::Book.where([:author_id, :id] => [book_one, book_two].map { |book| decorator.new(book) }).sort
+    end
+
+    def test_where_with_tuple_syntax_and_no_values
+      assert_no_queries do
+        assert_empty Cpk::Book.where([:author_id, :id] => []).to_a
+      end
+    end
+
+    def test_where_not_with_tuple_syntax_and_no_values
+      Cpk::Book.create!(id: [1, 2])
+
+      assert_equal Cpk::Book.all.sort, Cpk::Book.where.not([:author_id, :id] => []).sort
+    end
+
+    def test_where_with_tuple_syntax_with_incorrect_arity
+      error = assert_raise ArgumentError do
+        Cpk::Book.where([:one, :two, :three] => [1, 2, 3])
+      end
+
+      assert_match(/Expected corresponding value for.*to be an Array/, error.message)
+
+      error = assert_raise ArgumentError do
+        Cpk::Book.where([:one, :two] => 1)
+      end
+
+      assert_match(/Expected corresponding value for.*to be an Array/, error.message)
+    end
+
+    def test_where_with_tuple_syntax_and_regular_syntax_combined
+      book_one = Cpk::Book.create!(id: [1, 2], title: "The Alchemist")
+      book_two = Cpk::Book.create!(id: [3, 4], title: "The Alchemist")
+
+      assert_equal [book_one, book_two].sort, Cpk::Book.where(title: "The Alchemist").sort
+      assert_equal [book_one, book_two].sort, Cpk::Book.where(title: "The Alchemist", [:author_id, :id] => [[1, 2], [3, 4]]).sort
+      assert_equal [book_two], Cpk::Book.where(title: "The Alchemist", [:author_id, :id] => [[3, 4]])
+    end
+
+    def test_where_with_tuple_syntax_and_association_syntax_combined
+      order = Cpk::Order.create!(id: [1, 2])
+      book = order.books.create!(id: [3, 4])
+
+      assert_equal [book], Cpk::Book.where([:shop_id, :order_id] => [[1, 2]], order: order)
+      assert_equal [book], Cpk::Book.where(order: order, [:shop_id, :order_id] => [[1, 2]])
+    end
+
+    def test_with_tuple_syntax_and_large_values_list
+      # sqlite3 raises "Expression tree is too large (maximum depth 1000)"
+      skip if current_adapter?(:SQLite3Adapter)
+
+      assert_nothing_raised do
+        ids = [[1, 2]] * 1500
+        Cpk::Book.where([:author_id, :id] => ids).to_sql
+      end
+    end
+
+    def test_where_with_tuple_syntax_referencing_another_table
+      categorization = categorizations(:mary_thinking_general)
+
+      key = [:category_id, "authors.name"]
+
+      conditions = [
+        [categorization.category_id, categorization.author.name],
+      ]
+
+      assert_equal [categorization], Categorization.joins(:author).where(key => conditions)
+    end
+
+    def test_where_with_tuple_syntax_referencing_another_table_with_includes
+      categorization = categorizations(:mary_thinking_general)
+
+      key = [:category_id, "authors.name"]
+
+      conditions = [
+        [categorization.category_id, categorization.author.name],
+      ]
+
+      relation = Categorization.includes(:author).where(key => conditions)
+
+      assert_equal %w{authors}, relation.references_values
+      assert_equal [categorization], relation
+    end
+
+    def test_where_with_nil_cpk_association
+      order = Cpk::Order.create!(id: [1, 2])
+      book = order.books.create!(id: [3, 4])
+      assert_includes Cpk::Book.where(order: order), book
+
+      book.update!(order: nil)
+      assert_includes Cpk::Book.where(order: nil), book
     end
 
     def test_belongs_to_shallow_where
@@ -225,6 +378,39 @@ module ActiveRecord
       assert_equal expected.to_sql, actual.to_sql
     end
 
+    def test_inverse_polymorphic_relation_with_an_abstract_declaring_class
+      member = MemberWithInheritedSponsor.create!(name: "Concrete member")
+      member.create_sponsor!
+      other_member = MemberWithInheritedSponsor.create!(name: "Abstract type")
+      AliasedSponsor.create!(sponsorable_id: other_member.id, sponsorable_type: AbstractMember.polymorphic_name)
+
+      assert_equal [member], MemberWithInheritedSponsor.where(sponsor: AliasedSponsor.all).to_a
+    end
+
+    def test_inverse_polymorphic_relation_with_an_inherited_custom_polymorphic_name
+      member = CustomPolymorphicNameMember.create!(name: "Custom polymorphic name")
+      member.create_sponsor!
+      other_member = AliasedMember.create!(name: "Declaring type")
+      other_member.create_sponsor!
+
+      assert_equal [member], CustomPolymorphicNameMember.where(sponsor: AliasedSponsor.all).to_a
+    end
+
+    def test_inverse_polymorphic_relation_with_an_sti_origin
+      expected = HiddenTreasure.where(id: PriceEstimate.where(estimate_of_type: "Treasure").select(:estimate_of_id))
+      actual = HiddenTreasure.where(price_estimates: PriceEstimate.all)
+
+      assert_equal expected.to_sql, actual.to_sql
+    end
+
+    def test_inverse_polymorphic_relation_respects_an_aliased_type_condition
+      member = AliasedMember.create!(name: "Aliased type condition")
+      AliasedSponsor.create!(sponsorable_id: member.id, sponsorable_type: "Other")
+
+      assert_equal [member], AliasedMember.where(sponsor: AliasedSponsor.where(kind: "Other")).to_a
+      assert_equal [member], AliasedMember.where(sponsor: AliasedSponsor.where(sponsorable_type: "Other")).to_a
+    end
+
     def test_polymorphic_sti_shallow_where
       treasure = HiddenTreasure.new
       treasure.id = 1
@@ -265,8 +451,8 @@ module ActiveRecord
           model.is_a?(klass)
         end
 
-        def method_missing(method, *args, &block)
-          model.send(method, *args, &block)
+        def method_missing(...)
+          model.send(...)
         end
       end
 
@@ -336,6 +522,11 @@ module ActiveRecord
       assert_equal 0, count
     end
 
+    def test_where_with_rational_for_string_column
+      count = Post.where(title: Rational(0)).count
+      assert_equal 0, count
+    end
+
     def test_where_with_duration_for_string_column
       count = Post.where(title: 0.seconds).count
       assert_equal 0, count
@@ -369,7 +560,7 @@ module ActiveRecord
     def test_where_on_association_with_relation_performs_subselect_not_two_queries
       author = authors(:david)
 
-      assert_queries(1) do
+      assert_queries_count(1) do
         Essay.where(writer: Author.where(id: author.id)).to_a
       end
     end
@@ -405,6 +596,11 @@ module ActiveRecord
       assert_equal essays(:david_modest_proposal), essay
     end
 
+    def test_where_on_association_with_collection_polymorphic_relation
+      treasures = Treasure.where(name: ["diamond", "emerald"], price_estimates: PriceEstimate.all)
+      assert_equal [treasures(:diamond)], treasures
+    end
+
     def test_where_with_strong_parameters
       author = authors(:david)
       params = ProtectedParams.new(name: author.name)
@@ -431,6 +627,12 @@ module ActiveRecord
       posts = author.posts.where.not(id: 1)
 
       assert_equal 1, posts.invert_where.first.id
+    end
+
+    def test_nested_conditional_on_enum
+      post = Post.first
+      Comment.create!(label: :default, post: post, body: "Nice weather today")
+      assert_equal [post], Post.joins(:comments).where(comments: { label: :default, body: "Nice weather today" }).to_a
     end
   end
 end

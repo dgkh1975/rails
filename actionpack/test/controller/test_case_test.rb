@@ -6,7 +6,10 @@ require "active_support/json/decoding"
 require "rails/engine"
 
 class TestCaseTest < ActionController::TestCase
-  def self.fixture_path; end
+  def self.fixture_paths
+    []
+  end
+
   self.file_fixture_path = File.expand_path("../fixtures/multipart", __dir__)
 
   class TestController < ActionController::Base
@@ -46,7 +49,13 @@ class TestCaseTest < ActionController::TestCase
     end
 
     def render_body
+      request.body.rewind
       render plain: request.body.read
+    end
+
+    def render_body_encoding
+      request.body.rewind
+      render plain: request.body.read.encoding.name
     end
 
     def test_params
@@ -82,34 +91,34 @@ class TestCaseTest < ActionController::TestCase
     end
 
     def test_html_output
-      render plain: <<HTML
-<html>
-  <body>
-    <a href="/"><img src="/images/button.png" /></a>
-    <div id="foo">
-      <ul>
-        <li class="item">hello</li>
-        <li class="item">goodbye</li>
-      </ul>
-    </div>
-    <div id="bar">
-      <form action="/somewhere">
-        Name: <input type="text" name="person[name]" id="person_name" />
-      </form>
-    </div>
-  </body>
-</html>
-HTML
+      render plain: <<~HTML
+        <html>
+          <body>
+            <a href="/"><img src="/images/button.png" /></a>
+            <div id="foo">
+              <ul>
+                <li class="item">hello</li>
+                <li class="item">goodbye</li>
+              </ul>
+            </div>
+            <div id="bar">
+              <form action="/somewhere">
+                Name: <input type="text" name="person[name]" id="person_name" />
+              </form>
+            </div>
+          </body>
+        </html>
+      HTML
     end
 
     def test_xml_output
       response.content_type = params[:response_as]
-      render plain: <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<root>
-  <area><p>area is an empty tag in HTML, so it won't contain this content</p></area>
-</root>
-XML
+      render plain: <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <root>
+          <area><p>area is an empty tag in HTML, so it won't contain this content</p></area>
+        </root>
+      XML
     end
 
     def test_only_one_param
@@ -128,13 +137,7 @@ XML
       send_file(__FILE__)
     end
 
-    def redirect_to_same_controller
-      redirect_to controller: "test", action: "test_uri", id: 5
-    end
 
-    def redirect_to_different_controller
-      redirect_to controller: "fail", id: 5
-    end
 
     def create
       head :created, location: "/resource"
@@ -165,6 +168,17 @@ XML
       raise "boom!"
     end
 
+    def increment_count
+      @counter ||= 0
+      @counter += 1
+      render plain: @counter
+    end
+
+    def original_fullpath
+      request.set_header("PATH_INFO", "/new")
+      render plain: request.original_fullpath
+    end
+
     private
       def generate_url(opts)
         url_for(opts.merge(action: "test_uri"))
@@ -175,11 +189,16 @@ XML
     super
     @controller = TestController.new
     @request.delete_header "PATH_INFO"
-    @routes = ActionDispatch::Routing::RouteSet.new.tap do |r|
-      r.draw do
-        ActiveSupport::Deprecation.silence do
-          get ":controller(/:action(/:id))"
+    @routes = ActionDispatch::Routing::RouteSet.new.tap do |set|
+      actions = TestController.action_methods
+      set.draw do
+        actions.each do |action|
+          match "test_case_test/test/#{action}(/:id)",
+            to: "test_case_test/test##{action}", via: :all
         end
+
+        get "content", to: "content#index"
+        get "controller/action(/:id)", to: "controller#action"
       end
     end
   end
@@ -244,7 +263,7 @@ XML
 
     post :test_params, params: { foo: klass.new }
 
-    assert_equal JSON.parse(@response.body)["foo"], "bar"
+    assert_equal "bar", JSON.parse(@response.body)["foo"]
   end
 
   def test_body_stream
@@ -253,6 +272,14 @@ XML
     post :render_body, params: params.dup
 
     assert_equal params.to_query, @response.body
+  end
+
+  def test_body_stream_is_binary
+    params = Hash[:page, { name: "page name" }, "some key", 123]
+
+    post :render_body_encoding, params: params.dup
+
+    assert_equal Encoding::BINARY.name, @response.body
   end
 
   def test_document_body_and_params_with_post
@@ -273,6 +300,25 @@ XML
   def test_head
     head :test_params
     assert_equal 200, @response.status
+  end
+
+  def test_query
+    query :test_params, params: { foo: "bar" }
+    assert_equal 200, @response.status
+    assert_equal "QUERY", @request.request_method
+    parsed_params = ::JSON.parse(@response.body)
+    assert_equal "bar", parsed_params["foo"]
+  end
+
+  def test_query_sends_params_as_request_body
+    query :test_request_parameters, params: { foo: "bar" }
+    assert_match "foo", @response.body
+    assert_match "bar", @response.body
+  end
+
+  def test_query_does_not_populate_query_string
+    query :test_query_parameters, params: { foo: "bar" }
+    assert_equal({}, ::JSON.parse(@response.body))
   end
 
   def test_process_without_flash
@@ -592,6 +638,20 @@ XML
     assert_equal "application/json", parsed_env["CONTENT_TYPE"]
   end
 
+  test "blank Content-Type header" do
+    @request.headers["Content-Type"] = ""
+    assert_raises(ActionDispatch::Http::MimeNegotiation::InvalidType) do
+      get :test_headers
+    end
+  end
+
+  test "nil Content-Type header with post request" do
+    @request.headers["Content-Type"] = nil
+    assert_raises(match: /Unknown Content-Type/) do
+      post :render_body
+    end
+  end
+
   def test_using_as_json_sets_request_content_type_to_json
     post :render_body, params: { bool_value: true, str_value: "string", num_value: 2 }, as: :json
 
@@ -654,10 +714,6 @@ XML
     with_routing do |set|
       set.draw do
         get "file/*path", to: "test_case_test/test#test_params"
-
-        ActiveSupport::Deprecation.silence do
-          get ":controller/:action"
-        end
       end
 
       get :test_params, params: { path: ["hello", "world"] }
@@ -883,17 +939,6 @@ XML
     assert_equal new_content_type, file.content_type
   end
 
-  def test_fixture_path_is_accessed_from_self_instead_of_active_support_test_case
-    TestCaseTest.stub :fixture_path, File.expand_path("../fixtures", __dir__) do
-      expected = "`fixture_file_upload(\"multipart/ruby_on_rails.jpg\")` to `fixture_file_upload(\"ruby_on_rails.jpg\")`"
-
-      assert_deprecated(expected) do
-        uploaded_file = fixture_file_upload("multipart/ruby_on_rails.jpg", "image/png")
-        assert_equal File.open("#{FILES_DIR}/ruby_on_rails.jpg", READ_PLAIN).read, uploaded_file.read
-      end
-    end
-  end
-
   def test_test_uploaded_file_with_binary
     filename = "ruby_on_rails.jpg"
     path = "#{FILES_DIR}/#{filename}"
@@ -909,7 +954,7 @@ XML
   def test_fixture_file_upload_with_binary
     filename = "ruby_on_rails.jpg"
     path = "#{FILES_DIR}/#{filename}"
-    content_type = "image/jpg"
+    content_type = "image/jpeg"
 
     binary_file_upload = fixture_file_upload(path, content_type, :binary)
     assert_equal File.open(path, READ_BINARY).read, binary_file_upload.read
@@ -919,69 +964,27 @@ XML
   end
 
   def test_fixture_file_upload_should_be_able_access_to_tempfile
-    file = fixture_file_upload(FILES_DIR + "/ruby_on_rails.jpg", "image/jpg")
+    file = fixture_file_upload(FILES_DIR + "/ruby_on_rails.jpg", "image/jpeg")
     assert_respond_to file, :tempfile
   end
 
   def test_fixture_file_upload
     post :test_file_upload,
       params: {
-        file: fixture_file_upload(FILES_DIR + "/ruby_on_rails.jpg", "image/jpg")
+        file: fixture_file_upload(FILES_DIR + "/ruby_on_rails.jpg", "image/jpeg")
       }
     assert_equal "45142", @response.body
   end
 
-  def test_fixture_file_upload_output_deprecation_when_file_fixture_path_is_not_set
-    TestCaseTest.stub :fixture_path, File.expand_path("../fixtures", __dir__) do
-      TestCaseTest.stub :file_fixture_path, nil do
-        assert_deprecated(/In Rails 7.0, the path needs to be relative to `file_fixture_path`/) do
-          fixture_file_upload("multipart/ruby_on_rails.jpg", "image/jpg")
-        end
-      end
-    end
-  end
-
-  def test_fixture_file_upload_does_not_output_deprecation_when_file_fixture_path_is_set
-    TestCaseTest.stub :fixture_path, File.expand_path("../fixtures", __dir__) do
-      assert_not_deprecated do
-        fixture_file_upload("ruby_on_rails.jpg", "image/jpg")
-      end
-    end
-  end
-
-  def test_fixture_file_upload_relative_to_fixture_path
-    TestCaseTest.stub :fixture_path, File.expand_path("../fixtures", __dir__) do
-      expected = "`fixture_file_upload(\"multipart/ruby_on_rails.jpg\")` to `fixture_file_upload(\"ruby_on_rails.jpg\")`"
-
-      assert_deprecated(expected) do
-        uploaded_file = fixture_file_upload("multipart/ruby_on_rails.jpg", "image/jpg")
-        assert_equal File.open("#{FILES_DIR}/ruby_on_rails.jpg", READ_PLAIN).read, uploaded_file.read
-      end
-    end
-  end
-
-  def test_fixture_file_upload_relative_to_fixture_path_with_relative_file_fixture_path
-    TestCaseTest.stub :fixture_path, File.expand_path("../fixtures", __dir__) do
-      TestCaseTest.stub :file_fixture_path, "test/fixtures/multipart" do
-        expected = "`fixture_file_upload(\"multipart/ruby_on_rails.jpg\")` to `fixture_file_upload(\"ruby_on_rails.jpg\")`"
-
-        assert_deprecated(expected) do
-          uploaded_file = fixture_file_upload("multipart/ruby_on_rails.jpg", "image/jpg")
-          assert_equal File.open("#{FILES_DIR}/ruby_on_rails.jpg", READ_PLAIN).read, uploaded_file.read
-        end
-      end
-    end
-  end
-
-  def test_fixture_file_upload_ignores_fixture_path_given_full_path
-    TestCaseTest.stub :fixture_path, __dir__ do
-      uploaded_file = fixture_file_upload("#{FILES_DIR}/ruby_on_rails.jpg", "image/jpg")
+  def test_fixture_file_upload_ignores_fixture_paths_given_full_path
+    TestCaseTest.stub :fixture_paths, __dir__ do
+      uploaded_file = fixture_file_upload("#{FILES_DIR}/ruby_on_rails.jpg", "image/jpeg")
       assert_equal File.open("#{FILES_DIR}/ruby_on_rails.jpg", READ_PLAIN).read, uploaded_file.read
     end
   end
 
-  def test_fixture_file_upload_ignores_nil_fixture_path
-    uploaded_file = fixture_file_upload("#{FILES_DIR}/ruby_on_rails.jpg", "image/jpg")
+  def test_fixture_file_upload_ignores_empty_fixture_paths
+    uploaded_file = fixture_file_upload("#{FILES_DIR}/ruby_on_rails.jpg", "image/jpeg")
     assert_equal File.open("#{FILES_DIR}/ruby_on_rails.jpg", READ_PLAIN).read, uploaded_file.read
   end
 
@@ -989,7 +992,7 @@ XML
     filename = "ruby_on_rails.jpg"
     path = "#{FILES_DIR}/#{filename}"
     post :test_file_upload, params: {
-      file: Rack::Test::UploadedFile.new(path, "image/jpg", true)
+      file: Rack::Test::UploadedFile.new(path, "image/jpeg", true)
     }
     assert_equal "45142", @response.body
   end
@@ -1041,6 +1044,61 @@ XML
     post :render_json, body: { foo: "heyo" }.to_json, as: :json
     assert_equal({ "foo" => "heyo" }, response.parsed_body)
   end
+
+  def test_reset_instance_variables_after_each_request
+    get :increment_count
+    assert_equal "1", response.body
+
+    get :increment_count
+    assert_equal "1", response.body
+  end
+
+  def test_can_read_instance_variables_before_and_after_request
+    silence_warnings do
+      assert_nil @controller.instance_variable_get(:@counter)
+    end
+
+    get :increment_count
+    assert_equal "1", response.body
+    assert_equal 1, @controller.instance_variable_get(:@counter)
+
+    get :increment_count
+    assert_equal "1", response.body
+    assert_equal 1, @controller.instance_variable_get(:@counter)
+  end
+
+  def test_ivars_are_not_reset_if_they_are_given_a_value_before_any_requests
+    @controller.instance_variable_set(:@counter, 3)
+
+    get :increment_count
+    assert_equal "4", response.body
+    assert_equal 4, @controller.instance_variable_get(:@counter)
+
+    get :increment_count
+    assert_equal "5", response.body
+    assert_equal 5, @controller.instance_variable_get(:@counter)
+
+    get :increment_count
+    assert_equal "6", response.body
+    assert_equal 6, @controller.instance_variable_get(:@counter)
+  end
+
+  def test_ivars_are_reset_if_they_are_given_a_value_after_some_requests
+    get :increment_count
+    assert_equal "1", response.body
+    assert_equal 1, @controller.instance_variable_get(:@counter)
+
+    @controller.instance_variable_set(:@counter, 3)
+
+    get :increment_count
+    assert_equal "1", response.body
+    assert_equal 1, @controller.instance_variable_get(:@counter)
+  end
+
+  def test_original_fullpath_doesnt_change_when_path_is_changed
+    get :original_fullpath
+    assert_equal "/test_case_test/test/original_fullpath", response.body
+  end
 end
 
 class ResponseDefaultHeadersTest < ActionController::TestCase
@@ -1071,20 +1129,17 @@ class ResponseDefaultHeadersTest < ActionController::TestCase
     super
     @controller = TestController.new
     @request.env["PATH_INFO"] = nil
-    @routes = ActionDispatch::Routing::RouteSet.new.tap do |r|
-      r.draw do
-        ActiveSupport::Deprecation.silence do
-          get ":controller(/:action(/:id))"
-        end
-      end
-    end
+    @routes = ActionDispatch::Routing::RouteSet.new
   end
 
   test "response contains default headers" do
     get :leave_alone
 
-    # Response headers start out with the defaults
-    assert_equal @defaults.merge("Content-Type" => "text/html"), response.headers
+    expected_headers = @defaults.merge("Content-Type" => "text/html")
+
+    expected_headers.each do |key, value|
+      assert_equal value, @response.headers[key]
+    end
   end
 
   test "response deletes a default header" do
@@ -1119,7 +1174,7 @@ module EngineControllerTests
 
     def test_engine_controller_route
       get :index
-      assert_equal @response.body, "bar"
+      assert_equal "bar", @response.body
     end
   end
 
@@ -1132,7 +1187,7 @@ module EngineControllerTests
 
     def test_engine_controller_route
       get :index
-      assert_equal @response.body, "bar"
+      assert_equal "bar", @response.body
     end
   end
 end
@@ -1156,7 +1211,7 @@ class InferringClassNameTest < ActionController::TestCase
     end
 end
 
-class CrazyNameTest < ActionController::TestCase
+class ManuallySetNameTest < ActionController::TestCase
   tests ContentController
 
   def test_controller_class_can_be_set_manually_not_just_inferred
@@ -1164,7 +1219,7 @@ class CrazyNameTest < ActionController::TestCase
   end
 end
 
-class CrazySymbolNameTest < ActionController::TestCase
+class ManuallySetSymbolNameTest < ActionController::TestCase
   tests :content
 
   def test_set_controller_class_using_symbol
@@ -1172,7 +1227,7 @@ class CrazySymbolNameTest < ActionController::TestCase
   end
 end
 
-class CrazyStringNameTest < ActionController::TestCase
+class ManuallySetStringNameTest < ActionController::TestCase
   tests "content"
 
   def test_set_controller_class_using_string
@@ -1200,13 +1255,7 @@ class AnonymousControllerTest < ActionController::TestCase
       end
     end.new
 
-    @routes = ActionDispatch::Routing::RouteSet.new.tap do |r|
-      r.draw do
-        ActiveSupport::Deprecation.silence do
-          get ":controller(/:action(/:id))"
-        end
-      end
-    end
+    @routes = ActionDispatch::Routing::RouteSet.new
   end
 
   def test_controller_name

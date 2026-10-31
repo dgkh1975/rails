@@ -2,37 +2,43 @@
 
 module ActionText
   module Attachables
-    class ContentAttachment
+    class ContentAttachment # :nodoc:
       include ActiveModel::Model
 
       def self.from_node(node)
-        if node["content-type"]
-          if matches = node["content-type"].match(/vnd\.rubyonrails\.(.+)\.html/)
-            attachment = new(name: matches[1])
-            attachment if attachment.valid?
-          end
-        end
+        attachment = new(content_type: node["content-type"], content: node["content"])
+        attachment if attachment.valid?
       end
 
-      attr_accessor :name
-      validates_inclusion_of :name, in: %w( horizontal-rule )
+      attr_accessor :content_type, :content
+
+      validates_format_of :content_type, with: /html/
+      validates_presence_of :content
 
       def attachable_plain_text_representation(caption)
-        case name
-        when "horizontal-rule"
-          " ┄ "
-        else
-          " "
-        end
+        content_instance.fragment.source
+      end
+
+      def attachable_markdown_representation(caption, attachment_links: false)
+        content_instance.fragment.to_markdown
+      end
+
+      def to_html
+        @to_html ||= content_instance.render(content_instance)
+      end
+
+      def to_s
+        to_html
       end
 
       def to_partial_path
         "action_text/attachables/content_attachment"
       end
 
-      def to_trix_content_attachment_partial_path
-        "action_text/attachables/content_attachments/#{name.underscore}"
-      end
+      private
+        def content_instance
+          @content_instance ||= ActionText::Content.new(content)
+        end
     end
   end
 end

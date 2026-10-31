@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 #--
-# Copyright (c) 2004-2021 David Heinemeier Hansson
+# Copyright (c) David Heinemeier Hansson
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -26,14 +27,20 @@
 require "active_support"
 require "active_support/rails"
 require "active_model/version"
+require "active_model/deprecator"
 
+# :markup: rdoc
+# :include: ../README.rdoc
 module ActiveModel
   extend ActiveSupport::Autoload
 
+  autoload :Access
+  autoload :API
   autoload :Attribute
   autoload :Attributes
   autoload :AttributeAssignment
   autoload :AttributeMethods
+  autoload :AttributeRegistration
   autoload :BlockValidator, "active_model/validator"
   autoload :Callbacks
   autoload :Conversion
@@ -44,6 +51,7 @@ module ActiveModel
   autoload :Model
   autoload :Name, "active_model/naming"
   autoload :Naming
+  autoload :SchematizedJson
   autoload :SecurePassword
   autoload :Serialization
   autoload :Translation
@@ -54,9 +62,12 @@ module ActiveModel
   eager_autoload do
     autoload :Errors
     autoload :Error
+    autoload :MissingAttributeError
     autoload :RangeError, "active_model/errors"
     autoload :StrictValidationFailed, "active_model/errors"
     autoload :UnknownAttributeError, "active_model/errors"
+    autoload :ValidationError, "active_model/validations"
+    autoload :IndexedRow
   end
 
   module Serializers

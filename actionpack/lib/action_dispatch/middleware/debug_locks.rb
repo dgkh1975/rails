@@ -1,17 +1,20 @@
 # frozen_string_literal: true
 
 module ActionDispatch
+  # # Action Dispatch DebugLocks
+  #
   # This middleware can be used to diagnose deadlocks in the autoload interlock.
   #
   # To use it, insert it near the top of the middleware stack, using
-  # <tt>config/application.rb</tt>:
+  # `config/application.rb`:
   #
-  #     config.middleware.insert_before Rack::Sendfile, ActionDispatch::DebugLocks
+  #     config.middleware.insert_before ActionDispatch::Executor, ActionDispatch::DebugLocks
   #
-  # After restarting the application and re-triggering the deadlock condition,
-  # <tt>/rails/locks</tt> will show a summary of all threads currently known to
-  # the interlock, which lock level they are holding or awaiting, and their
-  # current backtrace.
+  # After restarting the application and re-triggering the deadlock condition, the
+  # route `/rails/locks` will show a summary of all execution contexts (threads
+  # or fibers, depending on `config.active_support.isolation_level`) currently
+  # known to the interlock, which lock level they are holding or awaiting, and
+  # their current backtrace.
   #
   # Generally a deadlock will be caused by the interlock conflicting with some
   # other external lock or blocking I/O call. These cannot be automatically
@@ -34,7 +37,7 @@ module ActionDispatch
       if req.get?
         path = req.path_info.chomp("/")
         if path == @path
-          return render_details(req)
+          return render_details
         end
       end
 
@@ -42,26 +45,26 @@ module ActionDispatch
     end
 
     private
-      def render_details(req)
-        threads = ActiveSupport::Dependencies.interlock.raw_state do |raw_threads|
-          # The Interlock itself comes to a complete halt as long as this block
-          # is executing. That gives us a more consistent picture of everything,
-          # but creates a pretty strong Observer Effect.
+      def render_details
+        owners = ActiveSupport::Dependencies.interlock.raw_state do |raw_owners|
+          # The Interlock itself comes to a complete halt as long as this block is
+          # executing. That gives us a more consistent picture of everything, but creates
+          # a pretty strong Observer Effect.
           #
-          # Most directly, that means we need to do as little as possible in
-          # this block. More widely, it means this middleware should remain a
-          # strictly diagnostic tool (to be used when something has gone wrong),
-          # and not for any sort of general monitoring.
+          # Most directly, that means we need to do as little as possible in this block.
+          # More widely, it means this middleware should remain a strictly diagnostic tool
+          # (to be used when something has gone wrong), and not for any sort of general
+          # monitoring.
 
-          raw_threads.each.with_index do |(thread, info), idx|
+          raw_owners.each.with_index do |(owner, info), idx|
             info[:index] = idx
-            info[:backtrace] = thread.backtrace
+            info[:backtrace] = owner.backtrace
           end
 
-          raw_threads
+          raw_owners
         end
 
-        str = threads.map do |thread, info|
+        str = owners.map do |owner, info|
           if info[:exclusive]
             lock_state = +"Exclusive"
           elsif info[:sharing] > 0
@@ -75,7 +78,7 @@ module ActionDispatch
             lock_state << " (yielded share)"
           end
 
-          msg = +"Thread #{info[:index]} [0x#{thread.__id__.to_s(16)} #{thread.status || 'dead'}]  #{lock_state}\n"
+          msg = +"#{owner.class} #{info[:index]} [0x#{owner.__id__.to_s(16)} #{owner_status(owner)}]  #{lock_state}\n"
 
           if info[:sleeper]
             msg << "  Waiting in #{info[:sleeper]}"
@@ -87,20 +90,28 @@ module ActionDispatch
               msg << "  may be pre-empted for: #{compat.join(', ')}\n"
             end
 
-            blockers = threads.values.select { |binfo| blocked_by?(info, binfo, threads.values) }
+            blockers = owners.values.select { |binfo| blocked_by?(info, binfo, owners.values) }
             msg << "  blocked by: #{blockers.map { |i| i[:index] }.join(', ')}\n" if blockers.any?
           end
 
-          blockees = threads.values.select { |binfo| blocked_by?(binfo, info, threads.values) }
+          blockees = owners.values.select { |binfo| blocked_by?(binfo, info, owners.values) }
           msg << "  blocking: #{blockees.map { |i| i[:index] }.join(', ')}\n" if blockees.any?
 
           msg << "\n#{info[:backtrace].join("\n")}\n" if info[:backtrace]
         end.join("\n\n---\n\n\n")
 
-        [200, { "Content-Type" => "text/plain", "Content-Length" => str.size }, [str]]
+        [200, { Rack::CONTENT_TYPE => "text/plain; charset=#{ActionDispatch::Response.default_charset}",
+                Rack::CONTENT_LENGTH => str.size.to_s }, [str]]
       end
 
-      def blocked_by?(victim, blocker, all_threads)
+      def owner_status(owner)
+        case owner
+        when Thread then owner.status || "dead"
+        when Fiber then owner.alive? ? "alive" : "dead"
+        end
+      end
+
+      def blocked_by?(victim, blocker, all_owners)
         return false if victim.equal?(blocker)
 
         case victim[:sleeper]
@@ -117,7 +128,7 @@ module ActionDispatch
           blocker[:exclusive] ||
             victim[:compatible] &&
             victim[:compatible].include?(blocker[:purpose]) &&
-            all_threads.all? { |other| !other[:compatible] || blocker.equal?(other) || other[:compatible].include?(blocker[:purpose]) }
+            all_owners.all? { |other| !other[:compatible] || blocker.equal?(other) || other[:compatible].include?(blocker[:purpose]) }
         end
       end
   end

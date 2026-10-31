@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveStorage
-  class Attached::Changes::DeleteMany #:nodoc:
-    attr_reader :name, :record
+  class Attached::Changes::DeleteMany # :nodoc:
+    attr_reader :name
+    attr_accessor :record
 
     def initialize(name, record)
       @name, @record = name, record
@@ -18,6 +20,10 @@ module ActiveStorage
 
     def blobs
       ActiveStorage::Blob.none
+    end
+
+    def analyze
+      # Nothing to analyze when deleting
     end
 
     def save

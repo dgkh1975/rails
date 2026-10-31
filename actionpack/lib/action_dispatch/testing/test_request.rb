@@ -11,7 +11,7 @@ module ActionDispatch
       "HTTP_USER_AGENT"          => "Rails Testing".b,
     )
 
-    # Create a new test request with default +env+ values.
+    # Create a new test request with default `env` values.
     def self.create(env = {})
       env = Rails.application.env_config.merge(env) if defined?(Rails.application) && Rails.application
       env["rack.request.cookie_hash"] ||= {}.with_indifferent_access
@@ -29,10 +29,12 @@ module ActionDispatch
 
     def host=(host)
       set_header("HTTP_HOST", host)
+      reset_host_memos
     end
 
     def port=(number)
-      set_header("SERVER_PORT", number.to_i)
+      set_header("SERVER_PORT", number)
+      reset_host_memos
     end
 
     def request_uri=(uri)
@@ -67,5 +69,12 @@ module ActionDispatch
       delete_header("action_dispatch.request.accepts")
       set_header("HTTP_ACCEPT", Array(mime_types).collect(&:to_s).join(","))
     end
+
+    private
+      # The host, and the port derived from it, are memoized on the request
+      # once read. Forget them so that a test can change the host afterwards.
+      def reset_host_memos
+        @raw_host_with_port = @host = @port = nil
+      end
   end
 end

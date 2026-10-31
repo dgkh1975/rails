@@ -1,21 +1,21 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   class Table
-    include Arel::Crud
     include Arel::FactoryMethods
     include Arel::AliasPredication
 
     @engine = nil
     class << self; attr_accessor :engine; end
 
-    attr_accessor :name, :table_alias
+    attr_reader :table_alias, :klass
 
-    # TableAlias and Table both have a #table_name which is the name of the underlying table
-    alias :table_name :name
+    def initialize(name: nil, as: nil, klass: nil, type_caster: klass&.type_caster)
+      raise ArgumentError, "A name or klass is required." unless klass || name
+      name = name.name if name.is_a?(Symbol)
 
-    def initialize(name, as: nil, klass: nil, type_caster: klass&.type_caster)
-      @name = name.to_s
+      @name = name
       @klass = klass
       @type_caster = type_caster
 
@@ -26,6 +26,12 @@ module Arel # :nodoc: all
         as = nil
       end
       @table_alias = as
+
+      ActiveSupport::Ractors.make_shareable(self)
+    end
+
+    def name
+      @name || @klass&.table_name
     end
 
     def alias(name = "#{self.name}_2")
@@ -81,7 +87,7 @@ module Arel # :nodoc: all
     end
 
     def [](name, table = self)
-      name = name.to_s if name.is_a?(Symbol)
+      name = name.name if name.is_a?(Symbol)
       name = @klass.attribute_aliases[name] || name if @klass
       Attribute.new(table, name)
     end
@@ -90,7 +96,7 @@ module Arel # :nodoc: all
       # Perf note: aliases and table alias is excluded from the hash
       #  aliases can have a loop back to this table breaking hashes in parent
       #  relations, for the vast majority of cases @name is unique to a query
-      @name.hash
+      name.hash
     end
 
     def eql?(other)

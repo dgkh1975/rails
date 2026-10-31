@@ -41,7 +41,7 @@ class DefaultsDeliveryMethodsTest < ActiveSupport::TestCase
   test "default sendmail settings" do
     settings = {
       location:  "/usr/sbin/sendmail",
-      arguments: "-i"
+      arguments: %w[ -i ]
     }
     assert_equal settings, ActionMailer::Base.sendmail_settings
   end
@@ -87,7 +87,7 @@ class MailDeliveryTest < ActiveSupport::TestCase
     DEFAULT_HEADERS = {
       to: "mikel@test.lindsaar.net",
       from: "jose@test.plataformatec.com"
-    }
+    }.freeze
 
     def welcome(hash = {})
       mail(DEFAULT_HEADERS.merge(hash))

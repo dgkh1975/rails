@@ -1,10 +1,11 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "openssl"
 
 module ActiveSupport
-  class Digest #:nodoc:
-    class <<self
+  class Digest # :nodoc:
+    class << self
       def hash_digest_class
         @hash_digest_class ||= OpenSSL::Digest::MD5
       end

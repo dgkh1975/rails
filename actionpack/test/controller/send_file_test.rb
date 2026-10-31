@@ -146,7 +146,6 @@ class SendFileTest < ActionController::TestCase
       assert_equal "image/png", response.content_type
       assert_equal %(disposition; filename="filename"; filename*=UTF-8''filename), response.get_header("Content-Disposition")
       assert_equal "binary", response.get_header("Content-Transfer-Encoding")
-      assert_equal "private", response.get_header("Cache-Control")
     end
   end
 
@@ -206,6 +205,22 @@ class SendFileTest < ActionController::TestCase
 
     assert_kind_of String, response.body
     assert_equal file_data, response.body
+  end
+
+  def test_send_file_instrumentation
+    @controller.options = { disposition: :inline }
+
+    assert_notification("send_file.action_controller", path: __FILE__, disposition: :inline) do
+      process("file")
+    end
+  end
+
+  def test_send_data_instrumentation
+    @controller.options = { content_type: "application/x-ruby" }
+
+    assert_notification("send_data.action_controller", content_type: "application/x-ruby") do
+      process("data")
+    end
   end
 
   %w(file data).each do |method|

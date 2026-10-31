@@ -4,7 +4,7 @@ require "cases/helper"
 
 class PostgresqlActiveSchemaTest < ActiveRecord::PostgreSQLTestCase
   def setup
-    ActiveRecord::Base.connection.materialize_transactions
+    ActiveRecord::Base.lease_connection.materialize_transactions
 
     ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.class_eval do
       def execute(sql, name = nil) sql end
@@ -27,6 +27,10 @@ class PostgresqlActiveSchemaTest < ActiveRecord::PostgreSQLTestCase
     assert_equal %(CREATE DATABASE "aimonetti" ENCODING = 'UTF8' LC_COLLATE = 'ja_JP.UTF8' LC_CTYPE = 'ja_JP.UTF8'), create_database(:aimonetti, encoding: :"UTF8", collation: :"ja_JP.UTF8", ctype: :"ja_JP.UTF8")
   end
 
+  def test_create_database_with_locale_provider_and_locale
+    assert_equal %(CREATE DATABASE "aimonetti" ENCODING = 'utf8' LOCALE_PROVIDER = 'builtin' LOCALE = 'C.UTF-8'), create_database(:aimonetti, locale_provider: :builtin, locale: "C.UTF-8")
+  end
+
   def test_add_index
     expected = %(CREATE UNIQUE INDEX "index_people_on_last_name" ON "people" ("last_name") WHERE state = 'active')
     assert_equal expected, add_index(:people, :last_name, unique: true, where: "state = 'active'")
@@ -39,6 +43,9 @@ class PostgresqlActiveSchemaTest < ActiveRecord::PostgreSQLTestCase
 
     expected = %(CREATE INDEX CONCURRENTLY "index_people_on_last_name" ON "people" ("last_name"))
     assert_equal expected, add_index(:people, :last_name, algorithm: :concurrently)
+
+    expected = %(CREATE INDEX CONCURRENTLY IF NOT EXISTS "index_people_on_last_name" ON "people" ("last_name"))
+    assert_equal expected, add_index(:people, :last_name, if_not_exists: true, algorithm: :concurrently)
 
     expected = %(CREATE INDEX "index_people_on_last_name_and_first_name" ON "people" ("last_name" DESC, "first_name" ASC))
     assert_equal expected, add_index(:people, [:last_name, :first_name], order: { last_name: :desc, first_name: :asc })
@@ -69,6 +76,11 @@ class PostgresqlActiveSchemaTest < ActiveRecord::PostgreSQLTestCase
 
     expected = %(CREATE INDEX IF NOT EXISTS "index_people_on_last_name" ON "people" ("last_name"))
     assert_equal expected, add_index(:people, :last_name, if_not_exists: true)
+
+    if supports_nulls_not_distinct?
+      expected = %(CREATE INDEX "index_people_on_last_name" ON "people" ("last_name") NULLS NOT DISTINCT)
+      assert_equal expected, add_index(:people, :last_name, nulls_not_distinct: true)
+    end
 
     assert_raise ArgumentError do
       add_index(:people, :last_name, algorithm: :copy)
@@ -102,9 +114,20 @@ class PostgresqlActiveSchemaTest < ActiveRecord::PostgreSQLTestCase
     end
   end
 
-  private
-    def method_missing(method_symbol, *arguments)
-      ActiveRecord::Base.connection.public_send(method_symbol, *arguments)
+  def test_drop_database_without_force
+    ActiveRecord::Base.lease_connection.stub(:database_version, 12_99_99) do
+      assert_equal %(DROP DATABASE IF EXISTS "development"), drop_database(:development)
     end
-    ruby2_keywords(:method_missing) if respond_to?(:ruby2_keywords, true)
+  end
+
+  def test_drop_database_with_force
+    ActiveRecord::Base.lease_connection.stub(:database_version, 13_00_00) do
+      assert_equal %(DROP DATABASE IF EXISTS "development" WITH (FORCE)), drop_database(:development)
+    end
+  end
+
+  private
+    def method_missing(...)
+      ActiveRecord::Base.lease_connection.public_send(...)
+    end
 end

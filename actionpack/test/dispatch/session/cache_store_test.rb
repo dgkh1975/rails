@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
-require "fixtures/session_autoload_test/session_autoload_test/foo"
 
 class CacheStoreTest < ActionDispatch::IntegrationTest
   class TestController < ActionController::Base
@@ -60,7 +59,7 @@ class CacheStoreTest < ActionDispatch::IntegrationTest
       get "/set_session_value"
       assert_response :success
       assert cookies["_session_id"]
-      session_cookie = cookies.send(:hash_for)["_session_id"]
+      session_cookie = cookies.get_cookie("_session_id")
 
       get "/call_reset_session"
       assert_response :success
@@ -93,6 +92,7 @@ class CacheStoreTest < ActionDispatch::IntegrationTest
       get "/call_reset_session"
       assert_response :success
       assert_not_equal [], headers["Set-Cookie"]
+      assert_not_nil headers["Set-Cookie"]
 
       get "/get_session_value"
       assert_response :success
@@ -203,20 +203,70 @@ class CacheStoreTest < ActionDispatch::IntegrationTest
     end
   end
 
+  def test_doesnt_generate_same_sid_with_check_collisions
+    cache_store_options({ check_collisions: true })
+
+    expected_values = [
+      +"eed45f3da20b5c4da3bc3b160f996315",
+      +"eed45f3da20b5c4da3bc3b160f996315",
+      +"eed45f3da20b5c4da3bc3b160f996316",
+    ]
+    counter = -1
+    hex_generator = proc do
+      counter += 1
+      expected_values[counter]
+    end
+
+    SecureRandom.stub(:hex, hex_generator) do
+      with_test_route_set do
+        get "/set_session_value"
+        assert_response :success
+        assert cookies["_session_id"]
+
+        first_sid = Rack::Session::SessionId.new(cookies["_session_id"])
+        assert_equal expected_values[0], first_sid.public_id
+
+        cookies.delete("_session_id")
+
+        get "/set_session_value"
+        assert_response :success
+        assert cookies["_session_id"]
+
+        second_sid = Rack::Session::SessionId.new(cookies["_session_id"])
+        assert_equal expected_values[2], second_sid.public_id
+      end
+    end
+  end
+
+  def test_delete_session_returns_nil_when_dropped
+    cache = ActiveSupport::Cache::MemoryStore.new
+    store = ActionDispatch::Session::CacheStore.new(->(env) { [200, {}, []] }, cache: cache)
+    sid = Rack::Session::SessionId.new("0" * 32)
+
+    # With options[:drop], delete_session must return nil so the session is
+    # dropped rather than reassigned a fresh id (Rack's delete_session contract).
+    assert_nil store.delete_session({}, sid, drop: true)
+
+    # Without :drop, a fresh session id is returned.
+    assert_not_nil store.delete_session({}, sid, {})
+  end
+
   private
+    def cache_store_options(options = {})
+      @cache_store_options ||= options
+    end
+
+    def app
+      @app ||= self.class.build_app do |middleware|
+        @cache = ActiveSupport::Cache::MemoryStore.new
+        middleware.use ActionDispatch::Session::CacheStore, key: "_session_id", cache: @cache, **cache_store_options
+        middleware.delete ActionDispatch::ShowExceptions
+      end
+    end
+
     def with_test_route_set
       with_routing do |set|
-        set.draw do
-          ActiveSupport::Deprecation.silence do
-            get ":action", to: ::CacheStoreTest::TestController
-          end
-        end
-
-        @app = self.class.build_app(set) do |middleware|
-          @cache = ActiveSupport::Cache::MemoryStore.new
-          middleware.use ActionDispatch::Session::CacheStore, key: "_session_id", cache: @cache
-          middleware.delete ActionDispatch::ShowExceptions
-        end
+        draw_root_action_routes(set, ::CacheStoreTest::TestController)
 
         yield
       end

@@ -11,14 +11,19 @@
           <tr>
             <td>
               <pre class="line_numbers">
-                <% source_extract[:code].each_key do |line_number| %>
-<span><%= line_number -%></span>
+                <% source_extract[:code].each_key do |line| %>
+                  <% file_url = editor_url(source_extract[:trace], line: line) %>
+<span><%= link_to_if file_url, line, file_url -%></span>
                 <% end %>
               </pre>
             </td>
 <td width="100%">
 <pre>
-<% source_extract[:code].each do |line, source| -%><div class="line<%= " active" if line == source_extract[:line_number] -%>"><%= source -%></div><% end -%>
+<% source_extract[:code].each do |line, source| -%>
+<div class="line<%= " active" if line == source_extract[:line_number] -%>"><% if source.is_a?(Array) -%><%= source[0] -%><span class="error_highlight"><%= source[1] -%></span><%= source[2] -%>
+<% else -%>
+<%= source -%>
+<% end -%></div><% end -%>
 </pre>
 </td>
           </tr>

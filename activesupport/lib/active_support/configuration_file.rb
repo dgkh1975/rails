@@ -1,3 +1,4 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 module ActiveSupport
@@ -19,17 +20,22 @@ module ActiveSupport
     end
 
     def parse(context: nil, **options)
-      YAML.load(render(context), **options) || {}
+      source = @content.include?("<%") ? render(context) : @content
+
+      if source == @content
+        YAML.unsafe_load_file(@content_path, **options) || {}
+      else
+        YAML.unsafe_load(source, **options) || {}
+      end
     rescue Psych::SyntaxError => error
-      raise "YAML syntax error occurred while parsing #{@content_path}. " \
+      raise FormatError, "YAML syntax error occurred while parsing #{@content_path}. " \
             "Please note that YAML must be consistently indented using spaces. Tabs are not allowed. " \
             "Error: #{error.message}"
     end
 
     private
       def read(content_path)
-        require "yaml"
-        require "erb"
+        require "yaml" unless defined?(YAML)
 
         File.read(content_path).tap do |content|
           if content.include?("\u00A0")
@@ -39,6 +45,7 @@ module ActiveSupport
       end
 
       def render(context)
+        require "erb" unless defined?(ERB)
         erb = ERB.new(@content).tap { |e| e.filename = @content_path }
         context ? erb.result(context) : erb.result
       end

@@ -1,24 +1,26 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module Arel # :nodoc: all
   class UpdateManager < Arel::TreeManager
     include TreeManager::StatementMethods
 
-    def initialize
+    def initialize(table = nil)
       super
-      @ast = Nodes::UpdateStatement.new
-      @ctx = @ast
+
+      @ast = Nodes::UpdateStatement.new(table)
     end
 
     ###
-    # UPDATE +table+
+    # UPDATE `table`
     def table(table)
       @ast.relation = table
       self
     end
 
     def set(values)
-      if String === values
+      case values
+      when String, Nodes::BoundSqlLiteral
         @ast.values = [values]
       else
         @ast.values = values.map { |column, value|
@@ -28,6 +30,32 @@ module Arel # :nodoc: all
           )
         }
       end
+      self
+    end
+
+    def group(columns)
+      columns.each do |column|
+        column = Nodes::SqlLiteral.new(column) if String === column
+        column = Nodes::SqlLiteral.new(column.name) if Symbol === column
+
+        @ast.groups.push Nodes::Group.new column
+      end
+
+      self
+    end
+
+    def having(expr)
+      @ast.havings << expr
+      self
+    end
+
+    def comment(value)
+      @ast.comment = value
+      self
+    end
+
+    def returning(returning)
+      @ast.returning << returning
       self
     end
   end

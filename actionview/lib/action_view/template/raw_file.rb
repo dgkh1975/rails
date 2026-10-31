@@ -1,9 +1,10 @@
 # frozen_string_literal: true
 
-module ActionView #:nodoc:
-  # = Action View RawFile Template
-  class Template #:nodoc:
-    class RawFile #:nodoc:
+module ActionView # :nodoc:
+  class Template # :nodoc:
+    # Action View RawFile Template
+    # ============================
+    class RawFile # :nodoc:
       attr_accessor :type, :format
 
       def initialize(filename)
@@ -19,6 +20,10 @@ module ActionView #:nodoc:
 
       def render(*args)
         ::File.read(@filename)
+      end
+
+      def supports_streaming?
+        false
       end
     end
   end

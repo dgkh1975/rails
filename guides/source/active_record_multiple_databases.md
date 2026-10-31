@@ -1,4 +1,4 @@
-**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON https://guides.rubyonrails.org.**
+**DO NOT READ THIS FILE ON GITHUB, GUIDES ARE PUBLISHED ON <https://guides.rubyonrails.org>.**
 
 Multiple Databases with Active Record
 =====================================
@@ -7,105 +7,418 @@ This guide covers using multiple databases with your Rails application.
 
 After reading this guide you will know:
 
-* How to set up your application for multiple databases.
-* How automatic connection switching works.
-* How to use horizontal sharding for multiple databases.
-* What features are supported and what's still a work in progress.
+* How to configure multiple databases and connect models to them.
+* How to run database tasks for multiple databases.
+* How to use read replicas and how automatic connection switching works.
+* How to use horizontal sharding.
 
 --------------------------------------------------------------------------------
 
-As an application grows in popularity and usage you'll need to scale the application
-to support your new users and their data. One way in which your application may need
-to scale is on the database level. Rails now has support for multiple databases
-so you don't have to store your data all in one place.
+## Overview
 
-At this time the following features are supported:
+As your application grows, a single database may no longer be sufficient for all of its data and traffic. High read volumes, large datasets, or reporting workloads can all place pressure on a single database server. The need to isolate different parts of an application is another reason to use multiple databases. Rails supports connecting to multiple databases so reads, writes, or specific models can use separate database connections when needed.
 
-* Multiple writer databases and a replica for each
-* Automatic connection switching for the model you're working with
-* Automatic swapping between the writer and replica depending on the HTTP verb
-and recent writes
-* Rails tasks for creating, dropping, migrating, and interacting with the multiple
-databases
+### General Terminology
 
-The following features are not (yet) supported:
+| Term                   | Meaning                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| Writer                 | A database that handles inserts, updates, and deletes.                                                |
+| Replica                | A copy of a writer database that can serve read queries.                                              |
+| Role                   | A connection type, such as `writing` or `reading`, that Rails uses to choose a database connection.   |
+| Database cluster       | A group of database servers that work together, such as a writer and its replicas.                    |
+| Database configuration | A named entry in `config/database.yml` that tells Rails how to connect to a database.                 |
+| Vertical partitioning  | Splitting different tables or models across different databases.                                      |
+| Shard                  | One of several databases with the same schema, where each shard stores a different subset of records. |
+| Horizontal sharding    | Splitting records from the same tables across different databases with the same schema.               |
 
-* Automatic swapping for horizontal sharding
-* Joining across clusters
-* Load balancing replicas
-* Dumping schema caches for multiple databases
+### Choosing a Setup
 
-## Setting up your application
+The right setup depends on what you are trying to accomplish:
 
-While Rails tries to do most of the work for you there are still some steps you'll
-need to do to get your application ready for multiple databases.
+| If you need to...                                              | Use...                                                |
+| -------------------------------------------------------------- | ----------------------------------------------------- |
+| Move some models to a separate database                        | Multiple writer databases                             |
+| Send read queries to replicas                                  | Read replicas and automatic role switching            |
+| Split records across databases that share the same schema      | Horizontal sharding                                   |
+| Connect to a legacy, reporting, or externally managed database | A database configuration with `database_tasks: false` |
 
-Let's say we have an application with a single writer database and we need to add a
-new database for some new tables we're adding. The name of the new database will be
-"animals".
+#### Caveats and Operational Considerations
 
-The `database.yml` looks like this:
+Multiple database applications have a few important limitations and production
+considerations.
+
+##### Connection Pool Size
+
+Each database configuration can have its own connection pool. Roles, replicas,
+and shards can increase the total number of database connections your
+application may open. Make sure the pool sizes in `config/database.yml` match
+your web server and job worker concurrency, and that your database servers can
+handle the total number of connections.
+
+##### No Replica Load Balancing
+
+Rails does not automatically load balance reads across multiple replicas. If
+your application needs replica load balancing, handle it in your database
+infrastructure or with application-specific connection logic.
+
+##### No Transactions Across Databases
+
+Rails does not provide distributed transactions across database clusters. A
+transaction is scoped to one database connection. If a workflow writes to
+multiple databases, design it so it can tolerate partial failure, retry safely,
+or reconcile data later.
+
+##### No Foreign Keys Across Databases
+
+Database-level foreign keys generally cannot span separate database clusters.
+Keep data that requires strict database-level integrity in the same database
+when possible, or enforce cross-database consistency in your application.
+
+## Setting Up Multiple Databases
+
+Setting up multiple databases starts with `config/database.yml`, where each entry
+names a database configuration that Rails can connect to. Rails uses those
+configuration names later when you connect models, run database tasks, and
+switch between writers, replicas, or shards.
+
+Rails handles the application-side plumbing for these configurations: connection
+definitions, abstract connection classes, role and shard switching, and database
+tasks.
+
+NOTE: Rails does not provision database servers, create database users, manage
+replication, balance traffic across replicas, or provide distributed
+transactions across database clusters. Those responsibilities remain with your
+database infrastructure and application architecture.
+
+Rails supports two layouts for `config/database.yml`. If an environment has one
+database configuration, the database settings can live directly under the
+environment:
 
 ```yaml
 production:
   database: my_primary_database
-  user: root
-  adapter: mysql
+  adapter: mysql2
 ```
 
-Let's add a replica for the first configuration, and a second database called animals and a
-replica for that as well. To do this we need to change our `database.yml` from a 2-tier
-to a 3-tier config.
+This is called a two-tier configuration because the YAML has two levels: the
+environment, and then the database settings.
 
-If a primary configuration is provided this will be used as the "default" configuration. If
-there is no configuration named "primary" Rails will use the first configuration for an
-environment. The default configurations will use the default Rails filenames. For example
-primary configurations will use `schema.rb` for the schema file whereas all other entries
-will use `[CONFIGURATION_NAMESPACE]_schema.rb` for the filename.
+When an environment has multiple database configurations, add another level
+under the environment. This third level names each database configuration:
+
+```yaml
+production:
+  primary: # database configuration name
+    database: my_primary_database
+  animals: # database configuration name
+    database: my_animals_database
+```
+
+This is called a three-tier configuration because the YAML has three levels: the
+environment, the database configuration name, and then the database settings.
+The database configuration names, such as `primary` and `animals`, are used
+later when you connect models, run database tasks, and switch between writers
+and replicas.
+
+In a default Rails application, `development` and `test` often use a two-tier
+configuration, while `production` may already use a three-tier configuration
+for `primary`, `cache`, `queue`, and `cable`.
+
+The examples in this guide start with one primary production database. The
+application then adds a second database named `animals`. Models such as `User`
+will continue to use the primary database, while models such as `Dog` will use
+the animals database. Later sections build on this example by adding replicas
+and showing how Rails switches between them.
+
+### Database Configurations
+
+Consider the following database configuration with a single primary database:
 
 ```yaml
 production:
   primary:
     database: my_primary_database
-    user: root
-    adapter: mysql
+    adapter: mysql2
+    username: root
+    password: <%= ENV['ROOT_PASSWORD'] %>
+```
+
+If a `primary` configuration key is provided, it will be used as the default
+configuration. If there is no configuration named `primary`, Rails will use the
+first configuration as the default.
+
+The default configuration uses the default Rails filenames for schema and
+schema cache files. For example, a `primary` configuration will use
+`db/schema.rb` for the schema file and `db/schema_cache.yml` for the schema
+cache file. Other entries use names based on the database configuration name,
+such as `db/[CONFIGURATION_NAMESPACE]_schema.rb` and
+`db/[CONFIGURATION_NAMESPACE]_schema_cache.yml`.
+
+Let's now add an `animals` database for the `production` environment:
+
+```yaml#7-12
+production:
+  primary:
+    database: my_primary_database
+    username: root
+    password: <%= ENV['ROOT_PASSWORD'] %>
+    adapter: mysql2
+  animals:
+    database: my_animals_database
+    username: animals_root
+    password: <%= ENV['ANIMALS_ROOT_PASSWORD'] %>
+    adapter: mysql2
+    migrations_paths: db/animals_migrate
+```
+
+The updated configuration defines two writer databases, `primary` and
+`animals`. A writer database is the database Rails uses for inserts, updates,
+and deletes.
+
+#### Database Connection URLs
+
+A database connection URL is a single string that contains the adapter,
+username, password, host, and database name for a database connection.
+Connection URLs can also be configured using environment variables.
+
+The variable name is formed by concatenating the database configuration name
+with `_DATABASE_URL`. For example, because the configuration name is `animals`,
+Rails looks for an environment variable named `ANIMALS_DATABASE_URL`:
+
+```bash
+ANIMALS_DATABASE_URL="mysql2://animals_root:password@localhost/my_animals_database"
+```
+
+Rails matches the environment variable with the corresponding
+`database.yml` entry. The URL supplies the connection details, while
+`database.yml` can keep Rails-specific options such as `migrations_paths`.
+
+For example, `database.yml` does not need to include the username, password,
+host, or database name if those details are provided by the connection URL:
+
+```yaml
+production:
+  animals:
+    adapter: mysql2
+    migrations_paths: db/animals_migrate
+```
+
+When Rails loads the `animals` configuration, it uses
+`ANIMALS_DATABASE_URL` for the connection details and keeps
+`migrations_paths` from `database.yml`.
+
+See [Configuring a Database](configuring.html#configuring-a-database) for
+details about how the configurations are merged.
+
+#### Migration Paths and Schema Dumps
+
+For new writer databases, you need to set the `migrations_paths` key to
+the directory where you will store migrations for that database. We'll look more
+at `migrations_paths` later in [Generating Migrations](#generating-migrations).
+
+```yaml#3
+production:
+  animals:
+    migrations_paths: db/animals_migrate
+```
+
+You can also configure the schema dump file by setting `schema_dump` to a
+custom schema file name. By default, the primary configuration uses
+`db/schema.rb`, and other configurations use
+`db/[CONFIGURATION_NAMESPACE]_schema.rb`. For example:
+
+```yaml#5
+production:
+  animals:
+    database: my_animals_database
+    adapter: mysql2
+    schema_dump: db/animals_schema.rb
+```
+
+If you want to skip dumping the schema for a database entirely, set
+`schema_dump: false`.
+
+#### Configuring a Replica
+
+Read replicas are database servers that keep a copy of a writer database's data
+and structure. The database system, not Rails, handles replication from the
+writer to the replica. Replication can be delayed, so applications need to
+account for the possibility that a replica has not received the latest write
+yet. Refer to your database documentation for replication setup and behavior.
+
+To add read replicas for the `primary` and `animals` databases, add a
+configuration for each replica to `config/database.yml`:
+
+```yaml#7-12,19-24
+production:
+  primary:
+    database: my_primary_database
+    username: root
+    password: <%= ENV['ROOT_PASSWORD'] %>
+    adapter: mysql2
   primary_replica:
     database: my_primary_database
-    user: root_readonly
-    adapter: mysql
+    username: root_readonly
+    password: <%= ENV['ROOT_READONLY_PASSWORD'] %>
+    adapter: mysql2
     replica: true
   animals:
     database: my_animals_database
-    user: animals_root
-    adapter: mysql
+    username: animals_root
+    password: <%= ENV['ANIMALS_ROOT_PASSWORD'] %>
+    adapter: mysql2
     migrations_paths: db/animals_migrate
   animals_replica:
     database: my_animals_database
-    user: animals_readonly
-    adapter: mysql
+    username: animals_readonly
+    password: <%= ENV['ANIMALS_READONLY_PASSWORD'] %>
+    adapter: mysql2
     replica: true
 ```
 
-When using multiple databases there are a few important settings.
+Here, `primary_replica` copies data from `primary`, and `animals_replica`
+copies data from `animals`. Rails can then send read queries to a replica
+when appropriate.
 
-First, the database name for the `primary` and `primary_replica` should be the same because they contain
-the same data. This is also the case for `animals` and `animals_replica`.
+When configuring a replica, there are a few important settings.
 
-Second, the username for the writers and replicas should be different, and the
-replica user's permissions should be set to only read and not write.
+First, the database name for a writer and its replica should be the same because
+they contain the same data. This means `primary` and `primary_replica` should
+have the same name, as should `animals` and `animals_replica`.
 
-When using a replica database you need to add a `replica: true` entry to the replica in the
-`database.yml`. This is because Rails otherwise has no way of knowing which one is a replica
-and which one is the writer.
+```yaml#3,5
+production:
+  primary:
+    database: my_primary_database
+  primary_replica:
+    database: my_primary_database
+```
 
-Lastly, for new writer databases you need to set the `migrations_paths` to the directory
-where you will store migrations for that database. We'll look more at `migrations_paths`
-later on in this guide.
+Second, use a different username for each replica, and set the replica user's
+database permissions to only read and not write.
 
-Now that we have a new database, let's set up the connection model. In order to use the
-new database we need to create a new abstract class and connect to the animals databases.
+```yaml#4,7
+production:
+  primary:
+    database: my_primary_database
+    username: root
+  primary_replica:
+    database: my_primary_database
+    username: root_readonly
+```
+
+When using a replica database, you need to add `replica: true` to the replica
+configuration in `config/database.yml`. Rails otherwise has no way of knowing
+which configuration is the replica and which one is the writer. Rails will not
+run certain tasks, such as migrations, against configurations marked as
+replicas. If you forget `replica: true`, Rails will treat the replica as
+another writer database and may run database tasks against it.
+
+```yaml#4
+production:
+  primary_replica:
+    database: my_primary_database
+    replica: true
+```
+
+### Connecting Models
+
+Adding a database configuration tells Active Record how to connect to each database, but
+an Active Record model also needs to know which connections to use. To do that,
+define the connection on the primary abstract class and have the models inherit from it.
+
+For example, an application with `primary` and `primary_replica` databases might
+define the writing and reading roles for the connection:
+
+```ruby#4
+class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+
+  connects_to database: { writing: :primary, reading: :primary_replica }
+end
+```
+
+In [`connects_to`](https://api.rubyonrails.org/classes/ActiveRecord/ConnectionHandling.html#method-i-connects_to),
+`writing` and `reading` are role names. The `writing` role points to the writer
+database, and the `reading` role points to the read replica:
 
 ```ruby
+connects_to database: { writing: :primary, reading: :primary_replica }
+```
+
+By default, Rails expects these role names to be `writing` and `reading`.
+
+If your application already uses different role names, you can configure Rails
+to use those names instead:
+
+```ruby
+config.active_record.writing_role = :default
+config.active_record.reading_role = :readonly
+```
+
+After changing the role names, use those names in `connects_to`:
+
+```ruby
+connects_to database: { default: :primary, readonly: :primary_replica }
+```
+
+#### Connecting Models to the Primary Database
+
+The primary database and its replica can be configured in `ApplicationRecord`
+this way:
+
+```ruby
+class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+
+  connects_to database: { writing: :primary, reading: :primary_replica }
+end
+```
+
+Models that inherit from `ApplicationRecord` will use the `primary` database for
+writes and the `primary_replica` database for reads when Rails is switched to
+the reading role.
+
+If you're using a custom name for the base class of your database-backed
+models, set `primary_abstract_class` on that class. This marks it as the primary
+abstract class that shares a connection with `ActiveRecord::Base`:
+
+```ruby
+class PrimaryApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+
+  connects_to database: { writing: :primary, reading: :primary_replica }
+end
+```
+
+In that case, classes that connect to `primary`/`primary_replica` can inherit
+from your primary abstract class like standard Rails applications do with
+`ApplicationRecord`:
+
+```ruby
+class Person < PrimaryApplicationRecord
+end
+```
+
+#### Connecting Models to Another Database
+
+If multiple models should use another database, define another abstract class
+and have the models for that database inherit from it.
+
+Each abstract class owns the connection for one database, or for one writer and
+read replica pair. Concrete models then inherit from the abstract class for the
+database where their table lives.
+
+For example, an application with `primary` and `animals` databases might have
+one abstract class for each database:
+
+```ruby#8,10
+class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+
+  connects_to database: { writing: :primary, reading: :primary_replica }
+end
+
 class AnimalsRecord < ApplicationRecord
   self.abstract_class = true
 
@@ -113,111 +426,82 @@ class AnimalsRecord < ApplicationRecord
 end
 ```
 
-Then we need to update `ApplicationRecord` to be aware of our new replica.
+Models stored in the `animals` database should inherit from that common
+abstract class:
 
 ```ruby
-class ApplicationRecord < ActiveRecord::Base
-  self.abstract_class = true
-
-  connects_to database: { writing: :primary, reading: :primary_replica }
+class Dog < AnimalsRecord
+  # Talks automatically to the animals database.
 end
 ```
 
-If you use a differently named class for your application record you can need to
-set `primary_abstract_class` instead so Rails knowns which class `ActiveRecord::Base`
-should share a connection with.
+`Dog` now uses the `animals` database for writes and the `animals_replica`
+database for reads when Rails is switched to the reading role.
 
-```
-class PrimaryApplicationRecord < ActiveRecord::Base
-  self.primary_abstract_class
-end
-```
+WARNING: Define `connects_to` on a single abstract class for each database and
+have the models stored in that database inherit from it. `connects_to` can only
+be called on `ActiveRecord::Base` or abstract classes; calling it on a concrete
+model raises `NotImplementedError`. Defining the same database connection on
+multiple abstract classes creates separate connection pools, because Rails uses
+the class name for the connection specification name. Models that inherit from
+a common abstract class share its connection pools instead.
 
-Classes that connect to primary/primary_replica can inherit from your primary abstract
-class like standard Rails applications:
+### Generating Migrations
 
-```ruby
-class Person < ApplicationRecord
-end
-```
+Each managed writer database needs a migration path. Keeping migrations
+separate lets Rails migrate one database without running migrations intended for
+another database. Replicas do not need migration paths because Rails does not
+run migrations against configurations marked with `replica: true`.
 
-By default Rails expects the database roles to be `writing` and `reading` for the primary
-and replica respectively. If you have a legacy system you may already have roles set up that
-you don't want to change. In that case you can set a new role name in your application config.
+For example, a migration that creates a table in the primary database belongs in
+`db/migrate`, while a migration that creates a table in the `animals` database
+belongs in `db/animals_migrate`:
 
-```ruby
-config.active_record.writing_role = :default
-config.active_record.reading_role = :readonly
-```
-
-It's important to connect to your database in a single model and then inherit from that model
-for the tables rather than connect multiple individual models to the same database. Database
-clients have a limit to the number of open connections there can be and if you do this it will
-multiply the number of connections you have since Rails uses the model class name for the
-connection specification name.
-
-Now that we have the `database.yml` and the new model set up it's time to create the databases.
-Rails 6.0 ships with all the rails tasks you need to use multiple databases in Rails.
-
-You can run `bin/rails -T` to see all the commands you're able to run. You should see the following:
-
-```bash
-$ bin/rails -T
-rails db:create                          # Creates the database from DATABASE_URL or config/database.yml for the ...
-rails db:create:animals                  # Create animals database for current environment
-rails db:create:primary                  # Create primary database for current environment
-rails db:drop                            # Drops the database from DATABASE_URL or config/database.yml for the cu...
-rails db:drop:animals                    # Drop animals database for current environment
-rails db:drop:primary                    # Drop primary database for current environment
-rails db:migrate                         # Migrate the database (options: VERSION=x, VERBOSE=false, SCOPE=blog)
-rails db:migrate:animals                 # Migrate animals database for current environment
-rails db:migrate:primary                 # Migrate primary database for current environment
-rails db:migrate:status                  # Display status of migrations
-rails db:migrate:status:animals          # Display status of migrations for animals database
-rails db:migrate:status:primary          # Display status of migrations for primary database
-rails db:rollback                        # Rolls the schema back to the previous version (specify steps w/ STEP=n)
-rails db:rollback:animals                # Rollback animals database for current environment (specify steps w/ STEP=n)
-rails db:rollback:primary                # Rollback primary database for current environment (specify steps w/ STEP=n)
-rails db:schema:dump                     # Creates a database schema file (either db/schema.rb or db/structure.sql  ...
-rails db:schema:dump:animals             # Creates a database schema file (either db/schema.rb or db/structure.sql  ...
-rails db:schema:dump:primary             # Creates a db/schema.rb file that is portable against any DB supported  ...
-rails db:schema:load                     # Loads a database schema file (either db/schema.rb or db/structure.sql  ...
-rails db:schema:load:animals             # Loads a database schema file (either db/schema.rb or db/structure.sql  ...
-rails db:schema:load:primary             # Loads a database schema file (either db/schema.rb or db/structure.sql  ...
+```text
+db/migrate/20240501000000_create_users.rb
+db/animals_migrate/20240501000000_create_dogs.rb
 ```
 
-Running a command like `bin/rails db:create` will create both the primary and animals databases.
-Note that there is no command for creating the users and you'll need to do that manually
-to support the readonly users for your replicas. If you want to create just the animals
-database you can run `bin/rails db:create:animals`.
+Migrations for multiple databases should live in their own folders prefixed
+with the name of the database key in the configuration. You also need to set
+`migrations_paths` in the database configuration to tell Rails where to find
+those migrations.
 
-## Generators and Migrations
+The `primary` database uses the default `db/migrate` path, so you usually only
+need to set `migrations_paths` for additional writer databases. In the example
+configuration, the `animals` database uses `db/animals_migrate`:
 
-Migrations for multiple databases should live in their own folders prefixed with the
-name of the database key in the configuration.
+```yaml#3
+production:
+  animals:
+    migrations_paths: db/animals_migrate
+```
 
-You also need to set the `migrations_paths` in the database configurations to tell Rails
-where to find the migrations.
-
-For example the `animals` database would look for migrations in the `db/animals_migrate` directory and
-`primary` would look in `db/migrate`. Rails generators now take a `--database` option
-so that the file is generated in the correct directory. The command can be run like so:
+Rails generators take a `--database` option so that generated migration files
+are placed in the correct directory:
 
 ```bash
 $ bin/rails generate migration CreateDogs name:string --database animals
 ```
 
-If you are using Rails generators, the scaffold and model generators will create the abstract
-class for you. Simply pass the database key to the command line
+This creates the migration in `db/animals_migrate`. Without
+`--database animals`, the migration would be generated in the default migration
+path.
+
+#### Generating Models and Scaffolds
+
+The model and scaffold generators also take the `--database` option:
 
 ```bash
 $ bin/rails generate scaffold Dog name:string --database animals
 ```
 
-A class with the database name and `Record` will be created. In this example
-the database is `Animals` so we end up with `AnimalsRecord`:
+When you pass `--database`, Rails generates an abstract class for that database
+unless one already exists. The class name is the camelized database name
+followed by `Record`. In this example, the database is `animals`, so Rails
+generates `AnimalsRecord`:
 
-```ruby
+```ruby#4
 class AnimalsRecord < ApplicationRecord
   self.abstract_class = true
 
@@ -232,227 +516,626 @@ class Dog < AnimalsRecord
 end
 ```
 
-Note: Since Rails doesn't know which database is the replica for your writer you will need to
-add this to the abstract class after you're done.
+Since Rails doesn't know which database is the replica for your writer, add the
+replica to the abstract class after it's generated:
 
-Rails will only generate the new class once. It will not be overwritten by new scaffolds
-or deleted if the scaffold is deleted.
+```ruby
+connects_to database: { writing: :animals, reading: :animals_replica }
+```
 
-If you already have an abstract class and its name differs from `AnimalsRecord` you can pass
-the `--parent` option to indicate you want a different abstract class:
+Rails will only generate `AnimalsRecord` once. It will not be overwritten by new
+scaffolds or deleted if the scaffold is deleted, so your changes to the
+abstract class are preserved.
+
+If you already have an abstract class and its name differs from
+`AnimalsRecord`, pass the `--parent` option to tell Rails which class the model
+should inherit from:
 
 ```bash
 $ bin/rails generate scaffold Dog name:string --database animals --parent Animals::Record
 ```
 
-This will skip generating `AnimalsRecord` since you've indicated to Rails that you want to
-use a different parent class.
+This will skip generating `AnimalsRecord` since you've indicated to Rails that
+you want to use a different parent class.
 
-## Activating automatic connection switching
+### Database Tasks
 
-Finally, in order to use the read-only replica in your application you'll need to activate
-the middleware for automatic switching.
+Rails creates database tasks for each managed database configuration. Running a
+task without a database name applies it to all managed databases, for example:
 
-Automatic switching allows the application to switch from the writer to replica or replica
-to writer based on the HTTP verb and whether there was a recent write.
-
-If the application is receiving a POST, PUT, DELETE, or PATCH request the application will
-automatically write to the writer database. For the specified time after the write, the
-application will read from the primary. For a GET or HEAD request the application will read
-from the replica unless there was a recent write.
-
-To activate the automatic connection switching middleware, add or uncomment the following
-lines in your application config.
-
-```ruby
-config.active_record.database_selector = { delay: 2.seconds }
-config.active_record.database_resolver = ActiveRecord::Middleware::DatabaseSelector::Resolver
-config.active_record.database_resolver_context = ActiveRecord::Middleware::DatabaseSelector::Resolver::Session
+```bash
+$ bin/rails db:create
+$ bin/rails db:migrate
+$ bin/rails db:schema:dump
 ```
 
-Rails guarantees "read your own write" and will send your GET or HEAD request to the
-writer if it's within the `delay` window. By default the delay is set to 2 seconds. You
-should change this based on your database infrastructure. Rails doesn't guarantee "read
-a recent write" for other users within the delay window and will send GET and HEAD requests
-to the replicas unless they wrote recently.
+To run a task for one database, append the database configuration name:
 
-The automatic connection switching in Rails is relatively primitive and deliberately doesn't
-do a whole lot. The goal is a system that demonstrates how to do automatic connection
-switching that was flexible enough to be customizable by app developers.
+```bash
+$ bin/rails db:create:animals
+$ bin/rails db:migrate:animals
+$ bin/rails db:schema:dump:animals
+```
 
-The setup in Rails allows you to easily change how the switching is done and what
-parameters it's based on. Let's say you want to use a cookie instead of a session to
-decide when to swap connections. You can write your own class:
+The same pattern applies to the primary database:
+
+```bash
+$ bin/rails db:migrate:primary
+```
+
+Rails does not create database tasks for replicas. For example,
+`primary_replica` and `animals_replica` do not get migration tasks because they
+are marked with `replica: true`.
+
+Running `bin/rails db:create` will create both the primary and animals
+databases. Rails does not create database users; create writer and read-only
+replica users in your database system.
+
+Other Rails commands can also target a database configuration by name. For
+example, `bin/rails dbconsole --database=animals` opens a database console for
+the `animals` database, and `bin/rails query "Dog.count" --database animals`
+runs a read-only query against that database configuration.
+
+For the full list of Rails database commands, see the
+[Command Line guide](command_line.html#managing-the-database).
+
+### External Databases
+
+Some applications connect to databases that Rails should use but not manage.
+For example, you might connect to a legacy database, a reporting database, or a
+database owned by another application.
+
+In those cases, Rails needs the database configuration so models can connect to
+the database, but Rails should not run database management tasks such as
+creating, dropping, migrating, seeding, or dumping the schema for that database.
+Set `database_tasks: false` on the database configuration to opt out of those
+tasks. By default, `database_tasks` is `true`.
+
+```yaml
+production:
+  primary:
+    database: my_database
+    adapter: mysql2
+  reporting:
+    database: my_reporting_database
+    adapter: mysql2
+    database_tasks: false
+```
+
+In this example, Rails will still connect to the `reporting` database when a
+model uses that configuration, but commands such as `bin/rails db:create`,
+`bin/rails db:migrate`, and `bin/rails db:schema:dump` will skip it.
+
+### Role Switching
+
+Role switching lets Rails choose between the `writing` and `reading` roles.
+These roles usually point to a writer database and its read replica.
+
+#### Automatic Role Switching
+
+Automatic role switching lets Rails choose between the writer and replica for
+each request. This is sometimes called automatic connection switching.
+
+You may want automatic role switching when your application uses replicas to
+reduce read traffic on the writer, but still needs users to see their own
+changes immediately after they write. It is implemented by the
+[`DatabaseSelector`](https://api.rubyonrails.org/classes/ActiveRecord/Middleware/DatabaseSelector.html)
+middleware, so it applies to web requests.
+
+The middleware chooses a role based on the HTTP verb and whether the same
+requesting user recently wrote to the database:
+
+* `POST`, `PUT`, `PATCH`, and `DELETE` requests use the writer database.
+* `GET` and `HEAD` requests use the replica, unless the user recently wrote to
+  the database.
+* `GET` and `HEAD` requests from a user who recently wrote to the database use
+  the writer until the configured delay has passed.
+
+By default, the delay is 2 seconds. You can configure it in the generated
+initializer, as shown below.
+
+This helps the application provide "read your own write" behavior. For example,
+after a user submits a form, a redirect back to a `GET` request can still read
+from the writer for a short time so the user can see their own change.
+
+To activate the automatic connection switching middleware, run the automatic
+swapping generator:
+
+```bash
+$ bin/rails g active_record:multi_db
+```
+
+Then uncomment the following lines in the generated initializer:
 
 ```ruby
-class MyCookieResolver
-  # code for your cookie class
+Rails.application.configure do
+  config.active_record.database_selector = { delay: 2.seconds }
+  config.active_record.database_resolver = ActiveRecord::Middleware::DatabaseSelector::Resolver
+  config.active_record.database_resolver_context = ActiveRecord::Middleware::DatabaseSelector::Resolver::Session
+end
+```
+
+The `delay` controls how long Rails keeps sending a user's reads to the writer
+after that user writes. By default, the delay is set to 2 seconds. Change this
+based on your database infrastructure and expected replication lag.
+
+Rails does not guarantee that other users will immediately see a recent write.
+For users who did not perform the write, `GET` and `HEAD` requests can still go
+to the replica and may be affected by replication lag.
+
+Automatic role switching is intentionally simple. It does not inspect actual
+replication lag, load balance across multiple replicas, or decide per query
+which database should be used. The default behavior is designed to be a small,
+customizable starting point for applications.
+
+You can change how Rails tracks the last write. By default, Rails stores the
+last write timestamp in the session. If you want to use a cookie instead, you
+can write your own resolver context:
+
+```ruby
+class MyCookieResolver < ActiveRecord::Middleware::DatabaseSelector::Resolver
+  def self.call(request)
+    new(request.cookies)
+  end
+
+  def initialize(cookies)
+    @cookies = cookies
+  end
+
+  attr_reader :cookies
+
+  def last_write_timestamp
+    self.class.convert_timestamp_to_time(cookies[:last_write])
+  end
+
+  def update_last_write_timestamp
+    cookies[:last_write] = self.class.convert_time_to_timestamp(Time.now)
+  end
+
+  def save(response)
+  end
 end
 ```
 
 And then pass it to the middleware:
 
-```ruby
+```ruby#3
 config.active_record.database_selector = { delay: 2.seconds }
 config.active_record.database_resolver = ActiveRecord::Middleware::DatabaseSelector::Resolver
 config.active_record.database_resolver_context = MyCookieResolver
 ```
 
-## Using manual connection switching
+#### Manual Role Switching
 
-There are some cases where you may want your application to connect to a writer or a replica
-and the automatic connection switching isn't adequate. For example, you may know that for a
-particular request you always want to send the request to a replica, even when you are in a
-POST request path.
+Manual role switching lets you choose the database role for a block of code.
+Use it when automatic role switching would choose the wrong role for a specific
+case, or when automatic role switching does not apply, such as in scripts,
+console sessions, and background jobs.
 
-To do this Rails provides a `connected_to` method that will switch to the connection you
-need.
+For example, automatic role switching sends `POST` requests to the writer, but
+you may have a `POST` request that only reads data and should use a replica.
+
+For example, to read from the writer even when automatic role switching would
+use the read replica, wrap the code in `connected_to`:
 
 ```ruby
-ActiveRecord::Base.connected_to(role: :reading) do
-  # all code in this block will be connected to the reading role
+ActiveRecord::Base.connected_to(role: :writing) do
+  # All code in this block uses the writing role.
+  Person.last
 end
 ```
 
-The "role" in the `connected_to` call looks up the connections that are connected on that
-connection handler (or role). The `reading` connection handler will hold all the connections
-that were connected via `connects_to` with the role name of `reading`.
+The role passed to `connected_to` must match a role defined by `connects_to`.
+In the examples above, the `reading` role points to the replica configuration:
 
-Note that `connected_to` with a role will look up an existing connection and switch
-using the connection specification name. This means that if you pass an unknown role
-like `connected_to(role: :nonexistent)` you will get an error that says
+```ruby
+connects_to database: { writing: :primary, reading: :primary_replica }
+```
+
+If you pass an unknown role, Rails raises an error:
+
+```ruby
+ActiveRecord::Base.connected_to(role: :nonexistent) do
+  # ...
+end
+```
+
+The error will look like:
+
 `ActiveRecord::ConnectionNotEstablished (No connection pool for 'ActiveRecord::Base' found for the 'nonexistent' role.)`
 
-## Horizontal sharding
+If you want Active Record to prevent write queries while using a role, pass
+`prevent_writes: true`. This prevents queries that look like writes from being
+sent to the database:
 
-Horizontal sharding is when you split up your database to reduce the number of rows on each
-database server, but maintain the same schema across "shards". This is commonly called "multi-tenant"
-sharding.
+```ruby
+ActiveRecord::Base.connected_to(role: :reading, prevent_writes: true) do
+  # The following will raise an error:
+  Person.create
+end
+```
 
-The API for supporting horizontal sharding in Rails is similar to the multiple database / vertical
-sharding API that's existed since Rails 6.0.
+This Rails-level check is not a substitute for database permissions. You should
+also configure replica users as read-only in your database.
 
-Shards are declared in the three-tier config like this:
+## Horizontal Sharding
 
-```yaml
+Horizontal sharding splits records across multiple databases that share the
+same schema. Each database is called a shard. For example, one shard might store
+customers 1 through 100, while another shard stores customers 101 through 200.
+
+Sharding is different from replication. A replica copies the same data from its
+writer. A shard stores a different subset of records. Applications commonly use
+sharding when one database has too much data or traffic, or when tenant or
+account data should be distributed across database servers.
+
+Rails uses the same `connects_to` and `connected_to` APIs for sharding.
+
+### Configuring Shards
+
+Shards are declared as database configurations in `config/database.yml`. Each
+shard needs a writer configuration, and can also have a replica configuration:
+
+```yaml#9-24
 production:
   primary:
     database: my_primary_database
-    adapter: mysql
+    adapter: mysql2
   primary_replica:
     database: my_primary_database
-    adapter: mysql
+    adapter: mysql2
     replica: true
   primary_shard_one:
     database: my_primary_shard_one
-    adapter: mysql
+    adapter: mysql2
+    migrations_paths: db/migrate_shards
   primary_shard_one_replica:
     database: my_primary_shard_one
-    adapter: mysql
+    adapter: mysql2
+    replica: true
+  primary_shard_two:
+    database: my_primary_shard_two
+    adapter: mysql2
+    migrations_paths: db/migrate_shards
+  primary_shard_two_replica:
+    database: my_primary_shard_two
+    adapter: mysql2
     replica: true
 ```
 
-Models are then connected with the `connects_to` API via the `shards` key:
+In this example, `primary_shard_one` and `primary_shard_two` are database
+configuration names. Later, [the model connection maps those configurations to
+Rails shard names](#connecting-models-to-shards), such as `shard_one` and `shard_two`.
 
-```ruby
+Each shard can also have its own replica. `primary_shard_one` stores one subset
+of records, and `primary_shard_one_replica` is a read replica of that same
+shard. `primary_shard_two` stores a different subset of records, and
+`primary_shard_two_replica` is a read replica of that second shard. Shards split
+records across databases; replicas copy one shard's data so reads for that shard
+can be sent away from its writer.
+
+### Connecting Models to Shards
+
+Models are connected to shards with the `connects_to` API using the `shards`
+key:
+
+```ruby#10-13
 class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+
+  connects_to database: { writing: :primary, reading: :primary_replica }
+end
+
+class ShardRecord < ApplicationRecord
   self.abstract_class = true
 
   connects_to shards: {
-    default: { writing: :primary, reading: :primary_replica },
-    shard_one: { writing: :primary_shard_one, reading: :primary_shard_one_replica }
+    shard_one: { writing: :primary_shard_one, reading: :primary_shard_one_replica },
+    shard_two: { writing: :primary_shard_two, reading: :primary_shard_two_replica }
   }
 end
+
+class Customer < ShardRecord
+end
 ```
 
-Then models can swap connections manually via the `connected_to` API. If
-using sharding both a `role` and `shard` must be passed:
+In this example, `Customer` inherits from `ShardRecord`, so `Customer` records
+can be stored on either `shard_one` or `shard_two`. The `shard_one` name maps to
+the `primary_shard_one` writer and `primary_shard_one_replica` replica. The
+`shard_two` name maps to the `primary_shard_two` writer and
+`primary_shard_two_replica` replica.
+
+### Generating Migrations for Shards
+
+Shards usually share a schema, so shard migrations should use the same
+`migrations_paths` and `schema_dump` settings across all shards.
+
+When generating a migration or scaffold, pass `--database` with one of the
+shard database configuration names. Since both shards use the same migration
+path, it does not matter which shard configuration you choose.
+
+```bash
+$ bin/rails g scaffold Customer name:string --database primary_shard_one
+```
+
+This command generates the scaffold and places the migration in the shared
+`db/migrate_shards` path.
+
+### Shard Switching
+
+Active Record needs to know which shard to use for each operation. You can choose the
+shard manually with `connected_to`, or configure middleware to choose the shard
+for each request.
+
+#### Manual Shard Switching
+
+Use manual shard switching when you need to run a block of code against a
+specific shard. This is common in background jobs, data migrations, scripts, or
+service objects where there is no request middleware to choose the shard.
+
+To switch shards manually, use `connected_to` with both a `role` and a `shard`:
 
 ```ruby
-ActiveRecord::Base.connected_to(role: :writing, shard: :default) do
-  @id = Person.create! # Creates a record in shard default
+ShardRecord.connected_to(role: :writing, shard: :shard_one) do
+  @customer = Customer.create! # Creates a record in shard shard_one
 end
 
-ActiveRecord::Base.connected_to(role: :writing, shard: :shard_one) do
-  Person.find(@id) # Can't find record, doesn't exist because it was created
-                   # in the default shard
+ShardRecord.connected_to(role: :writing, shard: :shard_two) do
+  Customer.find(@customer.id) # Can't find record, doesn't exist because it was created
+                   # in the shard named ":shard_one".
 end
 ```
 
-The horizontal sharding API also supports read replicas. You can swap the
-role and the shard with the `connected_to` API.
+The shard name must match one of the shard keys passed to `connects_to`, such
+as `shard_one` or `shard_two`.
+
+The horizontal sharding API also supports read replicas. To read from a shard's
+replica, use the `reading` role with the shard:
 
 ```ruby
-ActiveRecord::Base.connected_to(role: :reading, shard: :shard_one) do
-  Person.first # Lookup record from read replica of shard one
+ShardRecord.connected_to(role: :reading, shard: :shard_one) do
+  Customer.first # Lookup record from read replica of shard one.
 end
 ```
 
-## Granular Database Connection Switching
+#### Automatic Shard Switching
 
-In Rails 6.1 it's possible to switch connections for one database instead of
-all databases globally. To use this feature you must first set
-`config.active_record.legacy_connection_handling` to `false` in your application
-configuration. The majority of applications should not need to make any other
-changes since the public APIs have the same behavior.
+Applications can automatically switch shards per request using the
+[`ShardSelector`](https://api.rubyonrails.org/classes/ActiveRecord/Middleware/ShardSelector.html)
+middleware. This is useful for tenant-based applications where
+each request can be mapped to a shard, for example from a subdomain or current
+account.
 
-With `legacy_connection_handling` set to false, any abstract connection class
-will be able to switch connections without affecting other connections. This
-is useful for switching your `AnimalsRecord` queries to read from the replica
-while ensuring your `ApplicationRecord` queries go to the primary.
+The same generator used for the database selector above can be used to generate
+an initializer file for automatic shard swapping:
+
+```bash
+$ bin/rails g active_record:multi_db
+```
+
+Then in the generated `config/initializers/multi_db.rb`, uncomment and modify
+the following code:
+
+```ruby
+Rails.application.configure do
+  config.active_record.shard_selector = { lock: true }
+  config.active_record.shard_resolver = ->(request) { Tenant.find_by!(host: request.host).shard }
+end
+```
+
+Applications must provide a resolver because Rails cannot know how your
+application assigns tenants or accounts to shards. An example resolver that
+uses a subdomain to determine the shard might look like this:
+
+```ruby
+config.active_record.shard_resolver = ->(request) {
+  subdomain = request.subdomain
+  tenant = Tenant.find_by_subdomain!(subdomain)
+  tenant.shard
+}
+```
+
+The behavior of `ShardSelector` can be altered through some configuration
+options.
+
+- `lock` is true by default and prevents the request from switching shards after
+  the resolver chooses one. If `lock` is false, shard swapping is allowed
+  during the request. For tenant-based sharding, `lock` should usually be true
+  to prevent application code from accidentally switching between tenants.
+
+- `class_name` is the name of the abstract connection class to switch. By
+  default, the `ShardSelector` uses `ActiveRecord::Base`. If the application
+  has multiple abstract connection classes, set `class_name` to the sharded
+  database's abstract connection class.
+
+Options may be set in the application configuration. For example, this
+configuration tells `ShardSelector` to switch shards using
+`ShardRecord.connected_to`:
+
+```ruby
+config.active_record.shard_selector = { lock: true, class_name: "ShardRecord" }
+```
+
+## Granular Role and Shard Switching
+
+By default, calling `connected_to` on `ActiveRecord::Base` switches the role or
+shard for all abstract connection classes. In a multiple database application,
+you may only want to switch one database connection while leaving the others
+unchanged.
+
+Granular role and shard switching lets you call `connected_to` on a specific
+abstract class. This is useful when you want `AnimalsRecord` queries to read
+from the replica while `ApplicationRecord` queries continue using the primary
+writer.
 
 ```ruby
 AnimalsRecord.connected_to(role: :reading) do
-  Dog.first # Reads from animals_replica
-  Person.first  # Reads from primary
+  Dog.first # Reads from animals_replica.
+  Person.first  # Reads from primary.
 end
 ```
 
-It's also possible to swap connections granularly for shards.
+Inside the block, only models that inherit from `AnimalsRecord` switch to the
+`reading` role. Models that inherit from `ApplicationRecord` keep using their
+current role.
+
+You can also switch one sharded abstract class to a specific shard:
 
 ```ruby
-AnimalsRecord.connected_to(role: :reading, shard: :shard_one) do
-  Dog.first # Will read from shard_one_replica. If no connection exists for shard_one_replica,
-  # a ConnectionNotEstablished error will be raised
-  Person.first # Will read from primary writer
+ShardRecord.connected_to(role: :reading, shard: :shard_one) do
+  Customer.first # Reads from primary_shard_one_replica.
+  Person.first  # Reads from primary writer.
 end
 ```
 
-To switch only the primary database cluster use `ApplicationRecord`:
+If no connection exists for the requested role and shard, Rails raises
+`ActiveRecord::ConnectionNotEstablished`.
+
+To switch only the primary database cluster, call `connected_to` on
+`ApplicationRecord`:
 
 ```ruby
-ApplicationRecord.connected_to(role: :reading, shard: :shard_one) do
-  Person.first # Reads from primary_shard_one_replica
-  Dog.first # Reads from animals_primary
+ApplicationRecord.connected_to(role: :reading) do
+  Person.first # Reads from primary_replica.
+  Dog.first # Reads from animals writer.
 end
 ```
 
-`ActiveRecord::Base.connected_to` maintains the ability to switch
-connections globally.
+Use `ActiveRecord::Base.connected_to` when you want to switch all abstract
+connection classes globally.
 
-## Caveats
+## Handling Associations Across Databases
 
-### Automatic swapping for horizontal sharding
+Databases cannot perform SQL joins across separate database clusters. If an
+association would require Rails to join tables that live in different databases,
+the query cannot be sent as a single SQL join.
 
-While Rails now supports an API for connecting to and swapping connections of shards, it does
-not yet support an automatic swapping strategy. Any shard swapping will need to be done manually
-in your app via a middleware or `around_action`.
+For `has_many :through` and `has_one :through` associations, you can pass
+`disable_joins: true` to tell Rails to load the association with separate
+queries instead of a join.
 
-### Load Balancing Replicas
+In this example, `Dog` is stored in the `animals` database, while `Human`,
+`Treat`, `Home`, and `Yard` are stored in the primary database:
 
-Rails also doesn't support automatic load balancing of replicas. This is very
-dependent on your infrastructure. We may implement basic, primitive load balancing
-in the future, but for an application at scale this should be something your application
-handles outside of Rails.
+```ruby
+class Dog < AnimalsRecord
+  has_many :humans
+  has_many :treats, through: :humans, disable_joins: true
 
-### Joining Across Databases
+  has_one :home
+  has_one :yard, through: :home, disable_joins: true
+end
 
-Applications cannot join across databases. Rails 6.1 will support using `has_many`
-relationships and creating 2 queries instead of joining, but Rails 6.0 will require
-you to split the joins into 2 selects manually.
+class Human < ApplicationRecord
+  belongs_to :dog
+  has_many :treats
+end
 
-### Schema Cache
+class Treat < ApplicationRecord
+  belongs_to :human
+end
 
-If you use a schema cache and multiple databases you'll need to write an initializer
-that loads the schema cache from your app. This wasn't an issue we could resolve in
-time for Rails 6.0 but hope to have it in a future version soon.
+class Home < ApplicationRecord
+  belongs_to :dog
+  has_one :yard
+end
+
+class Yard < ApplicationRecord
+  belongs_to :home
+end
+```
+
+Notice that `disable_joins: true` is added to the `through` associations in the
+`Dog` model. The direct `has_many :humans` and `has_one :home` associations do
+not require joins and can query the associated model's database directly. The
+`disable_joins` option is only supported for `through` associations.
+
+If these models used the same database connection, Rails would normally
+load the `through` associations with a SQL join. Since the associated models
+are backed by different database connections, Rails needs to avoid that join. Without
+`disable_joins: true`, calling `@dog.treats` or `@dog.yard` would raise an
+error because databases are unable to handle joins across clusters.
+
+The `disable_joins: true` option tells Rails to skip the SQL join for that
+association and load the records with two or more queries instead.
+
+Instead of building one query that joins the tables, Rails queries the
+intermediate association first, collects the IDs it needs, and then uses those
+IDs in a second query for the associated records.
+
+In the example below, to get `@dog.treats`, Rails first loads the associated
+`humans` IDs, and then uses those IDs to load `treats`:
+
+```sql
+SELECT "humans"."id" FROM "humans" WHERE "humans"."dog_id" = ?  [["dog_id", 1]]
+SELECT "treats".* FROM "treats" WHERE "treats"."human_id" IN (?, ?, ?)  [["human_id", 1], ["human_id", 2], ["human_id", 3]]
+```
+
+For `@dog.yard`, Rails first loads the associated `home` ID, and then uses
+that ID to load `yards`:
+
+```sql
+SELECT "home"."id" FROM "homes" WHERE "homes"."dog_id" = ? [["dog_id", 1]]
+SELECT "yards".* FROM "yards" WHERE "yards"."home_id" = ? [["home_id", 1]]
+```
+
+There are some tradeoffs to be aware of with this option:
+
+1. There may be performance implications because Rails performs two or more
+   queries, depending on the association, rather than one join. If the query for
+   `humans` returns many IDs, the query for `treats` may send a large `IN`
+   list.
+2. Since Rails is no longer performing a join, a query with an order or limit
+   is sorted in-memory because an order from one table cannot be applied to
+   another table.
+3. This setting must be added to all associations where you want joining to be
+   disabled. Rails can't guess this for you because association loading is
+   lazy. To load `treats` in `@dog.treats`, Rails already needs to know what
+   SQL should be generated.
+
+## Schema Caching
+
+Schema caching stores a snapshot of database table and column metadata. Rails
+uses this information for features like attribute type casting, query generation,
+and dynamically defining model attributes. Without schema caching, Rails may
+need to query the database for schema information each time a connection is
+established. By loading this metadata from the cache instead, applications can
+reduce unnecessary database queries and improve boot and connection performance.
+
+In a multiple database application, each database should use its own schema
+cache file. By default, the primary database uses `db/schema_cache.yml`, and
+other databases use `db/[DATABASE_CONFIGURATION_NAME]_schema_cache.yml`. For
+example, the `animals` database uses `db/animals_schema_cache.yml`.
+
+You can configure the schema cache path explicitly with `schema_cache_path`:
+
+```yaml#4,7
+production:
+  primary:
+    database: my_primary_database
+    schema_cache_path: db/schema_cache.yml
+  animals:
+    database: my_animals_database
+    schema_cache_path: db/animals_schema_cache.yml
+```
+
+To load schema cache files lazily as database connections are established, set
+`config.active_record.lazily_load_schema_cache = true` in your application
+configuration:
+
+```ruby
+config.active_record.lazily_load_schema_cache = true
+```
+
+You can generate schema cache files with:
+
+```bash
+$ bin/rails db:schema:cache:dump
+```
+
+For multiple databases, this command dumps a schema cache for each managed
+database configuration. Each database needs its own cache file because each
+database can have different tables, columns, and metadata.
+
+You can read more about schema management in the
+[Command Line guide](command_line.html#schema-management).

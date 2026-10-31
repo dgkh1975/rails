@@ -1,9 +1,10 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require_relative "gem_version"
 
 module ActiveJob
-  # Returns the version of the currently loaded Active Job as a <tt>Gem::Version</tt>
+  # Returns the currently loaded version of Active Job as a `Gem::Version`.
   def self.version
     gem_version
   end

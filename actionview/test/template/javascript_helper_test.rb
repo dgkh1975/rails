@@ -10,6 +10,7 @@ class JavaScriptHelperTest < ActionView::TestCase
 
   setup do
     @old_escape_html_entities_in_json = ActiveSupport.escape_html_entities_in_json
+    @old_auto_include_nonce = ActionView::Helpers::JavaScriptHelper.auto_include_nonce
     ActiveSupport.escape_html_entities_in_json = true
     @template = self
     @request = Class.new do
@@ -19,6 +20,7 @@ class JavaScriptHelperTest < ActionView::TestCase
 
   def teardown
     ActiveSupport.escape_html_entities_in_json = @old_escape_html_entities_in_json
+    ActionView::Helpers::JavaScriptHelper.auto_include_nonce = @old_auto_include_nonce
   end
 
   def test_escape_javascript
@@ -29,11 +31,11 @@ class JavaScriptHelperTest < ActionView::TestCase
     assert_equal "true", escape_javascript(true)
     assert_equal %(This \\"thing\\" is really\\n netos\\'), escape_javascript(%(This "thing" is really\n netos'))
     assert_equal %(backslash\\\\test), escape_javascript(%(backslash\\test))
-    assert_equal %(dont <\\/close> tags), escape_javascript(%(dont </close> tags))
+    assert_equal %(don\\'t <\\/close> tags), escape_javascript(%(don't </close> tags))
     assert_equal %(unicode &#x2028; newline), escape_javascript((+%(unicode \342\200\250 newline)).force_encoding(Encoding::UTF_8).encode!)
     assert_equal %(unicode &#x2029; newline), escape_javascript((+%(unicode \342\200\251 newline)).force_encoding(Encoding::UTF_8).encode!)
 
-    assert_equal %(dont <\\/close> tags), j(%(dont </close> tags))
+    assert_equal %(don\\'t <\\/close> tags), j(%(don't </close> tags))
   end
 
   def test_escape_backtick
@@ -76,5 +78,25 @@ class JavaScriptHelperTest < ActionView::TestCase
 
   def test_javascript_cdata_section
     assert_dom_equal "\n//<![CDATA[\nalert('hello')\n//]]>\n", javascript_cdata_section("alert('hello')")
+  end
+
+  def test_javascript_tag_with_auto_nonce_for_content_security_policy
+    instance_eval { def content_security_policy_nonce = "iyhD0Yc0W+c=" }
+    ActionView::Helpers::JavaScriptHelper.auto_include_nonce = true
+
+    assert_dom_equal "<script nonce=\"iyhD0Yc0W+c=\">\n//<![CDATA[\nalert('hello')\n//]]>\n</script>",
+      javascript_tag("alert('hello')")
+  end
+
+  def test_javascript_tag_nonce_true
+    instance_eval { def content_security_policy_nonce = "iyhD0Yc0W+c=" }
+    assert_dom_equal "<script nonce=\"iyhD0Yc0W+c=\">\n//<![CDATA[\nalert('hello')\n//]]>\n</script>",
+      javascript_tag("alert('hello')", nonce: true)
+  end
+
+  def test_javascript_tag_nonce_false
+    instance_eval { def content_security_policy_nonce = "iyhD0Yc0W+c=" }
+    assert_dom_equal "<script>\n//<![CDATA[\nalert('hello')\n//]]>\n</script>",
+      javascript_tag("alert('hello')", nonce: false)
   end
 end

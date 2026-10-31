@@ -5,15 +5,18 @@ module ActionView
     module Tags # :nodoc:
       class Base # :nodoc:
         include Helpers::ActiveModelInstanceTag, Helpers::TagHelper, Helpers::FormTagHelper
-        include FormOptionsHelper
 
         attr_reader :object
 
         def initialize(object_name, method_name, template_object, options = {})
-          @object_name, @method_name = object_name.to_s.dup, method_name.to_s.dup
+          @object_name = object_name.is_a?(Symbol) ? object_name.name : object_name.to_s
+          @method_name = method_name.is_a?(Symbol) ? method_name.name : method_name.to_s
           @template_object = template_object
 
-          @object_name.sub!(/\[\]$/, "") || @object_name.sub!(/\[\]\]$/, "]")
+          if @object_name.include?("[]")
+            @object_name = @object_name.dup
+            @object_name.sub!(/\[\]$/, "") || @object_name.sub!(/\[\]\]$/, "]")
+          end
           @object = retrieve_object(options.delete(:object))
           @skip_default_ids = options.delete(:skip_default_ids)
           @allow_method_names_outside_object = options.delete(:allow_method_names_outside_object)
@@ -35,22 +38,24 @@ module ActionView
 
         private
           def value
+            return unless object
+
             if @allow_method_names_outside_object
-              object.public_send @method_name if object && object.respond_to?(@method_name)
+              object.public_send @method_name if object.respond_to?(@method_name)
             else
-              object.public_send @method_name if object
+              object.public_send @method_name
             end
           end
 
           def value_before_type_cast
-            unless object.nil?
-              method_before_type_cast = @method_name + "_before_type_cast"
+            return unless object
 
-              if value_came_from_user? && object.respond_to?(method_before_type_cast)
-                object.public_send(method_before_type_cast)
-              else
-                value
-              end
+            method_before_type_cast = @method_name + "_before_type_cast"
+
+            if value_came_from_user? && object.respond_to?(method_before_type_cast)
+              object.public_send(method_before_type_cast)
+            else
+              value
             end
           end
 
@@ -62,11 +67,16 @@ module ActionView
           def retrieve_object(object)
             if object
               object
-            elsif @template_object.instance_variable_defined?("@#{@object_name}")
-              @template_object.instance_variable_get("@#{@object_name}")
+            elsif @object_name.empty? || @object_name.include?("[")
+              # Model-less forms (form_with url: ...) and the nested syntax (item[subobject])
+              # can't name an instance variable, so skip the lookup instead of rescuing.
+              nil
+            else
+              ivar = "@#{@object_name}"
+              @template_object.instance_variable_get(ivar) if @template_object.instance_variable_defined?(ivar)
             end
           rescue NameError
-            # As @object_name may contain the nested syntax (item[subobject]) we need to fallback to nil.
+            # Any other name that isn't a valid instance variable name falls back to nil.
             nil
           end
 
@@ -79,45 +89,36 @@ module ActionView
             end
           end
 
-          def add_default_name_and_id_for_value(tag_value, options)
-            if tag_value.nil?
-              add_default_name_and_id(options)
-            else
-              specified_id = options["id"]
-              add_default_name_and_id(options)
+          def add_default_name_and_field_for_value(tag_value, options, field = "id")
+            specified_field = options[field]
+            add_default_name_and_field(options, field)
+            sanitized = sanitized_value(tag_value)
 
-              if specified_id.blank? && options["id"].present?
-                options["id"] += "_#{sanitized_value(tag_value)}"
-              end
+            if !sanitized.empty? && specified_field.blank? && options[field].present?
+              options[field] += "_#{sanitized}"
             end
           end
+          alias_method :add_default_name_and_id_for_value, :add_default_name_and_field_for_value
 
-          def add_default_name_and_id(options)
+          def add_default_name_and_field(options, field = "id")
             index = name_and_id_index(options)
             options["name"] = options.fetch("name") { tag_name(options["multiple"], index) }
 
             if generate_ids?
-              options["id"] = options.fetch("id") { tag_id(index) }
+              options[field] = options.fetch(field) { tag_id(index, options.delete("namespace")) }
               if namespace = options.delete("namespace")
-                options["id"] = options["id"] ? "#{namespace}_#{options['id']}" : namespace
+                options[field] = options[field] ? "#{namespace}_#{options[field]}" : namespace
               end
             end
           end
+          alias_method :add_default_name_and_id, :add_default_name_and_field
 
           def tag_name(multiple = false, index = nil)
-            # a little duplication to construct fewer strings
-            case
-            when @object_name.empty?
-              "#{sanitized_method_name}#{multiple ? "[]" : ""}"
-            when index
-              "#{@object_name}[#{index}][#{sanitized_method_name}]#{multiple ? "[]" : ""}"
-            else
-              "#{@object_name}[#{sanitized_method_name}]#{multiple ? "[]" : ""}"
-            end
+            @template_object.field_name(@object_name, sanitized_method_name, multiple: multiple, index: index)
           end
 
-          def tag_id(index = nil)
-            @template_object.field_id(@object_name, @method_name, index: index)
+          def tag_id(index = nil, namespace = nil)
+            @template_object.field_id(@object_name, @method_name, index: index, namespace: namespace)
           end
 
           def sanitized_method_name
@@ -126,48 +127,6 @@ module ActionView
 
           def sanitized_value(value)
             value.to_s.gsub(/[\s.]/, "_").gsub(/[^-[[:word:]]]/, "").downcase
-          end
-
-          def select_content_tag(option_tags, options, html_options)
-            html_options = html_options.stringify_keys
-            add_default_name_and_id(html_options)
-
-            if placeholder_required?(html_options)
-              raise ArgumentError, "include_blank cannot be false for a required field." if options[:include_blank] == false
-              options[:include_blank] ||= true unless options[:prompt]
-            end
-
-            value = options.fetch(:selected) { value() }
-            select = content_tag("select", add_options(option_tags, options, value), html_options)
-
-            if html_options["multiple"] && options.fetch(:include_hidden, true)
-              tag("input", disabled: html_options["disabled"], name: html_options["name"], type: "hidden", value: "") + select
-            else
-              select
-            end
-          end
-
-          def placeholder_required?(html_options)
-            # See https://html.spec.whatwg.org/multipage/forms.html#attr-select-required
-            html_options["required"] && !html_options["multiple"] && html_options.fetch("size", 1).to_i == 1
-          end
-
-          def add_options(option_tags, options, value = nil)
-            if options[:include_blank]
-              content = (options[:include_blank] if options[:include_blank].is_a?(String))
-              label = (" " unless content)
-              option_tags = tag_builder.content_tag_string("option", content, value: "", label: label) + "\n" + option_tags
-            end
-
-            if value.blank? && options[:prompt]
-              tag_options = { value: "" }.tap do |prompt_opts|
-                prompt_opts[:disabled] = true if options[:disabled] == ""
-                prompt_opts[:selected] = true if options[:selected] == ""
-              end
-              option_tags = tag_builder.content_tag_string("option", prompt_text(options[:prompt]), tag_options) + "\n" + option_tags
-            end
-
-            option_tags
           end
 
           def name_and_id_index(options)

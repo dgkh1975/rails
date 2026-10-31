@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 module ActiveJob
   module Serializers
     class TimeSerializer < TimeObjectSerializer # :nodoc:
@@ -7,10 +8,9 @@ module ActiveJob
         Time.iso8601(hash["value"])
       end
 
-      private
-        def klass
-          Time
-        end
+      def klass
+        Time
+      end
     end
   end
 end

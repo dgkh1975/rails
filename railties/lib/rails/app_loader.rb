@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "pathname"
 require "rails/version"
 
@@ -8,7 +9,7 @@ module Rails
     extend self
 
     RUBY = Gem.ruby
-    EXECUTABLES = ["bin/rails", "script/rails"]
+    EXECUTABLES = ["bin/rails", "script/rails"].freeze
     BUNDLER_WARNING = <<EOS
 Beginning in Rails 4, Rails ships with a `rails` binstub at ./bin/rails that
 should be used instead of the Bundler-generated `rails` binstub.

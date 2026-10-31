@@ -2,11 +2,16 @@
 
 module ActiveRecord
   module Associations
-    # = Active Record Through Association
-    module ThroughAssociation #:nodoc:
+    # Active Record Through Association
+    # =================================
+    module ThroughAssociation # :nodoc:
       delegate :source_reflection, to: :reflection
 
       private
+        def transaction(&block)
+          through_reflection.klass.transaction(&block)
+        end
+
         def through_reflection
           @through_reflection ||= begin
             refl = reflection.through_reflection
@@ -50,40 +55,50 @@ module ActiveRecord
         # some other type, because this opens up a whole can of worms, and in basically any
         # situation it is more natural for the user to just create or modify their join records
         # directly as required.
-        def construct_join_attributes(*records)
+        def construct_join_attributes(*records, query: false)
           ensure_mutable
 
-          association_primary_key = source_reflection.association_primary_key(reflection.klass)
+          route = reflection.source_association_route
+          origin_key, destination_key = query ? [route.origin_key, route.destination_key] : [route.reference_origin_key, route.reference_destination_key]
 
-          if association_primary_key == reflection.klass.primary_key && !options[:source_type]
+          if destination_key.to_a == reflection.klass.composite_query_constraints_list && !options[:source_type]
             join_attributes = { source_reflection.name => records }
           else
-            join_attributes = {
-              source_reflection.foreign_key => records.map(&association_primary_key.to_sym)
-            }
+            target_values = records.map { |record| destination_key.value_of(record) }
+            join_attributes = { origin_key.name => target_values }
           end
 
           if options[:source_type]
             join_attributes[source_reflection.foreign_type] = [ options[:source_type] ]
           end
 
-          if records.count == 1
+          if records.count == 1 && !(query && destination_key.composite?)
             join_attributes.transform_values!(&:first)
           else
             join_attributes
           end
         end
 
-        # Note: this does not capture all cases, for example it would be crazy to try to
-        # properly support stale-checking for nested associations.
+        # Note: this does not capture all cases, for example it would be impractical
+        # to try to properly support stale-checking for nested associations.
         def stale_state
           if through_reflection.belongs_to?
-            owner[through_reflection.foreign_key] && owner[through_reflection.foreign_key].to_s
+            Array(through_reflection.foreign_key).filter_map do |foreign_key_column|
+              owner.read_attr(foreign_key_column)
+            end.presence
           end
         end
 
+        # The owner and target aren't directly linked, so their keys can't
+        # confirm that a record belongs to this association.
+        def matches_foreign_key?(record)
+          false
+        end
+
         def foreign_key_present?
-          through_reflection.belongs_to? && !owner[through_reflection.foreign_key].nil?
+          through_reflection.belongs_to? && Array(through_reflection.foreign_key).all? do |foreign_key_column|
+            !owner.read_attr(foreign_key_column).nil?
+          end
         end
 
         def ensure_mutable
@@ -107,11 +122,14 @@ module ActiveRecord
         end
 
         def build_record(attributes)
-          inverse = source_reflection.inverse_of
-          target = through_association.target
+          if source_reflection.collection?
+            inverse = source_reflection.inverse_of
+            target = through_association.target
 
-          if inverse && target && !target.is_a?(Array)
-            attributes[inverse.foreign_key] = target.id
+            if inverse && target && !target.is_a?(Array)
+              route = source_reflection.association_route(origin_class: target.class)
+              attributes.merge!(route.destination_attributes(target))
+            end
           end
 
           super

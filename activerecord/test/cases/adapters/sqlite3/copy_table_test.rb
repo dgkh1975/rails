@@ -3,13 +3,12 @@
 require "cases/helper"
 
 class CopyTableTest < ActiveRecord::SQLite3TestCase
+  skip_under_ractor_proxy
+
   fixtures :customers
 
   def setup
-    @connection = ActiveRecord::Base.connection
-    class << @connection
-      public :copy_table, :table_structure, :indexes
-    end
+    @connection = ActiveRecord::Base.lease_connection
   end
 
   def test_copy_table(from = "customers", to = "customers2", options = {})
@@ -25,12 +24,13 @@ class CopyTableTest < ActiveRecord::SQLite3TestCase
     @connection.drop_table(to) rescue nil
   end
 
-  def test_copy_table_renaming_column
-    test_copy_table("customers", "customers2",
-        rename: { "name" => "person_name" }) do |from, to, options|
-      expected = column_values(from, "name")
-      assert_equal expected, column_values(to, "person_name")
-      assert expected.any?, "No values in table: #{expected.inspect}"
+  def test_copy_table_with_column_with_default
+    test_copy_table("comments", "comments_with_default") do
+      @connection.add_column("comments_with_default", "options", "json", default: {})
+      test_copy_table("comments_with_default", "comments_with_default2") do
+        column = @connection.columns("comments_with_default2").find { |col| col.name == "options" }
+        assert_equal "{}", column.default
+      end
     end
   end
 
@@ -78,17 +78,27 @@ class CopyTableTest < ActiveRecord::SQLite3TestCase
     test_copy_table "binaries", "binaries2"
   end
 
+  def test_copy_table_with_virtual_column
+    @connection.create_table :virtual_columns, force: true do |t|
+      t.string  :name
+      t.virtual :upper_name, type: :string, as: "UPPER(name)", stored: true
+    end
+
+    test_copy_table("virtual_columns", "virtual_columns2") do
+      column = @connection.columns("virtual_columns2").find { |col| col.name == "upper_name" }
+      assert_predicate column, :virtual_stored?
+      assert_equal :string, column.type
+      assert_equal "UPPER(name)", column.default_function
+    end
+  end
+
 private
   def copy_table(from, to, options = {})
-    @connection.copy_table(from, to, { temporary: true }.merge(options))
+    @connection.send(:copy_table, from, to, { temporary: true }.merge(options))
   end
 
   def column_names(table)
-    @connection.table_structure(table).map { |column| column["name"] }
-  end
-
-  def column_values(table, column)
-    @connection.select_all("SELECT #{column} FROM #{table} ORDER BY id").map { |row| row[column] }
+    @connection.send(:table_structure, table).map { |column| column["name"] }
   end
 
   def table_indexes_without_name(table)

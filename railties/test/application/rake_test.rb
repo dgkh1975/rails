@@ -41,6 +41,15 @@ module ApplicationTests
       assert_match(/^Rails version/, rails("invoke_about"))
     end
 
+    test "help arguments describe rake tasks" do
+      task_description = <<~DESC
+          rails db:migrate
+              Migrate the database (options: VERSION=x, VERBOSE=false, SCOPE=blog).
+      DESC
+
+      assert_match task_description, rails("db:migrate", "-h")
+    end
+
     test "task backtrace is silenced" do
       add_to_config <<-RUBY
         rake_tasks do
@@ -169,25 +178,31 @@ module ApplicationTests
       RUBY
 
       output = Dir.chdir(app_path) { `bin/rails do_something RAILS_ENV=production` }
-      assert_equal "Answer: 42\n", output
+      assert_equal "Answer: 42\n", output.lines.last
     end
 
-    def test_code_statistics_sanity
-      assert_match "Code LOC: 73     Test LOC: 3     Code to Test Ratio: 1:0.0",
-        rails("stats")
+    def test_code_statistics
+      assert_match(/Code LOC: \d+\s+Test LOC: \d+\s+ Code to Test Ratio: 1:\w+/, rails("stats"))
     end
 
-    def test_logger_is_flushed_when_exiting_production_rake_tasks
+    def test_reload_routes
       add_to_config <<-RUBY
         rake_tasks do
-          task log_something: :environment do
-            Rails.logger.error("Sample log message")
+          task do_something: :environment do
+            Rails.application.reload_routes!
+            puts Rails.application.routes.named_routes.to_h.keys.join(" ")
           end
         end
       RUBY
 
-      rails "log_something", "RAILS_ENV=production"
-      assert_match "Sample log message", File.read("#{app_path}/log/production.log")
+      app_file "config/routes.rb", <<-RUBY
+        Rails.application.routes.draw do
+          get "foo", to: "foo#bar", as: :my_great_route
+        end
+      RUBY
+
+      output = Dir.chdir(app_path) { `bin/rails do_something` }
+      assert_includes(output.lines.first, "my_great_route")
     end
 
     def test_loading_specific_fixtures
@@ -210,7 +225,9 @@ module ApplicationTests
       app_file "test/fixtures/products.csv", ""
 
       require "#{rails_root}/config/environment"
-      rails "db:fixtures:load"
+      assert_nothing_raised do
+        rails "db:fixtures:load"
+      end
     end
 
     def test_scaffold_tests_pass_by_default
@@ -220,7 +237,7 @@ module ApplicationTests
       end
       output = rails("test")
 
-      assert_match(/7 runs, 9 assertions, 0 failures, 0 errors/, output)
+      assert_match(/7 runs, 11 assertions, 0 failures, 0 errors/, output)
       assert_no_match(/Errors running/, output)
     end
 
@@ -238,7 +255,7 @@ module ApplicationTests
       with_rails_env("test") { rails("db:migrate") }
       output = rails("test")
 
-      assert_match(/5 runs, 7 assertions, 0 failures, 0 errors/, output)
+      assert_match(/5 runs, 9 assertions, 0 failures, 0 errors/, output)
       assert_no_match(/Errors running/, output)
     end
 
@@ -251,7 +268,7 @@ module ApplicationTests
       end
       output = rails("test")
 
-      assert_match(/7 runs, 9 assertions, 0 failures, 0 errors/, output)
+      assert_match(/7 runs, 11 assertions, 0 failures, 0 errors/, output)
       assert_no_match(/Errors running/, output)
     end
 
@@ -261,12 +278,6 @@ module ApplicationTests
       rails "db:migrate"
       output = rails("db:test:prepare", "--trace")
       assert_match(/Execute db:test:load_schema/, output)
-    end
-
-    def test_rake_dump_structure_should_respect_db_structure_env_variable
-      # ensure we have a schema_migrations table to dump
-      rails "db:migrate", "db:structure:dump", "SCHEMA=db/my_structure.sql"
-      assert File.exist?(File.join(app_path, "db", "my_structure.sql"))
     end
 
     def test_rake_dump_structure_should_be_called_twice_when_migrate_redo
@@ -296,7 +307,7 @@ module ApplicationTests
       %w(controller mailer scaffold).each do |dir|
         assert File.exist?(File.join(app_path, "lib", "templates", "erb", dir))
       end
-      %w(controller helper scaffold_controller assets).each do |dir|
+      %w(controller helper scaffold_controller).each do |dir|
         assert File.exist?(File.join(app_path, "lib", "templates", "rails", dir))
       end
     end

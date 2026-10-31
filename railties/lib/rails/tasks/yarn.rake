@@ -1,30 +1,27 @@
 # frozen_string_literal: true
 
-namespace :yarn do
-  desc "Install all JavaScript dependencies as specified via Yarn"
+require "rails/generators/js_package_manager"
+
+namespace :javascript do
+  desc "Install all JavaScript dependencies"
   task :install do
-    # Install only production deps when for not usual envs.
     valid_node_envs = %w[test development production]
     node_env = ENV.fetch("NODE_ENV") do
       valid_node_envs.include?(Rails.env) ? Rails.env : "production"
     end
 
-    yarn_flags =
-      if `"#{Rails.root}/bin/yarn" --version`.start_with?("1")
-        "--no-progress --frozen-lockfile"
-      else
-        "--immutable"
-      end
+    manager = Rails::Generators::JsPackageManager.detect(Rails.root)
+    config = Rails::Generators::JsPackageManager::MANAGERS[manager]
 
-    system({ "NODE_ENV" => node_env }, "\"#{Rails.root}/bin/yarn\" install #{yarn_flags}")
+    system({ "NODE_ENV" => node_env }, config[:install], exception: true)
   rescue Errno::ENOENT
-    $stderr.puts "bin/yarn was not found."
-    $stderr.puts "Please run `bundle exec rails app:update:bin` to create it."
+    $stderr.puts "#{manager} failed to execute."
+    $stderr.puts "Ensure #{manager} is installed and available in PATH."
     exit 1
   end
 end
 
-# Run Yarn prior to Sprockets assets precompilation, so dependencies are available for use.
-if Rake::Task.task_defined?("assets:precompile") && File.exist?(Rails.root.join("bin", "yarn"))
-  Rake::Task["assets:precompile"].enhance [ "yarn:install" ]
+namespace :yarn do
+  desc "Install all JavaScript dependencies as specified via Yarn"
+  task install: "javascript:install"
 end

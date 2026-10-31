@@ -15,6 +15,16 @@ module ActiveSupport
         extend ActiveSupport::NumberHelper
       end
 
+      class NumberWithToD
+        def initialize(number)
+          @number = number
+        end
+
+        def to_d
+          @number.to_d
+        end
+      end
+
       def setup
         @instance_with_helpers = TestClassWithInstanceNumberHelpers.new
       end
@@ -43,6 +53,10 @@ module ActiveSupport
         petabytes(number) * 1024
       end
 
+      def zettabytes(number)
+        exabytes(number) * 1024
+      end
+
       def test_number_to_phone
         [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
           assert_equal("555-1234", number_helper.number_to_phone(5551234))
@@ -53,6 +67,11 @@ module ActiveSupport
           assert_equal("(800) 555-1212 x 123", number_helper.number_to_phone(8005551212, area_code: true, extension: 123))
           assert_equal("800-555-1212", number_helper.number_to_phone(8005551212, extension: "  "))
           assert_equal("555.1212", number_helper.number_to_phone(5551212, delimiter: "."))
+          assert_equal("555 - 1234", number_helper.number_to_phone(5551234, delimiter: " - "))
+          assert_equal("9009001234", number_helper.number_to_phone(9001234, delimiter: "900"))
+          assert_equal("9009009009001234", number_helper.number_to_phone(9009001234, delimiter: "900"))
+          assert_equal("800 - 555 - 1212", number_helper.number_to_phone(8005551212, delimiter: " - "))
+          assert_equal("555—1234", number_helper.number_to_phone(5551234, delimiter: "—"))
           assert_equal("800-555-1212", number_helper.number_to_phone("8005551212"))
           assert_equal("+1-800-555-1212", number_helper.number_to_phone(8005551212, country_code: 1))
           assert_equal("+18005551212", number_helper.number_to_phone(8005551212, country_code: 1, delimiter: ""))
@@ -65,6 +84,7 @@ module ActiveSupport
 
       def test_number_to_currency
         [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal("$123,456,789,012,345,678.91", number_helper.number_to_currency("123456789012345678.91"))
           assert_equal("$1,234,567,890.50", number_helper.number_to_currency(1234567890.50))
           assert_equal("$1,234,567,890.51", number_helper.number_to_currency(1234567890.506))
           assert_equal("-$1,234,567,890.50", number_helper.number_to_currency(-1234567890.50))
@@ -79,12 +99,21 @@ module ActiveSupport
           assert_equal("1,234,567,890.50 - K&#269;", number_helper.number_to_currency("-1234567890.50", unit: "K&#269;", format: "%n %u", negative_format: "%n - %u"))
           assert_equal("0.00", number_helper.number_to_currency(+0.0, unit: "", negative_format: "(%n)"))
           assert_equal("$0", number_helper.number_to_currency(-0.456789, precision: 0))
+          assert_equal("$0.0", number_helper.number_to_currency(-0.0456789, precision: 1))
+          assert_equal("$0.00", number_helper.number_to_currency(-0.00456789, precision: 2))
+          assert_equal("-$1", number_helper.number_to_currency(-0.5, precision: 0))
           assert_equal("$1,11", number_helper.number_to_currency("1,11"))
           assert_equal("$0,11", number_helper.number_to_currency("0,11"))
           assert_equal("$,11", number_helper.number_to_currency(",11"))
           assert_equal("-$1,11", number_helper.number_to_currency("-1,11"))
           assert_equal("-$0,11", number_helper.number_to_currency("-0,11"))
           assert_equal("-$,11", number_helper.number_to_currency("-,11"))
+          assert_equal("$0.00", number_helper.number_to_currency(-0.0))
+          assert_equal("$0.00", number_helper.number_to_currency("-0.0"))
+          assert_equal("$1.23", number_helper.number_to_currency(NumberWithToD.new(1.23)))
+          assert_equal("$1,234.5678", number_helper.number_to_currency(1234.5678, precision: nil))
+          assert_equal("-$1,234.5678", number_helper.number_to_currency(-1234.5678, precision: nil))
+          assert_equal("-$1,234.5678", number_helper.number_to_currency("-1234.5678", precision: nil))
         end
       end
 
@@ -118,6 +147,8 @@ module ActiveSupport
           assert_equal("12,345,678", number_helper.number_to_delimited(12345678))
           assert_equal("0", number_helper.number_to_delimited(0))
           assert_equal("123", number_helper.number_to_delimited(123))
+          assert_equal("1,234", number_helper.number_to_delimited(1234))
+          assert_equal("12,345", number_helper.number_to_delimited(12345))
           assert_equal("123,456", number_helper.number_to_delimited(123456))
           assert_equal("123,456.78", number_helper.number_to_delimited(123456.78))
           assert_equal("123,456.789", number_helper.number_to_delimited(123456.789))
@@ -127,6 +158,38 @@ module ActiveSupport
           assert_equal("123,456.78", number_helper.number_to_delimited("123456.78"))
           assert_equal("1,23,456.78", number_helper.number_to_delimited("123456.78", delimiter_pattern: /(\d+?)(?=(\d\d)+(\d)(?!\d))/))
           assert_equal("123,456.78", number_helper.number_to_delimited("123456.78".html_safe))
+          assert_equal("1&nbsp;234&nbsp;567", number_helper.number_to_delimited("1234567".html_safe, delimiter: "&nbsp;"))
+          assert_instance_of(String, number_helper.number_to_delimited("1234567".html_safe))
+        end
+      end
+
+      def test_to_delimited_with_negative_numbers
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal("-1", number_helper.number_to_delimited(-1))
+          assert_equal("-12", number_helper.number_to_delimited(-12))
+          assert_equal("-123", number_helper.number_to_delimited(-123))
+          assert_equal("-1,234", number_helper.number_to_delimited(-1234))
+          assert_equal("-123,456", number_helper.number_to_delimited(-123456))
+          assert_equal("-123,456,789", number_helper.number_to_delimited(-123456789))
+          assert_equal("-123,456.78", number_helper.number_to_delimited(-123456.78))
+          assert_equal("-123,456", number_helper.number_to_delimited("-123456"))
+        end
+      end
+
+      def test_to_delimited_with_leading_plus_sign
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal("+123", number_helper.number_to_delimited("+123"))
+          assert_equal("+1,234", number_helper.number_to_delimited("+1234"))
+          assert_equal("+123,456", number_helper.number_to_delimited("+123456"))
+          assert_equal("+123,456.78", number_helper.number_to_delimited("+123456.78"))
+        end
+      end
+
+      def test_to_delimited_with_non_finite_floats
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal "Infinity", number_helper.number_to_delimited(Float::INFINITY)
+          assert_equal "-Infinity", number_helper.number_to_delimited(-Float::INFINITY)
+          assert_equal "NaN", number_helper.number_to_delimited(Float::NAN)
         end
       end
 
@@ -207,6 +270,18 @@ module ActiveSupport
           assert_equal "9775.0000000000000000", number_helper.number_to_rounded("9775", precision: 20, significant: true)
           assert_equal "9775." + "0" * 96, number_helper.number_to_rounded("9775", precision: 100, significant: true)
           assert_equal("97.7", number_helper.number_to_rounded(Rational(9772, 100), precision: 3, significant: true))
+          assert_equal "28729870200000000000000", number_helper.number_to_rounded(0.287298702e23.to_d, precision: 0, significant: true)
+          assert_equal "-Inf", number_helper.number_to_rounded(-Float::INFINITY, precision: 0, significant: true)
+        end
+      end
+
+      def test_to_rounded_with_significant_true_and_non_finite_value
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal "Inf",  number_helper.number_to_rounded(Float::INFINITY,  precision: 3, significant: true)
+          assert_equal "-Inf", number_helper.number_to_rounded(-Float::INFINITY, precision: 3, significant: true)
+          assert_equal "NaN",  number_helper.number_to_rounded(Float::NAN,       precision: 3, significant: true)
+          assert_equal "Inf%", number_helper.number_to_percentage(Float::INFINITY, precision: 3, significant: true)
+          assert_equal "$Inf", number_helper.number_to_currency(Float::INFINITY,   precision: 3, significant: true)
         end
       end
 
@@ -242,7 +317,7 @@ module ActiveSupport
           assert_equal "1.12 TB",    number_helper.number_to_human_size(1234567890123)
           assert_equal "1.1 PB",   number_helper.number_to_human_size(1234567890123456)
           assert_equal "1.07 EB",   number_helper.number_to_human_size(1234567890123456789)
-          assert_equal "1030 EB",   number_helper.number_to_human_size(exabytes(1026))
+          assert_equal "1020 EB",   number_helper.number_to_human_size(exabytes(1023))
           assert_equal "444 KB",    number_helper.number_to_human_size(kilobytes(444))
           assert_equal "1020 MB",   number_helper.number_to_human_size(megabytes(1023))
           assert_equal "3 TB",      number_helper.number_to_human_size(terabytes(3))
@@ -255,6 +330,19 @@ module ActiveSupport
           assert_equal "10 KB",   number_helper.number_to_human_size(kilobytes(10.000), precision: 4)
           assert_equal "1 Byte",   number_helper.number_to_human_size(1.1)
           assert_equal "10 Bytes", number_helper.number_to_human_size(10)
+          assert_equal "16 ZB", number_helper.number_to_human_size(zettabytes(16))
+        end
+      end
+
+      def test_number_number_to_human_size_with_negative_number
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal "-1 Bytes",   number_helper.number_to_human_size(-1)
+          assert_equal "-3 Bytes",   number_helper.number_to_human_size(-3.14159265)
+          assert_equal "-123 Bytes", number_helper.number_to_human_size(-123)
+          assert_equal "-12.1 KB",   number_helper.number_to_human_size(-12345)
+          assert_equal "-444 KB",    number_helper.number_to_human_size(kilobytes(-444))
+          assert_equal "-1.12 TB",   number_helper.number_to_human_size(-1234567890123)
+          assert_equal "-1.01 KB",   number_helper.number_to_human_size(kilobytes(-1.0100), precision: 4)
         end
       end
 
@@ -274,6 +362,7 @@ module ActiveSupport
           assert_equal "1.0 KB",   number_helper.number_to_human_size(kilobytes(1.0123), precision: 2, strip_insignificant_zeros: false)
           assert_equal "1.012 KB",   number_helper.number_to_human_size(kilobytes(1.0123), precision: 3, significant: false)
           assert_equal "1 KB",   number_helper.number_to_human_size(kilobytes(1.0123), precision: 0, significant: true) # ignores significant it precision is 0
+          assert_equal "120.5625 KB", number_helper.number_to_human_size(123456, precision: nil)
         end
       end
 
@@ -309,6 +398,7 @@ module ActiveSupport
           assert_equal "1 Million", number_helper.number_to_human(1234567, precision: 0, significant: true, separator: ",") # significant forced to false
           assert_equal "1 Million", number_helper.number_to_human(999999)
           assert_equal "1 Billion", number_helper.number_to_human(999999999)
+          assert_equal "123.456 Thousand", number_helper.number_to_human(123456, precision: nil)
         end
       end
 
@@ -418,6 +508,18 @@ module ActiveSupport
           assert_equal("x", number_helper.number_to_rounded("x"))
           assert_equal "x", number_helper.number_to_human_size("x")
           assert_equal "x", number_helper.number_to_human("x")
+        end
+      end
+
+      def test_number_helpers_with_scientific_notation
+        [@instance_with_helpers, TestClassWithClassNumberHelpers, ActiveSupport::NumberHelper].each do |number_helper|
+          assert_equal "$123481223d98989", number_helper.number_to_currency("123481223d98989")
+          assert_equal "$11288E822220222", number_helper.number_to_currency("11288E822220222")
+          assert_equal "-$888E89789", number_helper.number_to_currency("-888E89789")
+
+          assert_equal "123481223d98989%", number_helper.number_to_percentage("123481223d98989")
+          assert_equal "11288E822220222%", number_helper.number_to_percentage("11288E822220222")
+          assert_equal "-888E89789%", number_helper.number_to_percentage("-888E89789")
         end
       end
     end

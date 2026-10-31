@@ -1,14 +1,21 @@
+# :markup: markdown
 # frozen_string_literal: true
 
 require "date"
 
-class Date #:nodoc:
+class Date # :nodoc:
   # No Date is blank:
   #
-  #   Date.today.blank? # => false
+  # ```
+  # Date.today.blank? # => false
+  # ```
   #
   # @return [false]
   def blank?
     false
+  end
+
+  def present?
+    true
   end
 end

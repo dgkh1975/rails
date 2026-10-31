@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "pathname"
 require "rails/generators/base"
 require "active_support/encrypted_file"
@@ -21,19 +22,20 @@ module Rails
 
           log ""
           add_key_file_silently(key_path, key)
+          ensure_key_files_are_ignored(key_path)
           log ""
         end
       end
 
       def add_key_file_silently(key_path, key = nil)
-        create_file key_path, key || ActiveSupport::EncryptedFile.generate_key
-        key_path.chmod 0600
+        create_file key_path, key || ActiveSupport::EncryptedFile.generate_key, perm: 0600
+        ensure_key_files_are_ignored_silently(key_path)
       end
 
-      def ignore_key_file(key_path, ignore: key_ignore(key_path))
+      def ensure_key_files_are_ignored(key_path, ignore: key_ignore(key_path))
         if File.exist?(".gitignore")
           unless File.read(".gitignore").include?(ignore)
-            log "Ignoring #{key_path} so it won't end up in Git history:"
+            log "Ignoring #{ignore} so it won't end up in Git history:"
             log ""
             append_to_file ".gitignore", ignore
             log ""
@@ -45,13 +47,23 @@ module Rails
         end
       end
 
-      def ignore_key_file_silently(key_path, ignore: key_ignore(key_path))
-        append_to_file ".gitignore", ignore if File.exist?(".gitignore")
+      def ensure_key_files_are_ignored_silently(key_path, ignore: key_ignore(key_path))
+        if File.exist?(".gitignore")
+          unless File.read(".gitignore").include?(ignore)
+            append_to_file ".gitignore", ignore
+          end
+        end
       end
 
       private
         def key_ignore(key_path)
-          [ "", "/#{key_path}", "" ].join("\n")
+          key_path = Pathname.new(key_path) unless key_path.is_a?(Pathname)
+          <<~IGNORE
+
+            # Ignore key files for decrypting credentials and more.
+            /#{key_path.dirname.join("*.key")}
+
+          IGNORE
         end
     end
   end

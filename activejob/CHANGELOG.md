@@ -1,30 +1,177 @@
-*   Communicate enqueue failures to callers of `perform_later`.
+*   Don't modify the job data a job was deserialized from when it's retried.
 
-    `perform_later` can now optionally take a block which will execute after
-    the adapter attempts to enqueue the job. The block will receive the job
-    instance as an argument even if the enqueue was not successful.
-    Additionally, `ActiveJob` adapaters now have the ability to raise an
-    `ActiveJob::EnqueueError` which will be caught and stored in the job
-    instance so code attempting to enqueue jobs can inspect any raised
-    `EnqueueError` using the block.
+    ```ruby
+    job_data = RemoteServiceJob.new.serialize # retry_on Net::OpenTimeout
+    ActiveJob::Base.execute(job_data)         # fails with Net::OpenTimeout, is retried
+    job_data["exception_executions"]          # => {"[Net::OpenTimeout]" => 1}, now {}
+    ```
 
-        MyJob.perform_later do |job|
-          unless job.successfully_enqueued?
-            if job.enqueue_error&.message == "Redis was unavailable"
-              # invoke some code that will retry the job after a delay
-            end
-          end
+    Retries no longer mutate `exception_executions` on the job returned by
+    `perform_later`, or on the job data in `performed_jobs`.
+
+    *Yaroslav Markin*
+
+*   Fix continuation step cursors losing their type when a job is interrupted
+    and resumed.
+
+    Cursors are now serialized like job arguments, so a resumed step sees the
+    same object it set before the interruption — for example a `Date`, `Time`,
+    or an Active Record object — instead of a raw JSON string.
+
+    *Kenta Ishizaki*
+
+*   Add `ActiveJob::DeserializationError::RecordNotFound`, raised when argument
+    deserialization fails because a referenced record could not be found, and not
+    for any other reason.
+
+    Its parent class, `ActiveJob::DeserializationError` is raised when any error
+    happens during argument deserialization, including transient database errors,
+    and discarding a job based only on this exception might lead to losing
+    relevant, perfectly fine jobs.
+
+    Instead, `ActiveJob::DeserializationError::RecordNotFound` is raised only when
+    a record referenced by the arguments through a Global ID no longer exists, so
+    jobs can discard on missing records specifically:
+
+    ```ruby
+    discard_on ActiveJob::DeserializationError::RecordNotFound
+    ```
+
+    Existing handlers for the parent class continue to work as before.
+
+    Note that a record that is missing when arguments are deserialized is no
+    longer reported as `ActiveRecord::RecordNotFound`, so jobs that relied on
+    `discard_on ActiveRecord::RecordNotFound` to discard it should discard
+    `ActiveJob::DeserializationError::RecordNotFound` instead. `ActiveRecord::RecordNotFound`
+    still applies to records that go missing while the job runs.
+
+    *Rosa Gutiérrez*
+
+*   Allow `retry_on` to accept a Float for `:wait`.
+
+    Similar to `ActiveJob.set(wait: 1.5)`, allow a Float to be passed.
+    Also, passing an unsupported `:wait` type will now raise when loading the
+    job class.
+
+    *Kenta Ishizaki, Petrik de Heus*
+
+*   Allow queue adapters to inspect a job when deciding whether to interrupt at
+    a checkpoint, and to optionally return a specific interruption reason.
+
+    Queue adapters that implement `stopping?` must accept the job as an
+    optional positional argument, i.e. `def stopping?(job = nil)`, in order to
+    work with this version and older versions of Rails. A `true` return value
+    will use 'stopping' as the interruption reason, any other truthy value will
+    be used as-is.
+
+    *Bart de Water*
+
+*   Add `ActiveJob::Attributes` for declaring typed attributes that persist across
+    job serialization and deserialization. It is included by `ActiveJob::Continuable`
+    but can also be used standalone.
+
+    It uses the Active Model Attributes API to define typed, defaulted
+    attributes on jobs. Attribute values are automatically included in the
+    serialized job data and restored on deserialization, eliminating the need
+    to manually override `serialize` and `deserialize`.
+
+    This is especially useful with `ActiveJob::Continuable`, where a job may be
+    interrupted and resumed and attributes are preserved across resumptions.
+
+    ```ruby
+    class SubmitEnrollmentJob < ApplicationJob
+      include ActiveJob::Continuable
+
+      attribute :payment_token, :string
+      attribute :billing_profile_id, :integer
+
+      def perform(enrollment)
+        step(:tokenize_payment_instrument) do
+          self.payment_token = PaymentGateway.tokenize(enrollment.user.payment_instrument)
         end
 
-    *Daniel Morton*
+        step(:create_billing_profile) do
+          self.billing_profile_id = BillingProfileApi.create(customer_id: enrollment.user_id)
+        end
 
-*   Don't log rescuable exceptions defined with `rescue_from`.
+        step(:submit_enrollment) do
+          submission_id = EnrollmentApi.submit(enrollment, billing_profile_id)
+          enrollment.update!(status: 'processing', submission_id: submission_id)
+        end
+      end
+    end
+    ```
 
-    *Hu Hailin*
+    *Bart de Water*
 
-*   Allow `rescue_from` to rescue all exceptions.
+*   Deprecate built-in `queue_classic` Active Job adapter.
 
-    *Adrianna Chang*, *Étienne Barrié*
+    *Harun Sabljaković, Wojciech Wnętrzak*
 
+*   Allow `retry_on` `wait` procs to accept the error as a second argument.
 
-Please check [6-1-stable](https://github.com/rails/rails/blob/6-1-stable/activejob/CHANGELOG.md) for previous changes.
+    Procs with arity 1 continue to receive only the execution count.
+
+    ```ruby
+    class RemoteServiceJob < ActiveJob::Base
+      retry_on CustomError, wait: ->(executions, error) { error.retry_after || executions * 2 }
+
+      def perform
+        # ...
+      end
+    end
+    ```
+
+    *JP Camara*
+
+*   Deprecate built-in `resque` adapter.
+
+    If you're using this adapter, upgrade to `resque` 3.0 or later to use the `resque` gem's adapter.
+
+    *zzak, Wojciech Wnętrzak*
+
+*   Remove deprecated `sidekiq` Active Job adapter.
+
+    The adapter is available in the `sidekiq` gem.
+
+    *Wojciech Wnętrzak*
+
+*   Deprecate built-in `delayed_job` adapter.
+
+    If you're using this adapter, upgrade to `delayed_job` 4.2.0 or later to use the `delayed_job` gem's adapter.
+
+    *Dino Maric, David Genord II, Wojciech Wnętrzak*
+
+*   Deprecate built-in `backburner` adapter.
+
+    *Dino Maric, Nathan Esquenazi, Earlopain*
+
+*   Jobs are now enqueued after transaction commit.
+
+    This fixes that jobs would surprisingly run against uncommitted and
+    rolled-back records.
+
+    New Rails 8.2 apps (and apps upgrading to `config.load_defaults "8.2"`)
+    have `config.active_job.enqueue_after_transaction_commit = true` by default.
+    Uncomment the setting in `config/initializers/new_framework_defaults_8_2.rb`
+    to opt in.
+
+    *mugitti9*
+
+*   Un-deprecate the global `config.active_job.enqueue_after_transaction_commit`
+    toggle for app-wide overrides. It was deprecated in Rails 8.0 (when the
+    symbol values were removed) and made non-functional in 8.1. It now works
+    as a boolean config again.
+
+    *Jeremy Daer*
+
+*   Deprecate built-in `sneakers` adapter.
+
+    *Dino Maric*
+
+*   Fix using custom serializers with `ActiveJob::Arguments.serialize` when
+    `ActiveJob::Base` hasn't been loaded.
+
+    *Hartley McGuire*
+
+Please check [8-1-stable](https://github.com/rails/rails/blob/8-1-stable/activejob/CHANGELOG.md) for previous changes.

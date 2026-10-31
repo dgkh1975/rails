@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
-require "set"
 
 module AbstractController
   module Testing
@@ -52,6 +51,27 @@ module AbstractController
         render "index.erb"
       end
 
+      def with_final_newline
+        render "with_final_newline.erb"
+      end
+
+      def erb_implementation
+        render(inline: "")
+      end
+
+      def capture_and_multiline
+        render(inline: <<~ERB)
+          <% @a = 1 %>
+          Foo
+        ERB
+      end
+
+      def escape
+        sentence = %q(friends "or" families's)
+
+        render(inline: "<%= sentence %>", formats: :csv, locals: { sentence: sentence })
+      end
+
       def index_to_string
         self.response_body = render_to_string "index"
       end
@@ -75,6 +95,15 @@ module AbstractController
     end
 
     class TestRenderingController < ActiveSupport::TestCase
+      class FakeErubi
+        def initialize(...)
+        end
+
+        def src
+          "'It works!'"
+        end
+      end
+
       def setup
         @controller = Me2.new
       end
@@ -82,6 +111,44 @@ module AbstractController
       test "rendering templates works" do
         @controller.process(:index)
         assert_equal "Hello from index.erb", @controller.response_body
+      end
+
+      test "stripping final newline works" do
+        ActionView::Template::Handlers::ERB.strip_trailing_newlines = true
+        @controller.process(:with_final_newline)
+        assert_equal "Hello from with_final_newline.erb", @controller.response_body
+      ensure
+        ActionView::Template::Handlers::ERB.strip_trailing_newlines = false
+      end
+
+      test "erb_implementation is respected" do
+        prev = ActionView::Template::Handlers::ERB.erb_implementation
+        ActionView::Base.erb_implementation = FakeErubi
+
+        @controller.process(:erb_implementation)
+        assert_equal "It works!", @controller.response_body
+      ensure
+        ActionView::Base.erb_implementation = prev
+      end
+
+      test "erb_trim_mode is respected" do
+        prev = ActionView::Template::Handlers::ERB.erb_trim_mode
+        ActionView::Base.erb_trim_mode = nil
+
+        @controller.process(:capture_and_multiline)
+        assert_equal "\nFoo\n", @controller.response_body
+      ensure
+        ActionView::Base.erb_trim_mode = prev
+      end
+
+      test "escape_ignore_list is respected" do
+        prev = ActionView::Template::Handlers::ERB.escape_ignore_list
+        ActionView::Base.escape_ignore_list = ["text/csv"]
+
+        @controller.process(:escape)
+        assert_equal %q(friends "or" families's), @controller.response_body
+      ensure
+        ActionView::Base.escape_ignore_list = prev
       end
 
       test "render_to_string works with a String as an argument" do
@@ -200,7 +267,6 @@ module AbstractController
         end
 
         def render_to_body(options = {})
-          options[:_layout] = options[:layout] || _default_layout({})
           super
         end
     end

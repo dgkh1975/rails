@@ -6,6 +6,7 @@ require "active_support/builder"
 require "active_support/core_ext/hash"
 require "active_support/core_ext/big_decimal"
 require "active_support/core_ext/date/conversions"
+require "active_support/core_ext/integer/time"
 require "yaml"
 
 module XmlMiniTest
@@ -134,6 +135,20 @@ module XmlMiniTest
       assert_xml("<b type=\"dateTime\">1993-02-24T12:00:00+09:00</b>")
     end
 
+    test "#to_tag accepts ActiveSupport::TimeWithZone types" do
+      time = ActiveSupport::TimeWithZone.new(Time.new(1993, 02, 24, 12, 0, 0, "+09:00"), ActiveSupport::TimeZone["Europe/Paris"])
+      ActiveSupport::TimeWithZone.stub(:name, "ActiveSupport::TimeWithZone") do
+        @xml.to_tag(:b, time, @options)
+        assert_xml("<b type=\"dateTime\">1993-02-24T13:00:00+01:00</b>")
+      end
+    end
+
+    test "#to_tag accepts duration types" do
+      duration = 3.years + 6.months + 4.days + 12.hours + 30.minutes + 5.seconds
+      @xml.to_tag(:b, duration, @options)
+      assert_xml("<b type=\"duration\">P3Y6M4DT12H30M5S</b>")
+    end
+
     test "#to_tag accepts array types" do
       @xml.to_tag(:b, ["first_name", "last_name"], @options)
       assert_xml("<b type=\"array\"><b>first_name</b><b>last_name</b></b>")
@@ -246,7 +261,7 @@ module XmlMiniTest
     def test_date
       parser = @parsing["date"]
       assert_equal Date.new(2013, 11, 12), parser.call("2013-11-12T0211Z")
-      assert_raises(TypeError) { parser.call(1384190018) }
+      assert_raises(ArgumentError) { parser.call(1384190018) }
       assert_raises(ArgumentError) { parser.call("not really a date") }
     end
 
@@ -257,6 +272,16 @@ module XmlMiniTest
       assert_equal DateTime.new(2013, 11, 12, 02, 11), parser.call("2013-11-12T02:11Z")
       assert_equal DateTime.new(2013, 11, 12, 02, 11), parser.call("2013-11-12T11:11+9")
       assert_raises(ArgumentError) { parser.call("1384190018") }
+    end
+
+    def test_duration
+      parser = @parsing["duration"]
+
+      assert_equal 1, parser.call("PT1S")
+      assert_equal 1.minutes, parser.call("PT1M")
+      assert_equal 3.years + 6.months + 4.days + 12.hours + 30.minutes + 5.seconds, parser.call("P3Y6M4DT12H30M5S")
+      assert_equal 1.hour, parser.call("\n  PT1H\n")
+      assert_raises(ArgumentError) { parser.call("not really a duration") }
     end
 
     def test_integer
@@ -286,7 +311,7 @@ module XmlMiniTest
       assert_equal 123.0, parser.call("123,003")
       assert_equal 0.0, parser.call("")
       assert_equal 123, parser.call(123)
-      assert_raises(ArgumentError) { parser.call(123.04) }
+      assert_equal BigDecimal("123.04"), parser.call(123.04)
       assert_raises(ArgumentError) { parser.call(Date.new(2013, 11, 12, 02, 11)) }
     end
 
@@ -327,6 +352,18 @@ YAML
       assert_equal(expected, parser.call(yaml))
       assert_equal({ 1 => "test" }, parser.call(1 => "test"))
       assert_equal({ "1 => 'test'" => nil }, parser.call("{1 => 'test'}"))
+    end
+
+    def test_hexBinary
+      expected = "Hello, World!"
+      hex_binary = "48656C6C6F2C20576F726C6421"
+
+      parser = @parsing["hexBinary"]
+      assert_equal expected, parser.call(hex_binary)
+
+      parser = @parsing["binary"]
+      assert_equal expected, parser.call(hex_binary, "encoding" => "hexBinary")
+      assert_equal expected, parser.call(hex_binary, "encoding" => "hex")
     end
 
     def test_base64Binary_and_binary

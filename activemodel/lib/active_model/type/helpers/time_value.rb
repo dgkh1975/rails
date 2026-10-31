@@ -7,14 +7,14 @@ module ActiveModel
   module Type
     module Helpers # :nodoc: all
       module TimeValue
-        def serialize(value)
+        def serialize_cast_value(value)
           value = apply_seconds_precision(value)
 
           if value.acts_like?(:time)
             if is_utc?
-              value = value.getutc if value.respond_to?(:getutc) && !value.utc?
+              value = value.getutc if !value.utc?
             else
-              value = value.getlocal if value.respond_to?(:getlocal)
+              value = value.getlocal
             end
           end
 
@@ -36,7 +36,7 @@ module ActiveModel
         end
 
         def type_cast_for_schema(value)
-          value.to_s(:db).inspect
+          value.to_fs(:db).inspect
         end
 
         def user_input_in_time_zone(value)
@@ -61,28 +61,16 @@ module ActiveModel
             end
           end
 
-          ISO_DATETIME = /
-            \A
-            (\d{4})-(\d\d)-(\d\d)(?:T|\s)            # 2020-06-20T
-            (\d\d):(\d\d):(\d\d)(?:\.(\d{1,6})\d*)?  # 10:20:30.123456
-            (?:(Z(?=\z)|[+-]\d\d)(?::?(\d\d))?)?     # +09:00
-            \z
-          /x
-
           def fast_string_to_time(string)
-            return unless ISO_DATETIME =~ string
+            return unless string.include?("-") #  Time.new("1234") # => 1234-01-01 00:00:00
 
-            usec = $7.to_i
-            usec_len = $7&.length
-            if usec_len&.< 6
-              usec *= 10**(6 - usec_len)
+            if is_utc?
+              ::Time.new(string, in: "UTC")
+            else
+              ::Time.new(string)
             end
-
-            if $8
-              offset = $8 == "Z" ? 0 : $8.to_i * 3600 + $9.to_i * 60
-            end
-
-            new_time($1.to_i, $2.to_i, $3.to_i, $4.to_i, $5.to_i, $6.to_i, usec, offset)
+          rescue ArgumentError
+            nil
           end
       end
     end

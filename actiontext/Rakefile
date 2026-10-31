@@ -4,18 +4,32 @@ require "bundler/setup"
 require "bundler/gem_tasks"
 require "rake/testtask"
 
-task :package
+ENV["RAILS_MINITEST_PLUGIN"] = "true"
 
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.test_files = FileList["test/**/*_test.rb"].exclude("test/system/**/*", "test/dummy/**/*")
-  t.verbose = true
+  if ENV["CI"]
+    t.verbose = true
+    t.options = "--profile --defer-output"
+  end
 end
 
 Rake::TestTask.new "test:system" do |t|
   t.libs << "test"
   t.test_files = FileList["test/system/**/*_test.rb"]
-  t.verbose = true
+  if ENV["CI"]
+    t.verbose = true
+    t.options = "--profile --defer-output"
+  end
+end
+
+namespace :test do
+  task :railties do
+    ["action_text/engine"].all? do |railtie|
+      sh(Gem.ruby, "-r", railtie, "-e", "'OK'")
+    end || raise("Failures")
+  end
 end
 
 task default: :test

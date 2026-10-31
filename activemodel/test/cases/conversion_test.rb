@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
 require "cases/helper"
+require "active_support/testing/ractors_assertions"
 require "models/contact"
 require "models/helicopter"
 
 class ConversionTest < ActiveModel::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   test "to_model default implementation returns self" do
     contact = Contact.new
     assert_equal contact, contact.to_model
@@ -18,6 +21,10 @@ class ConversionTest < ActiveModel::TestCase
     assert_equal [1], Contact.new(id: 1).to_key
   end
 
+  test "to_key doesn't double-wrap composite `id`s" do
+    assert_equal ["abc", "xyz"], Contact.new(id: ["abc", "xyz"]).to_key
+  end
+
   test "to_param default implementation returns nil for new records" do
     assert_nil Contact.new.to_param
   end
@@ -28,6 +35,10 @@ class ConversionTest < ActiveModel::TestCase
 
   test "to_param returns the string joined by '-'" do
     assert_equal "abc-xyz", Contact.new(id: ["abc", "xyz"]).to_param
+  end
+
+  test "to_param returns nil if composite id is incomplete" do
+    assert_nil Contact.new(id: [1, nil]).to_param
   end
 
   test "to_param returns nil if to_key is nil" do
@@ -48,5 +59,61 @@ class ConversionTest < ActiveModel::TestCase
 
   test "to_partial_path handles namespaced models" do
     assert_equal "helicopter/comanches/comanche", Helicopter::Comanche.new.to_partial_path
+  end
+
+  test "to_partial_path handles non-standard model_name" do
+    assert_equal "attack_helicopters/ah-64", Helicopter::Apache.new.to_partial_path
+  end
+
+  # Prior to 4.1 exiting single ractor mode break breaks require decorators:
+  # - https://bugs.ruby-lang.org/issues/22263
+  # - https://github.com/fxn/zeitwerk/pull/344
+  if RUBY_VERSION >= "4.1"
+    test "to_partial_path initializes its cache on the main Ractor" do
+      model_class = Class.new do
+        include ActiveModel::Conversion
+
+        def self.name
+          "RactorModel"
+        end
+      end
+
+      assert_equal "ractor_models/ractor_model", on_ractor(model_class) { |klass| klass.new.to_partial_path }
+    end
+  end
+
+  test "to_partial_path on a model implementing .model_name returns a frozen string" do
+    helicopter = Helicopter::Apache.new
+
+    assert_respond_to(helicopter.class, :model_name)
+    assert_predicate(helicopter.to_partial_path, :frozen?)
+  end
+
+  test "to_partial_path on a model not implementing .model_name returns a frozen string" do
+    helicopter = Helicopter::Comanche.new
+
+    assert_not_respond_to(helicopter.class, :model_name)
+    assert_predicate(helicopter.to_partial_path, :frozen?)
+  end
+
+  test "#to_param_delimiter allows redefining the delimiter used in #to_param" do
+    old_delimiter = Contact.param_delimiter
+    Contact.param_delimiter = "_"
+    assert_equal("abc_xyz", Contact.new(id: ["abc", "xyz"]).to_param)
+  ensure
+    Contact.param_delimiter = old_delimiter
+  end
+
+  test "#to_param_delimiter is defined per class" do
+    old_contact_delimiter = Contact.param_delimiter
+    custom_contract = Class.new(Contact)
+
+    Contact.param_delimiter = "_"
+    custom_contract.param_delimiter = ";"
+
+    assert_equal("abc_xyz", Contact.new(id: ["abc", "xyz"]).to_param)
+    assert_equal("abc;xyz", custom_contract.new(id: ["abc", "xyz"]).to_param)
+  ensure
+    Contact.param_delimiter = old_contact_delimiter
   end
 end

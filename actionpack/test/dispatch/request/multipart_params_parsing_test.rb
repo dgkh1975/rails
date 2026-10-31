@@ -157,8 +157,9 @@ class MultipartParamsParsingTest < ActionDispatch::IntegrationTest
   test "uploads and reads binary file" do
     with_test_routing do
       fixture = FIXTURE_PATH + "/ruby_on_rails.jpg"
-      params = { uploaded_data: fixture_file_upload(fixture, "image/jpg") }
+      params = { uploaded_data: fixture_file_upload(fixture, "image/jpeg") }
       post "/read", params: params
+      assert_equal Encoding::ASCII_8BIT, response.body.encoding
     end
   end
 
@@ -172,11 +173,7 @@ class MultipartParamsParsingTest < ActionDispatch::IntegrationTest
   # This can happen in Internet Explorer when redirecting after multipart form submit.
   test "does not raise EOFError on GET request with multipart content-type" do
     with_routing do |set|
-      set.draw do
-        ActiveSupport::Deprecation.silence do
-          get ":action", controller: "multipart_params_parsing_test/test"
-        end
-      end
+      draw_root_action_routes(set, ::MultipartParamsParsingTest::TestController)
       headers = { "CONTENT_TYPE" => "multipart/form-data; boundary=AaB03x" }
       get "/parse", headers: headers
       assert_response :ok
@@ -203,11 +200,7 @@ class MultipartParamsParsingTest < ActionDispatch::IntegrationTest
 
     def with_test_routing
       with_routing do |set|
-        set.draw do
-          ActiveSupport::Deprecation.silence do
-            post ":action", controller: "multipart_params_parsing_test/test"
-          end
-        end
+        draw_root_action_routes(set, ::MultipartParamsParsingTest::TestController)
         yield
       end
     end

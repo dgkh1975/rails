@@ -7,18 +7,19 @@ module ActiveRecord
     class Column
       include Deduplicable
 
-      attr_reader :name, :default, :sql_type_metadata, :null, :default_function, :collation, :comment
+      attr_reader :name, :default, :sql_type_metadata, :null, :default_function, :collation, :comment, :cast_type
 
       delegate :precision, :scale, :limit, :type, :sql_type, to: :sql_type_metadata, allow_nil: true
 
       # Instantiates a new column in the table.
       #
-      # +name+ is the column's name, such as <tt>supplier_id</tt> in <tt>supplier_id bigint</tt>.
-      # +default+ is the type-casted default value, such as +new+ in <tt>sales_stage varchar(20) default 'new'</tt>.
-      # +sql_type_metadata+ is various information about the type of the column
-      # +null+ determines if this column allows +NULL+ values.
-      def initialize(name, default, sql_type_metadata = nil, null = true, default_function = nil, collation: nil, comment: nil, **)
+      # `name` is the column's name, such as `supplier_id` in `supplier_id bigint`.
+      # `default` is the type-casted default value, such as `new` in `sales_stage varchar(20) default 'new'`.
+      # `sql_type_metadata` is various information about the type of the column
+      # `null` determines if this column allows `NULL` values.
+      def initialize(name, cast_type, default, sql_type_metadata = nil, null = true, default_function = nil, collation: nil, comment: nil, **)
         @name = name.freeze
+        @cast_type = cast_type
         @sql_type_metadata = sql_type_metadata
         @null = null
         @default = default
@@ -37,14 +38,18 @@ module ActiveRecord
 
       # Returns the human name of the column name.
       #
-      # ===== Examples
-      #  Column.new('sales_stage', ...).human_name # => 'Sales stage'
+      # ##### Examples
+      #
+      # ```
+      # Column.new('sales_stage', ...).human_name # => 'Sales stage'
+      # ```
       def human_name
         Base.human_attribute_name(@name)
       end
 
       def init_with(coder)
         @name = coder["name"]
+        @cast_type = coder["cast_type"]
         @sql_type_metadata = coder["sql_type_metadata"]
         @null = coder["null"]
         @default = coder["default"]
@@ -55,6 +60,7 @@ module ActiveRecord
 
       def encode_with(coder)
         coder["name"] = @name
+        coder["cast_type"] = @cast_type
         coder["sql_type_metadata"] = @sql_type_metadata
         coder["null"] = @null
         coder["default"] = @default
@@ -63,9 +69,40 @@ module ActiveRecord
         coder["comment"] = @comment
       end
 
+      def as_schema_json
+        data = {}
+        encode_with(data)
+        data
+      end
+
+      def init_from_schema_json(coder, references)
+        coder["cast_type"] = references[coder["cast_type"]] if coder["cast_type"]
+        coder["sql_type_metadata"] = references[coder["sql_type_metadata"]] if coder["sql_type_metadata"]
+        init_with(coder)
+      end
+
+      # whether the column is auto-populated by the database using a sequence
+      def auto_incremented_by_db?
+        false
+      end
+
+      def auto_populated_on_insert?
+        auto_incremented_by_db? || default_function
+      end
+
+      def auto_populated?
+        auto_populated_on_insert?
+      end
+      deprecate auto_populated?: :auto_populated_on_insert?, deprecator: ActiveRecord.deprecator
+
+      def auto_populated_on_update?
+        virtual?
+      end
+
       def ==(other)
         other.is_a?(Column) &&
           name == other.name &&
+          cast_type == other.cast_type &&
           default == other.default &&
           sql_type_metadata == other.sql_type_metadata &&
           null == other.null &&
@@ -76,22 +113,29 @@ module ActiveRecord
       alias :eql? :==
 
       def hash
-        Column.hash ^
-          name.hash ^
-          name.encoding.hash ^
-          default.hash ^
-          sql_type_metadata.hash ^
-          null.hash ^
-          default_function.hash ^
-          collation.hash ^
-          comment.hash
+        [
+          Column,
+          @name,
+          @name.encoding,
+          @cast_type,
+          @default,
+          @sql_type_metadata,
+          @null,
+          @default_function,
+          @collation,
+          @comment,
+        ].hash
+      end
+
+      def virtual?
+        false
       end
 
       private
         def deduplicated
           @name = -name
           @sql_type_metadata = sql_type_metadata.deduplicate if sql_type_metadata
-          @default = -default if default
+          @default = -default if String === default
           @default_function = -default_function if default_function
           @collation = -collation if collation
           @comment = -comment if comment
@@ -101,7 +145,7 @@ module ActiveRecord
 
     class NullColumn < Column
       def initialize(name, **)
-        super(name, nil)
+        super(name, nil, nil)
       end
     end
   end

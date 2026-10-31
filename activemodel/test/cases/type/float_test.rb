@@ -18,6 +18,13 @@ module ActiveModel
         assert_equal 0.0, type.cast("bad")
       end
 
+      def test_type_cast_float_from_special_strings
+        type = Type::Float.new
+        assert_equal ::Float::INFINITY, type.cast("Infinity")
+        assert_equal(-::Float::INFINITY, type.cast("-Infinity"))
+        assert_predicate type.cast("NaN"), :nan?
+      end
+
       def test_changing_float
         type = Type::Float.new
 
@@ -28,6 +35,8 @@ module ActiveModel
         assert_not type.changed?(5.0, 5.0, "5.0")
         assert_not type.changed?(500.0, 500.0, "0.5E+4")
         assert_not type.changed?(nil, nil, nil)
+        assert_not type.changed?(0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0)
+        assert type.changed?(0.0 / 0.0, BigDecimal("0.0") / 0, BigDecimal("0.0") / 0)
       end
     end
   end

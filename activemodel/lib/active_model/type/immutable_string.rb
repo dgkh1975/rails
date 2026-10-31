@@ -2,7 +2,32 @@
 
 module ActiveModel
   module Type
-    class ImmutableString < Value # :nodoc:
+    # Active Model \ImmutableString \Type
+    # ===================================
+    #
+    # Attribute type to represent immutable strings. It casts incoming values to
+    # frozen strings.
+    #
+    # ```
+    # class Person
+    #   include ActiveModel::Attributes
+    #
+    #   attribute :name, :immutable_string
+    # end
+    #
+    # person = Person.new
+    # person.name = 1
+    #
+    # person.name # => "1"
+    # person.name.frozen? # => true
+    # ```
+    #
+    # Values are coerced to strings using their `to_s` method. Boolean values
+    # are treated differently, however: `true` will be cast to `"t"` and
+    # `false` will be cast to `"f"`.
+    class ImmutableString < Value
+      include Helpers::Immutable
+
       def initialize(**args)
         @true  = -(args.delete(:true)&.to_s  || "t")
         @false = -(args.delete(:false)&.to_s || "f")
@@ -20,6 +45,24 @@ module ActiveModel
         when false then @false
         else super
         end
+      end
+
+      def serialize_cast_value(value) # :nodoc:
+        value
+      end
+
+      def to_immutable_string # :nodoc:
+        self
+      end
+
+      def as_schema_json
+        super.merge!("true" => @true, "false" => @false)
+      end
+
+      def init_from_schema_json(coder, references)
+        super
+        @true = coder["true"]
+        @false = coder["false"]
       end
 
       private

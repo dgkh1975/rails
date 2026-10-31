@@ -8,7 +8,7 @@ module RailtiesTest
 
     def setup
       build_app
-      FileUtils.rm_rf("#{app_path}/config/environments")
+      reset_environment_configs
       require "rails/all"
     end
 
@@ -17,11 +17,19 @@ module RailtiesTest
     end
 
     def app
-      @app ||= Rails.application
+      @app ||= Rails.app
     end
 
     test "cannot instantiate a Railtie object" do
-      assert_raise(RuntimeError) { Rails::Railtie.new }
+      assert_raise(RuntimeError) { Rails::Railtie.send(:new) }
+    end
+
+    test "respond_to? works in the abstract railties" do
+      assert_not_respond_to Rails::Railtie, :something_nice
+    end
+
+    test "method_missing works in the abstract railties" do
+      assert_raise(NoMethodError) { Rails::Railtie.something_nice }
     end
 
     test "Railtie provides railtie_name" do
@@ -223,6 +231,46 @@ module RailtiesTest
     ensure
       Rails.env = original_env
       assert_equal(original_env, Rails.env)
+    end
+
+    test "Railtie object isn't output when a NoMethodError is raised" do
+      class Foo < Rails::Railtie
+        config.foo = ActiveSupport::OrderedOptions.new
+        config.foo.greetings = "hello"
+      end
+
+      error = assert_raises(NoMethodError) do
+        Foo.instance.abc
+      end
+
+      assert_match(/undefined method [`']abc' for.*RailtiesTest::RailtieTest::Foo/, error.original_message)
+    end
+
+    test "inspect does not show internals" do
+      class self.class::TestRailtie < Rails::Railtie; end
+
+      assert_match(/\A#<.*TestRailtie:0x[0-9a-f]+>\z/, self.class::TestRailtie.instance.inspect)
+    end
+
+    test "rake environment can be called in the ralitie" do
+      $ran_block = false
+
+      class MyTie < Rails::Railtie
+        rake_tasks do
+          $ran_block = true
+        end
+      end
+
+      ::APP_RAKEFILE = "#{app_path}/Rakefile".freeze
+      require "#{app_path}/config/environment"
+
+      assert_not $ran_block
+      require "rake"
+      require "rake/testtask"
+      require "rdoc/task"
+      load "rails/tasks/engine.rake"
+
+      assert $ran_block
     end
   end
 end

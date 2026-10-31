@@ -1,16 +1,18 @@
 # frozen_string_literal: true
 
 require "action_view/view_paths"
+require "active_support/core_ext/module/attr_internal"
 
 module ActionView
   # This is a class to fix I18n global state. Whenever you provide I18n.locale during a request,
   # it will trigger the lookup_context and consequently expire the cache.
-  class I18nProxy < ::I18n::Config #:nodoc:
+  class I18nProxy < ::I18n::Config # :nodoc:
     attr_reader :original_config, :lookup_context
 
     def initialize(original_config, lookup_context)
       original_config = original_config.original_config if original_config.respond_to?(:original_config)
-      @original_config, @lookup_context = original_config, lookup_context
+      @original_config = original_config
+      @lookup_context = lookup_context
     end
 
     def locale
@@ -26,15 +28,15 @@ module ActionView
     extend ActiveSupport::Concern
     include ActionView::ViewPaths
 
-    attr_reader :rendered_format
+    attr_internal_reader :rendered_format
 
     def initialize
-      @rendered_format = nil
+      @_rendered_format = nil
       super
     end
 
-    # Overwrite process to set up I18n proxy.
-    def process(*) #:nodoc:
+    # Override process to set up I18n proxy.
+    def process(...) # :nodoc:
       old_config, I18n.config = I18n.config, I18nProxy.new(I18n.config, lookup_context)
       super
     ensure
@@ -48,7 +50,18 @@ module ActionView
       def _helpers
       end
 
+      def inherit_view_context_class?
+        superclass.respond_to?(:view_context_class) &&
+          supports_path? == superclass.supports_path? &&
+          _routes.equal?(superclass._routes) &&
+          _helpers.equal?(superclass._helpers)
+      end
+
       def build_view_context_class(klass, supports_path, routes, helpers)
+        if inherit_view_context_class?
+          return superclass.view_context_class
+        end
+
         Class.new(klass) do
           if routes
             include routes.url_helpers(supports_path)
@@ -61,8 +74,14 @@ module ActionView
         end
       end
 
+      def eager_load!
+        super
+        view_context_class
+        nil
+      end
+
       def view_context_class
-        klass = ActionView::LookupContext::DetailsKey.view_context_class(ActionView::Base)
+        klass = ActionView::LookupContext.view_context_class
 
         @view_context_class ||= build_view_context_class(klass, supports_path?, _routes, _helpers)
 
@@ -82,10 +101,10 @@ module ActionView
     #
     # The view class must have the following methods:
     #
-    # * <tt>View.new(lookup_context, assigns, controller)</tt> — Create a new
+    # * `View.new(lookup_context, assigns, controller)` — Create a new
     #   ActionView instance for a controller and we can also pass the arguments.
     #
-    # * <tt>View#render(option)</tt> — Returns String with the rendered template.
+    # * `View#render(option)` — Returns String with the rendered template.
     #
     # Override this method in a module to change the default behavior.
     def view_context
@@ -98,14 +117,15 @@ module ActionView
       @_view_renderer ||= ActionView::Renderer.new(lookup_context)
     end
 
-    def render_to_body(options = {})
+    def render_to_body(options = {}, &block)
       _process_options(options)
-      _render_template(options)
+      _process_render_template_options(options)
+      _render_template(options, &block)
     end
 
     private
       # Find and render a template based on the options given.
-      def _render_template(options)
+      def _render_template(options, &block)
         variant = options.delete(:variant)
         assigns = options.delete(:assigns)
         context = view_context
@@ -114,11 +134,11 @@ module ActionView
         lookup_context.variants = variant if variant
 
         rendered_template = context.in_rendering_context(options) do |renderer|
-          renderer.render_to_object(context, options)
+          renderer.render_to_object(context, options, &block)
         end
 
         rendered_format = rendered_template.format || lookup_context.formats.first
-        @rendered_format = Template::Types[rendered_format]
+        @_rendered_format = Template::Types[rendered_format]
 
         rendered_template.body
       end
@@ -129,8 +149,8 @@ module ActionView
         lookup_context.formats = [format.to_sym] if format.to_sym
       end
 
-      # Normalize args by converting render "foo" to render :action => "foo" and
-      # render "foo/bar" to render :template => "foo/bar".
+      # Normalize args by converting render "foo" to render action: "foo" and
+      # render "foo/bar" to render template: "foo/bar".
       def _normalize_args(action = nil, options = {})
         options = super(action, options)
         case action
@@ -146,6 +166,7 @@ module ActionView
             options = action
           elsif action.respond_to?(:render_in)
             options[:renderable] = action
+            options[:locals] = options
           else
             options[:partial] = action
           end
@@ -155,18 +176,16 @@ module ActionView
       end
 
       # Normalize options.
-      def _normalize_options(options)
-        options = super(options)
+      def _process_render_template_options(options)
         if options[:partial] == true
           options[:partial] = action_name
         end
 
-        if (options.keys & [:partial, :file, :template]).empty?
+        if !(options.key?(:partial) || options.key?(:file) || options.key?(:template))
           options[:prefixes] ||= _prefixes
         end
 
         options[:template] ||= (options[:action] || action_name).to_s
-        options
       end
   end
 end

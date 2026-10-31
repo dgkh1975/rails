@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 #--
-# Copyright (c) 2004-2021 David Heinemeier Hansson
+# Copyright (c) David Heinemeier Hansson
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -25,6 +25,7 @@
 
 require "abstract_controller"
 require "action_mailer/version"
+require "action_mailer/deprecator"
 
 # Common Active Support usage in Action Mailer
 require "active_support"
@@ -34,6 +35,7 @@ require "active_support/core_ext/module/attr_internal"
 require "active_support/core_ext/string/inflections"
 require "active_support/lazy_load_hooks"
 
+# :include: ../README.md
 module ActionMailer
   extend ::ActiveSupport::Autoload
 
@@ -42,6 +44,7 @@ module ActionMailer
   end
 
   autoload :Base
+  autoload :Callbacks
   autoload :DeliveryMethods
   autoload :InlinePreviewInterceptor
   autoload :MailHelper
@@ -51,21 +54,71 @@ module ActionMailer
   autoload :TestCase
   autoload :TestHelper
   autoload :MessageDelivery
-  autoload :DeliveryJob
   autoload :MailDeliveryJob
+  autoload :QueuedDelivery
+  autoload :FormBuilder
 
-  def self.eager_load!
-    super
+  class << self
+    # Enqueue many emails at once to be delivered through Active Job.
+    # When the individual job runs, it will send the email using `deliver_now`.
+    def deliver_all_later(*deliveries, **options)
+      _deliver_all_later("deliver_now", *deliveries, **options)
+    end
 
-    require "mail"
-    Mail.eager_autoload!
+    # Enqueue many emails at once to be delivered through Active Job.
+    # When the individual job runs, it will send the email using `deliver_now!`.
+    # That means that the message will be sent bypassing checking `perform_deliveries`
+    # and `raise_delivery_errors`, so use with caution.
+    def deliver_all_later!(*deliveries, **options)
+      _deliver_all_later("deliver_now!", *deliveries, **options)
+    end
+
+    def eager_load!
+      super
+
+      require "mail"
+      Mail.eager_autoload!
+
+      Base.descendants.each do |mailer|
+        mailer.eager_load! unless mailer.abstract?
+      end
+    end
+
+    private
+      def _deliver_all_later(delivery_method, *deliveries, **options)
+        deliveries = deliveries.first if deliveries.first.is_a?(Array)
+
+        if deliveries.any?(&:processed?)
+          raise MessageDelivery::ALREADY_PROCESSED_MESSAGE
+        end
+
+        jobs = deliveries.map do |delivery|
+          mailer_class = delivery.mailer_class
+          delivery_job = mailer_class.delivery_job
+
+          delivery_job
+            .new(mailer_class.name, delivery.action.to_s, delivery_method, params: delivery.params, args: delivery.args)
+            .set(options)
+        end
+
+        ActiveJob.perform_all_later(jobs)
+      end
   end
 end
 
 autoload :Mime, "action_dispatch/http/mime_type"
 
 ActiveSupport.on_load(:action_view) do
-  ActionView::Base.default_formats ||= Mime::SET.symbols
-  ActionView::Template::Types.delegate_to Mime
+  ActionView::Template.mime_types_implementation = Mime
   ActionView::LookupContext::DetailsKey.clear
+
+  unless ActionView::Base.default_formats
+    ActionView::Base.default_formats = previous_symbols = Mime.symbols
+    # TODO: remove in Rails 9, when late Mime::Type registration raises
+    Mime::Type.on_change do
+      if !previous_symbols.equal?(Mime.symbols) && ActionView::Base.default_formats.equal?(previous_symbols)
+        ActionView::Base.default_formats = previous_symbols = Mime.symbols
+      end
+    end
+  end
 end

@@ -4,6 +4,7 @@ require "abstract_unit"
 require "controller/fake_controllers"
 require "active_support/core_ext/object/with_options"
 require "active_support/core_ext/object/json"
+require "active_support/core_ext/object/with"
 
 class MilestonesController < ActionController::Base
   def index() head :ok end
@@ -17,9 +18,7 @@ class UriReservedCharactersRoutingTest < ActiveSupport::TestCase
   def setup
     @set = ActionDispatch::Routing::RouteSet.new
     @set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:variable/*additional"
-      end
+      get "content/action/:variable/*additional", to: "content#action"
     end
 
     safe, unsafe = %w(: @ & = + $ , ;), %w(^ ? # [ ])
@@ -30,20 +29,20 @@ class UriReservedCharactersRoutingTest < ActiveSupport::TestCase
   end
 
   def test_route_generation_escapes_unsafe_path_characters
-    assert_equal "/content/act#{@escaped}ion/var#{@escaped}iable/add#{@escaped}itional-1/add#{@escaped}itional-2",
+    assert_equal "/content/action/var#{@escaped}iable/add#{@escaped}itional-1/add#{@escaped}itional-2",
       url_for(@set,
         controller: "content",
-        action: "act#{@segment}ion",
+        action: "action",
         variable: "var#{@segment}iable",
         additional: ["add#{@segment}itional-1", "add#{@segment}itional-2"])
   end
 
   def test_route_recognition_unescapes_path_components
     options = { controller: "content",
-                action: "act#{@segment}ion",
+                action: "action",
                 variable: "var#{@segment}iable",
                 additional: "add#{@segment}itional-1/add#{@segment}itional-2" }
-    assert_equal options, @set.recognize_path("/content/act#{@escaped}ion/var#{@escaped}iable/add#{@escaped}itional-1/add#{@escaped}itional-2")
+    assert_equal options, @set.recognize_path("/content/action/var#{@escaped}iable/add#{@escaped}itional-1/add#{@escaped}itional-2")
   end
 
   def test_route_generation_allows_passing_non_string_values_to_generated_helper
@@ -59,11 +58,8 @@ end
 class MockController
   def self.build(helpers, additional_options = {})
     Class.new do
-      define_method :url_options do
-        options = super()
-        options[:protocol] ||= "http"
-        options[:host] ||= "test.host"
-        options.merge(additional_options)
+      define_method :default_url_options do
+        { protocol: "http", host: "test.host" }.merge(additional_options)
       end
 
       include helpers
@@ -311,9 +307,9 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     rs.draw do
       get "/posts/:id(/*filters)", constraints: { filters: /.+?/ },
         to: lambda { |e|
-        params = e["action_dispatch.request.path_parameters"]
-        [200, {}, ["foo"]]
-      }
+          params = e["action_dispatch.request.path_parameters"]
+          [200, {}, ["foo"]]
+        }
     end
     assert_equal "foo", get(URI("http://example.org/posts/1/foo.js"))
     assert_equal({ id: "1", filters: "foo", format: "js" }, params)
@@ -329,87 +325,36 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     end
   end
 
-  def test_default_setup
-    rs.draw { ActiveSupport::Deprecation.silence { get "/:controller(/:action(/:id))" } }
-    assert_equal({ controller: "content", action: "index" }, rs.recognize_path("/content"))
-    assert_equal({ controller: "content", action: "list" },  rs.recognize_path("/content/list"))
-    assert_equal({ controller: "content", action: "show", id: "10" }, rs.recognize_path("/content/show/10"))
-
-    assert_equal({ controller: "admin/user", action: "show", id: "10" }, rs.recognize_path("/admin/user/show/10"))
-
-    assert_equal "/admin/user/show/10", url_for(rs, controller: "admin/user", action: "show", id: 10)
+  def test_route_uri_pattern
+    rs.draw { get "/admin/user/list(/:id)", to: "admin/user#list" }
 
     get URI("http://test.host/admin/user/list/10")
 
-    assert_equal({ controller: "admin/user", action: "list", id: "10" },
-                 controller.request.path_parameters)
+    assert_equal(
+      "/admin/user/list(/:id)(.:format)",
+      controller.request.route_uri_pattern
+    )
 
-    assert_equal "/admin/user/show",    controller.url_for(action: "show", only_path: true)
-    assert_equal "/admin/user/list/10", controller.url_for(only_path: true)
-
-    assert_equal "/admin/stuff", controller.url_for(controller: "stuff", only_path: true)
-    assert_equal "/stuff", controller.url_for(controller: "/stuff", only_path: true)
+    assert_equal(
+      "/admin/user/list(/:id)(.:format)",
+      controller.request.get_header("action_dispatch.route_uri_pattern")
+    )
   end
 
   def test_route_with_colon_first
     rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/:controller/:action/:id", action: "index", id: nil
-      end
-
       get ":url", controller: "content", action: "translate"
     end
 
     assert_equal({ controller: "content", action: "translate", url: "example" }, rs.recognize_path("/example"))
   end
 
-  def test_route_with_regexp_for_action
-    rs.draw { ActiveSupport::Deprecation.silence { get "/:controller/:action", action: /auth[-|_].+/ } }
-
-    assert_equal({ action: "auth_google", controller: "content" }, rs.recognize_path("/content/auth_google"))
-    assert_equal({ action: "auth-twitter", controller: "content" }, rs.recognize_path("/content/auth-twitter"))
-
-    assert_equal "/content/auth_google", url_for(rs, controller: "content", action: "auth_google")
-    assert_equal "/content/auth-twitter", url_for(rs, controller: "content", action: "auth-twitter")
-  end
-
-  def test_route_with_regexp_for_controller
-    rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:admintoken(/:action(/:id))", controller: /admin\/.+/
-        get "/:controller(/:action(/:id))"
-      end
-    end
-
-    assert_equal({ controller: "admin/user", admintoken: "foo", action: "index" },
-        rs.recognize_path("/admin/user/foo"))
-    assert_equal({ controller: "content", action: "foo" },
-        rs.recognize_path("/content/foo"))
-
-    assert_equal "/admin/user/foo", url_for(rs, controller: "admin/user", admintoken: "foo", action: "index")
-    assert_equal "/content/foo",    url_for(rs, controller: "content", action: "foo")
-  end
-
-  def test_route_with_regexp_and_captures_for_controller
-    rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/:controller(/:action(/:id))", controller: /admin\/(accounts|users)/
-      end
-    end
-    assert_equal({ controller: "admin/accounts", action: "index" }, rs.recognize_path("/admin/accounts"))
-    assert_equal({ controller: "admin/users", action: "index" }, rs.recognize_path("/admin/users"))
-    assert_raise(ActionController::RoutingError) { rs.recognize_path("/admin/products") }
-  end
-
   def test_route_with_regexp_and_dot
     rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:file",
-                  controller: /admin|user/,
-                  action: /upload|download/,
-                  defaults: { file: nil },
-                  constraints: { file: %r{[^/]+(\.[^/]+)?} }
-      end
+      get "user/download/:file",
+                to: "user#download",
+                defaults: { file: nil },
+                constraints: { file: %r{[^/]+(\.[^/]+)?} }
     end
     # Without a file extension
     assert_equal "/user/download/file",
@@ -479,7 +424,7 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     assert_equal("http://test.host/admin/user", setup_for_named_route.users_url)
   end
 
-  def test_optimised_named_route_with_host
+  def test_optimized_named_route_with_host
     rs.draw do
       get "page" => "content#show_page", :as => "pages", :host => "foo.com"
     end
@@ -489,14 +434,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
 
   def setup_for_named_route(options = {})
     MockController.build(rs.url_helpers, options).new
-  end
-
-  def test_named_route_without_hash
-    rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id", as: "normal"
-      end
-    end
   end
 
   def test_named_route_root
@@ -547,10 +484,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     rs.draw do
       get "page/:year/:month/:day/:title" => "page#show", :as => "article",
         :year => /\d+/, :month => /\d+/, :day => /\d+/
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     routes = setup_for_named_route
@@ -560,7 +493,10 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   end
 
   def test_changing_controller
-    rs.draw { ActiveSupport::Deprecation.silence { get ":controller/:action/:id" } }
+    rs.draw do
+      get "admin/user/index/:id", to: "admin/user#index"
+      get "admin/stuff/show/:id", to: "admin/stuff#show"
+    end
 
     get URI("http://test.host/admin/user/index/10")
 
@@ -571,10 +507,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   def test_paths_escaped
     rs.draw do
       get "file/*path" => "content#show_file", :as => "path"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     # No + to space in URI escaping, only for query params.
@@ -597,15 +529,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     assert_equal("/file/hello/world", setup_for_named_route.path_path(["hello", "world"]))
   end
 
-  def test_non_controllers_cannot_be_matched
-    rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
-    end
-    assert_raise(ActionController::RoutingError) { rs.recognize_path("/not_a/show/10") }
-  end
-
   def test_should_list_options_diff_when_routing_constraints_dont_match
     rs.draw do
       get "post/:id" => "post#show", :constraints => { id: /\d+/ }, :as => "post"
@@ -624,6 +547,26 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
         url_for(rs, controller: "content", action: "show_file", path: %w(pages boo))
   end
 
+  def test_escapes_newline_character_for_dynamic_path
+    rs.draw do
+      get "/dynamic/:dynamic_segment" => "subpath_books#show", as: :dynamic
+    end
+
+    results = rs.recognize_path("/dynamic/a%0Anewline")
+    assert(results, "Recognition should have succeeded")
+    assert_equal("a\nnewline", results[:dynamic_segment])
+  end
+
+  def test_escapes_newline_character_for_wildcard_path
+    rs.draw do
+      get "/wildcard/*wildcard_segment" => "subpath_books#show", as: :wildcard
+    end
+
+    results = rs.recognize_path("/wildcard/a%0Anewline")
+    assert(results, "Recognition should have succeeded")
+    assert_equal("a\nnewline", results[:wildcard_segment])
+  end
+
   def test_dynamic_recall_paths_allowed
     rs.draw do
       get "*path" => "content#show_file"
@@ -639,10 +582,9 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
 
   def test_backwards
     rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get "page/:id(/:action)" => "pages#show"
-        get ":controller(/:action(/:id))"
-      end
+      get "page/:id" => "pages#show"
+      get "pages/show" => "pages#show"
+      get "pages/boo" => "pages#boo"
     end
 
     get URI("http://test.host/pages/show")
@@ -654,10 +596,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   def test_route_with_integer_default
     rs.draw do
       get "page(/:id)" => "content#show_page", :id => 1
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/page",    url_for(rs, controller: "content", action: "show_page")
@@ -674,10 +612,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   def test_route_with_text_default
     rs.draw do
       get "page/:id" => "content#show_page", :id => 1
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/page/foo", url_for(rs, controller: "content", action: "show_page", id: "foo")
@@ -692,7 +626,10 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   end
 
   def test_action_expiry
-    rs.draw { ActiveSupport::Deprecation.silence { get ":controller(/:action(/:id))" } }
+    rs.draw do
+      get "content" => "content#index"
+      get "content/show" => "content#show"
+    end
     get URI("http://test.host/content/show")
     assert_equal "/content", controller.url_for(controller: "content", only_path: true)
   end
@@ -715,10 +652,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
         :defaults => { year: nil },
         :constraints => { year: /\d{4}/ }
       )
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/test", url_for(rs, controller: "post", action: "show")
@@ -730,10 +663,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   def test_set_to_nil_forgets
     rs.draw do
       get "pages(/:year(/:month(/:day)))" => "content#list_pages", :month => nil, :day => nil
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/pages/2005",
@@ -780,10 +709,8 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
   def test_named_route_method
     rs.draw do
       get "categories" => "content#categories", :as => "categories"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller(/:action(/:id))"
-      end
+      # `as: nil` so that the route stays out of +named_routes+.
+      get "content/hi" => "content#hi", :as => nil
     end
 
     assert_equal "/categories", url_for(rs, controller: "content", action: "categories")
@@ -799,10 +726,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     rs.draw do
       get "journal" => "content#list_journal",
         :date => nil, :user_id => nil
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/journal", url_for(rs,
@@ -841,12 +764,10 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
 
   def test_subpath_recognized
     rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/books/:id/edit"    => "subpath_books#edit"
-        get "/items/:id/:action" => "subpath_books"
-        get "/posts/new/:action" => "subpath_books"
-        get "/posts/:id"         => "subpath_books#show"
-      end
+      get "/books/:id/edit"      => "subpath_books#edit"
+      get "/items/:id/complete"  => "subpath_books#complete"
+      get "/posts/new/preview"   => "subpath_books#preview"
+      get "/posts/:id"           => "subpath_books#show"
     end
 
     hash = rs.recognize_path "/books/17/edit"
@@ -868,11 +789,9 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
 
   def test_subpath_generated
     rs.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/books/:id/edit"    => "subpath_books#edit"
-        get "/items/:id/:action" => "subpath_books"
-        get "/posts/new/:action" => "subpath_books"
-      end
+      get "/books/:id/edit"      => "subpath_books#edit"
+      get "/items/:id/complete"  => "subpath_books#complete"
+      get "/posts/new/preview"   => "subpath_books#preview"
     end
 
     assert_equal "/books/7/edit",      url_for(rs, controller: "subpath_books", id: 7, action: "edit")
@@ -896,11 +815,6 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
       get "ca" => "ca#aa"
       get "cb" => "cb#ab"
       get "cc" => "cc#ac"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-        get ":controller/:action/:id.:format"
-      end
     end
 
     hash = rs.recognize_path "/cc"
@@ -911,17 +825,83 @@ class LegacyRouteSetTests < ActiveSupport::TestCase
     rs.draw do
       get "cb" => "cb#ab"
       get "cc" => "cc#ac"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-        get ":controller/:action/:id.:format"
-      end
     end
 
     hash = rs.recognize_path "/cc"
 
     assert_not_nil hash
     assert_equal %w(cc ac), [hash[:controller], hash[:action]]
+  end
+
+  def test_drawing_more_routes_after_eager_loading
+    rs = ::ActionDispatch::Routing::RouteSet.new
+    rs.disable_clear_and_finalize = true
+
+    rs.draw do
+      get "/plain" => "c#plain"
+      get "/:symbol" => "c#symbol"
+      get "/glob/*" => "c#glob"
+      get "/with#anchor" => "c#with_anchor"
+    end
+
+    hash = rs.recognize_path "/symbol"
+    assert_not_nil hash
+    assert_equal %w(c symbol), [hash[:controller], hash[:action]]
+
+    rs.eager_load!
+
+    rs.draw do
+      get "/more/plain" => "c#plain"
+      get "/more/:symbol" => "c#symbol"
+      get "/more/glob/*" => "c#glob"
+      get "/more/with#anchor" => "c#with_anchor"
+    end
+
+    hash = rs.recognize_path "/symbol"
+    assert_not_nil hash
+    assert_equal %w(c symbol), [hash[:controller], hash[:action]]
+
+    hash = rs.recognize_path "/more/symbol"
+    assert_not_nil hash
+    assert_equal %w(c symbol), [hash[:controller], hash[:action]]
+  end
+
+  def test_missing_controller_messages_is_empty_when_every_controller_exists
+    rs = ::ActionDispatch::Routing::RouteSet.new
+    rs.draw do
+      get "/milestones" => "milestones#index"
+      get "/constrained" => "milestones#index", constraints: ->(req) { true }
+      get "/static" => MilestonesController, action: "index"
+      get "/rack" => ->(env) { [200, {}, []] }
+      get "/redirect" => redirect("/milestones")
+    end
+
+    assert_empty rs.missing_controller_messages
+  end
+
+  def test_missing_controller_messages_reports_each_route_with_a_missing_controller
+    rs = ::ActionDispatch::Routing::RouteSet.new
+    rs.draw do
+      get "/milestones" => "milestones#index"
+      get "/photos/:id" => "photos#show"
+      get "/albums" => "albums#index", constraints: ->(req) { true }
+    end
+
+    messages = rs.missing_controller_messages
+    assert_equal 2, messages.size
+    assert_match %r{\AGET /photos/:id\(\.:format\) references a missing controller: .*PhotosController}, messages[0]
+    assert_match %r{\AGET /albums\(\.:format\) references a missing controller: .*AlbumsController}, messages[1]
+  end
+
+  def test_missing_controller_messages_include_the_route_source_location
+    rs = ::ActionDispatch::Routing::RouteSet.new
+    ActionDispatch::Routing::Mapper.with(route_source_locations: true) do
+      rs.draw do
+        get "/photos" => "photos#index"
+      end
+    end
+
+    assert_match %r{\(defined at .*routing_test\.rb:\d+\)\z}, rs.missing_controller_messages.first
   end
 end
 
@@ -938,16 +918,20 @@ class RouteSetTest < ActiveSupport::TestCase
     @set = make_set
   end
 
-  def request
-    @request ||= ActionController::TestRequest.new
-  end
-
   def default_route_set
     @default_route_set ||= begin
       set = ActionDispatch::Routing::RouteSet.new
       set.draw do
-        ActiveSupport::Deprecation.silence do
-          get "/:controller(/:action(/:id))"
+        {
+          "accounts" => %w(index list_all),
+          "foo"      => %w(index),
+          "pages"    => %w(index show),
+        }.each do |controller, actions|
+          get "/#{controller}", to: "#{controller}#index"
+
+          actions.each do |action|
+            get "/#{controller}/#{action}(/:id)", to: "#{controller}##{action}"
+          end
         end
       end
       set
@@ -955,24 +939,22 @@ class RouteSetTest < ActiveSupport::TestCase
   end
 
   def test_generate_extras
-    set.draw { ActiveSupport::Deprecation.silence { get ":controller/(:action(/:id))" } }
+    set.draw { get "foo(/bar(/:id))", to: "foo#bar" }
     path, extras = set.generate_extras(controller: "foo", action: "bar", id: 15, this: "hello", that: "world")
     assert_equal "/foo/bar/15", path
     assert_equal %w(that this), extras.map(&:to_s).sort
   end
 
   def test_extra_keys
-    set.draw { ActiveSupport::Deprecation.silence { get ":controller/:action/:id" } }
+    set.draw { get "foo/bar/:id", to: "foo#bar" }
     extras = set.extra_keys(controller: "foo", action: "bar", id: 15, this: "hello", that: "world")
     assert_equal %w(that this), extras.map(&:to_s).sort
   end
 
   def test_generate_extras_not_first
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id.:format"
-        get ":controller/:action/:id"
-      end
+      get "foo/bar/:id.:format", to: "foo#bar"
+      get "foo/bar/:id", to: "foo#bar"
     end
     path, extras = set.generate_extras(controller: "foo", action: "bar", id: 15, this: "hello", that: "world")
     assert_equal "/foo/bar/15", path
@@ -981,10 +963,8 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_generate_not_first
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id.:format"
-        get ":controller/:action/:id"
-      end
+      get "foo/bar/:id.:format", to: "foo#bar"
+      get "foo/bar/:id", to: "foo#bar"
     end
     assert_equal "/foo/bar/15?this=hello",
         url_for(set, controller: "foo", action: "bar", id: 15, this: "hello")
@@ -992,10 +972,8 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_extra_keys_not_first
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id.:format"
-        get ":controller/:action/:id"
-      end
+      get "foo/bar/:id.:format", to: "foo#bar"
+      get "foo/bar/:id", to: "foo#bar"
     end
     extras = set.extra_keys(controller: "foo", action: "bar", id: 15, this: "hello", that: "world")
     assert_equal %w(that this), extras.map(&:to_s).sort
@@ -1125,29 +1103,14 @@ class RouteSetTest < ActiveSupport::TestCase
       controller.index_url(baz: "bar")
   end
 
-  def test_draw_default_route
-    set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
-    end
-
-    assert_equal 1, set.routes.size
-
-    assert_equal "/users/show/10",  url_for(set, controller: "users", action: "show", id: 10)
-    assert_equal "/users/index/10", url_for(set, controller: "users", id: 10)
-
-    assert_equal({ controller: "users", action: "index", id: "10" }, set.recognize_path("/users/index/10"))
-    assert_equal({ controller: "users", action: "index", id: "10" }, set.recognize_path("/users/index/10/"))
-  end
-
   def test_route_with_parameter_shell
     set.draw do
       get "page/:id" => "pages#show", :id => /\d+/
 
-      ActiveSupport::Deprecation.silence do
-        get "/:controller(/:action(/:id))"
-      end
+      get "/pages" => "pages#index"
+      get "/pages/index" => "pages#index"
+      get "/pages/list" => "pages#list"
+      get "/pages/show(/:id)" => "pages#show"
     end
 
     assert_equal({ controller: "pages", action: "index" }, request_path_params("/pages"))
@@ -1204,10 +1167,12 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_route_error_with_missing_controller
     set.draw do
-      get    "/people" => "missing#index"
+      get    "/people" => "does_not_exists#index"
     end
 
-    assert_raises(ActionController::RoutingError) { request_path_params "/people" }
+    assert_raises(ActionDispatch::MissingController, match: "uninitialized constant DoesNotExistsController") do
+      request_path_params "/people"
+    end
   end
 
   def test_recognize_with_encoded_id_and_regex
@@ -1400,9 +1365,8 @@ class RouteSetTest < ActiveSupport::TestCase
     @set = make_set false
 
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:id/:action"
-      end
+      get "people/:id/show" => "people#show"
+      get "people/:id/destroy" => "people#destroy"
     end
 
     get URI("http://test.host/people/7/show")
@@ -1415,10 +1379,7 @@ class RouteSetTest < ActiveSupport::TestCase
 
     set.draw do
       get "about" => "welcome#about"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:id/:action"
-      end
+      get "welcom/get/:id" => "welcom#get"
     end
 
     get URI("http://test.host/welcom/get/7")
@@ -1429,7 +1390,7 @@ class RouteSetTest < ActiveSupport::TestCase
   end
 
   def test_generate
-    set.draw { ActiveSupport::Deprecation.silence { get ":controller/:action/:id" } }
+    set.draw { get "foo/bar/:id" => "foo#bar" }
 
     args = { controller: "foo", action: "bar", id: "7", x: "y" }
     assert_equal "/foo/bar/7?x=y",     url_for(set, args)
@@ -1440,9 +1401,7 @@ class RouteSetTest < ActiveSupport::TestCase
   def test_generate_with_path_prefix
     set.draw do
       scope "my" do
-        ActiveSupport::Deprecation.silence do
-          get ":controller(/:action(/:id))"
-        end
+        get "foo/bar(/:id)" => "foo#bar"
       end
     end
 
@@ -1453,9 +1412,7 @@ class RouteSetTest < ActiveSupport::TestCase
   def test_generate_with_blank_path_prefix
     set.draw do
       scope "" do
-        ActiveSupport::Deprecation.silence do
-          get ":controller(/:action(/:id))"
-        end
+        get "foo/bar(/:id)" => "foo#bar"
       end
     end
 
@@ -1467,11 +1424,9 @@ class RouteSetTest < ActiveSupport::TestCase
     @set = make_set false
 
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/connection/manage(/:action)" => "connection/manage#index"
-        get "/connection/connection" => "connection/connection#index"
-        get "/connection" => "connection#index", :as => "family_connection"
-      end
+      get "/connection/manage" => "connection/manage#index"
+      get "/connection/connection" => "connection/connection#index"
+      get "/connection" => "connection#index", :as => "family_connection"
     end
 
     assert_equal({ controller: "connection/manage",
@@ -1489,9 +1444,8 @@ class RouteSetTest < ActiveSupport::TestCase
     @set = make_set false
 
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get ":controller(/:action(/:id))"
-      end
+      get "books" => "books#index"
+      get "books/show(/:id)" => "books#show"
     end
 
     get URI("http://test.host/books/show/10")
@@ -1506,10 +1460,8 @@ class RouteSetTest < ActiveSupport::TestCase
 
     set.draw do
       get "show_weblog/:parameter" => "weblog#show"
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller(/:action(/:id))"
-      end
+      get "weblog/show(/:id)" => "weblog#show"
+      get "weblog/edit" => "weblog#edit"
     end
 
     get URI("http://test.host/weblog/show/1")
@@ -1537,7 +1489,7 @@ class RouteSetTest < ActiveSupport::TestCase
   def test_expiry_determination_should_consider_values_with_to_param
     @set = make_set false
 
-    set.draw { ActiveSupport::Deprecation.silence { get "projects/:project_id/:controller/:action" } }
+    set.draw { get "projects/:project_id/weblog/show" => "weblog#show" }
 
     get URI("http://test.host/projects/1/weblog/show")
 
@@ -1617,12 +1569,12 @@ class RouteSetTest < ActiveSupport::TestCase
     set.draw do
       get "page/:name" => "pages#show", :constraints => lambda { |request|
         name_param = request.params[:name]
-        return true
+        true
       }
     end
     assert_equal({ controller: "pages", action: "show", name: "mypage" },
       set.recognize_path("http://subdomain.example.org/page/mypage"))
-    assert_equal(name_param, "mypage")
+    assert_equal("mypage", name_param)
   end
 
   def test_route_requirement_recognize_with_ignore_case
@@ -1714,9 +1666,7 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_assign_route_options_with_anchor_chars
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/cars/:action/:person/:car/", controller: "cars"
-      end
+      get "/cars/buy/:person/:car/", controller: "cars", action: "buy"
     end
 
     assert_equal "/cars/buy/1/2", url_for(set, controller: "cars", action: "buy", person: "1", car: "2")
@@ -1726,9 +1676,7 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_segmentation_of_dot_path
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/books/:action.rss", controller: "books"
-      end
+      get "/books/list.rss", controller: "books", action: "list"
     end
 
     assert_equal "/books/list.rss", url_for(set, controller: "books", action: "list")
@@ -1738,9 +1686,8 @@ class RouteSetTest < ActiveSupport::TestCase
 
   def test_segmentation_of_dynamic_dot_path
     set.draw do
-      ActiveSupport::Deprecation.silence do
-        get "/books(/:action(.:format))", controller: "books"
-      end
+      get "/books(.:format)", controller: "books", action: "index"
+      get "/books/list(.:format)", controller: "books", action: "list"
     end
 
     assert_equal "/books/list.rss", url_for(set, controller: "books", action: "list", format: "rss")
@@ -1752,19 +1699,6 @@ class RouteSetTest < ActiveSupport::TestCase
     assert_equal({ controller: "books", action: "list", format: "xml" }, set.recognize_path("/books/list.xml"))
     assert_equal({ controller: "books", action: "list" },  set.recognize_path("/books/list"))
     assert_equal({ controller: "books", action: "index" }, set.recognize_path("/books"))
-  end
-
-  def test_slashes_are_implied
-    set.draw { ActiveSupport::Deprecation.silence { get("/:controller(/:action(/:id))") } }
-
-    assert_equal "/content",        url_for(set, controller: "content", action: "index")
-    assert_equal "/content/list",   url_for(set, controller: "content", action: "list")
-    assert_equal "/content/show/1", url_for(set, controller: "content", action: "show", id: "1")
-
-    assert_equal({ controller: "content", action: "index" }, set.recognize_path("/content"))
-    assert_equal({ controller: "content", action: "index" }, set.recognize_path("/content/index"))
-    assert_equal({ controller: "content", action: "list" },  set.recognize_path("/content/list"))
-    assert_equal({ controller: "content", action: "show", id: "1" }, set.recognize_path("/content/show/1"))
   end
 
   def test_default_route_recognition
@@ -1845,18 +1779,12 @@ class RouteSetTest < ActiveSupport::TestCase
       get "ibocorp(/:page)" => "ibocorp#show",
                              :constraints => { page: /\d+/ },
                              :defaults => { page: 1 }
-
-      ActiveSupport::Deprecation.silence do
-        get ":controller/:action/:id"
-      end
     end
 
     assert_equal "/ibocorp", url_for(set, controller: "ibocorp", action: "show", page: 1)
   end
 
   include ActionDispatch::RoutingVerbs
-
-  alias :routes :set
 
   def test_generate_with_optional_params_recalls_last_request
     @set = make_set false
@@ -1872,9 +1800,8 @@ class RouteSetTest < ActiveSupport::TestCase
 
       get "blog/show/:id", controller: "blog", action: "show", id: /\d+/
 
-      ActiveSupport::Deprecation.silence do
-        get "blog/:controller/:action(/:id)"
-      end
+      get "blog/articles/edit(/:id)", controller: "articles", action: "edit"
+      get "blog/articles/show_stats", controller: "articles", action: "show_stats"
 
       get "*anything", controller: "blog", action: "unknown_request"
     end
@@ -1964,18 +1891,33 @@ class RackMountIntegrationTests < ActiveSupport::TestCase
 
     get "news(.:format)" => "news#index"
 
-    ActiveSupport::Deprecation.silence do
-      get "comment/:id(/:action)" => "comments#show"
-      get "ws/:controller(/:action(/:id))", ws: true
-      get "account(/:action)" => "account#subscription"
-      get "pages/:page_id/:controller(/:action(/:id))"
-      get ":controller/ping", action: "ping"
-    end
+    get "comment/:id" => "comments#show"
+
+    get "ws/posts", controller: "posts", action: "index", ws: true
+    get "ws/posts/list", controller: "posts", action: "list", ws: true
+    get "ws/posts/show(/:id)", controller: "posts", action: "show", ws: true
+
+    get "account", controller: "account", action: "subscription"
+    get "account/subscription", controller: "account", action: "subscription"
+    get "account/billing", controller: "account", action: "billing"
+
+    get "pages/:page_id/notes", controller: "notes", action: "index"
+    get "pages/:page_id/notes/list", controller: "notes", action: "list"
+    get "pages/:page_id/notes/show(/:id)", controller: "notes", action: "show"
 
     get "こんにちは/世界", controller: "news", action: "index"
 
-    ActiveSupport::Deprecation.silence do
-      match ":controller(/:action(/:id))(.:format)", via: :all
+    # Stands in for the `:controller(/:action(/:id))(.:format)` catch-all the
+    # expectations below were written against.
+    {
+      "archive" => %w(),
+      "posts"   => %w(create index ping show),
+    }.each do |controller, actions|
+      get "#{controller}(.:format)", controller: controller, action: "index"
+
+      actions.each do |action|
+        match "#{controller}/#{action}(/:id)(.:format)", controller: controller, action: action, via: :all
+      end
     end
 
     root to: "news#index"
@@ -2059,6 +2001,7 @@ class RackMountIntegrationTests < ActiveSupport::TestCase
     assert_equal({ controller: "geocode", action: "show", postalcode: "12345" }, @routes.recognize_path("/extended/geocode/12345"))
 
     assert_equal({ controller: "news", action: "index" }, @routes.recognize_path("/", method: :get))
+    assert_equal({ controller: "news", action: "index" }, @routes.recognize_path(nil))
     assert_equal({ controller: "news", action: "index", format: "rss" }, @routes.recognize_path("/news.rss", method: :get))
 
     assert_raise(ActionController::RoutingError) { @routes.recognize_path("/none", method: :get) }
@@ -2101,11 +2044,11 @@ class RackMountIntegrationTests < ActiveSupport::TestCase
   end
 
   def test_unicode_path
-    assert_equal({ controller: "news", action: "index" }, @routes.recognize_path(URI::DEFAULT_PARSER.escape("こんにちは/世界"), method: :get))
+    assert_equal({ controller: "news", action: "index" }, @routes.recognize_path(URI::RFC2396_PARSER.escape("こんにちは/世界"), method: :get))
   end
 
   def test_downcased_unicode_path
-    assert_equal({ controller: "news", action: "index" }, @routes.recognize_path(URI::DEFAULT_PARSER.escape("こんにちは/世界").downcase, method: :get))
+    assert_equal({ controller: "news", action: "index" }, @routes.recognize_path(URI::RFC2396_PARSER.escape("こんにちは/世界").downcase, method: :get))
   end
 
   private

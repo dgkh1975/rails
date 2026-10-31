@@ -4,15 +4,13 @@ require "action_view/dependency_tracker"
 
 module ActionView
   class Digestor
-    @@digest_mutex = Mutex.new
-
     class << self
       # Supported options:
       #
-      # * <tt>name</tt>         - Template name
-      # * <tt>format</tt>       - Template format
-      # * <tt>finder</tt>       - An instance of <tt>ActionView::LookupContext</tt>
-      # * <tt>dependencies</tt> - An array of dependent views
+      # * `name`         - Template name
+      # * `format`       - Template format
+      # * `finder`              - An instance of ActionView::LookupContext
+      # * `dependencies` - An array of dependent views
       def digest(name:, format: nil, finder:, dependencies: nil)
         if dependencies.nil? || dependencies.empty?
           cache_key = "#{name}.#{format}"
@@ -23,10 +21,10 @@ module ActionView
 
         # this is a correctly done double-checked locking idiom
         # (Concurrent::Map's lookups have volatile semantics)
-        finder.digest_cache[cache_key] || @@digest_mutex.synchronize do
+        finder.digest_cache[cache_key] || digest_mutex.synchronize do
           finder.digest_cache.fetch(cache_key) do # re-check under lock
-            partial = name.include?("/_")
-            root = tree(name, finder, partial)
+            path = TemplatePath.parse(name)
+            root = tree(path.to_s, finder, path.partial?)
             dependencies.each do |injected_dep|
               root.children << Injected.new(injected_dep, nil, nil)
             end if dependencies
@@ -39,12 +37,14 @@ module ActionView
         ActionView::Base.logger || NullLogger
       end
 
-      # Create a dependency tree for template named +name+.
+      # Create a dependency tree for template named `name`.
       def tree(name, finder, partial = false, seen = {})
         logical_name = name.gsub(%r|/_|, "/")
         interpolated = name.include?("#")
 
-        if !interpolated && (template = find_template(finder, logical_name, [], partial, []))
+        path = TemplatePath.parse(name)
+
+        if !interpolated && (template = find_template(finder, path.name, [path.prefix], partial, []))
           if node = seen[template.identifier] # handle cycles in the tree
             node
           else
@@ -66,9 +66,14 @@ module ActionView
       end
 
       private
+        # Digest caches are per-Ractor, so the mutex is too.
+        def digest_mutex
+          ActiveSupport::Ractors.store_if_absent(:action_view_digest_mutex) { Mutex.new }
+        end
+
         def find_template(finder, name, prefixes, partial, keys)
           finder.disable_cache do
-            finder.find_all(name, prefixes, partial, keys).first
+            finder.find(name, prefixes, partial, keys)
           end
         end
     end
@@ -105,8 +110,12 @@ module ActionView
         end.join("-")
       end
 
-      def to_dep_map
-        children.any? ? { name => children.map(&:to_dep_map) } : name
+      def to_dep_map(seen = Set.new.compare_by_identity)
+        if seen.add?(self)
+          children.any? ? { name => children.map { |c| c.to_dep_map(seen) } } : name
+        else # the tree has a cycle
+          name
+        end
       end
     end
 

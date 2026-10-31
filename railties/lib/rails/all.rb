@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
-# rubocop:disable Style/RedundantBegin
-
+# :markup: markdown
 require "rails"
 
 %w(
@@ -15,10 +14,10 @@ require "rails"
   action_mailbox/engine
   action_text/engine
   rails/test_unit/railtie
-  sprockets/railtie
 ).each do |railtie|
-  begin
+  begin # rubocop:disable Style/RedundantBegin
     require railtie
-  rescue LoadError
+  rescue LoadError => ex
+    raise unless ex.path == railtie
   end
 end

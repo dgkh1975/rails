@@ -5,7 +5,7 @@ require "models/post"
 
 module ActiveRecord
   class RelationMutationTest < ActiveRecord::TestCase
-    (Relation::MULTI_VALUE_METHODS - [:extending, :order, :unscope, :select]).each do |method|
+    (Relation::MULTI_VALUE_METHODS - [:extending, :order, :default_order, :unscope, :select, :with]).each do |method|
       test "##{method}!" do
         assert relation.public_send("#{method}!", :foo).equal?(relation)
         assert_equal [:foo], relation.public_send("#{method}_values")
@@ -30,12 +30,16 @@ module ActiveRecord
       assert_equal "posts", node.expr.relation.name
     end
 
-    test "#order! on non-string does not attempt regexp match for references" do
-      obj = Object.new
-      assert_not_called(obj, :=~) do
-        assert relation.order!(obj)
-        assert_equal [obj], relation.order_values
-      end
+    test "#order! with Arel::Attribute extracts table reference" do
+      attr = Post.arel_table[:name]
+      assert relation.order!(attr).equal?(relation)
+      assert_equal [attr], relation.order_values
+      assert_equal ["posts"], relation.references_values
+    end
+
+    test "#default_order!" do
+      assert relation.default_order!("name ASC").equal?(relation)
+      assert_equal ["name ASC"], relation.default_order_values
     end
 
     test "extending!" do
@@ -54,7 +58,17 @@ module ActiveRecord
       assert_equal [], relation.extending_values
     end
 
-    (Relation::SINGLE_VALUE_METHODS - [:lock, :reordering, :reverse_order, :create_with, :skip_query_cache, :strict_loading]).each do |method|
+    test "#limit!" do
+      assert relation.limit!(5).equal?(relation)
+      assert_equal 5, relation.limit_value
+    end
+
+    test "#offset!" do
+      assert relation.offset!(5).equal?(relation)
+      assert_equal 5, relation.offset_value
+    end
+
+    (Relation::SINGLE_VALUE_METHODS - [:limit, :offset, :lock, :reordering, :reverse_order, :create_with, :skip_query_cache, :strict_loading]).each do |method|
       test "##{method}!" do
         assert relation.public_send("#{method}!", :foo).equal?(relation)
         assert_equal :foo, relation.public_send("#{method}_value")
@@ -118,8 +132,8 @@ module ActiveRecord
 
     test "none!" do
       assert relation.none!.equal?(relation)
-      assert_equal [NullRelation], relation.extending_values
-      assert relation.is_a?(NullRelation)
+      assert_predicate relation, :none?
+      assert_predicate relation, :null_relation?
     end
 
     test "distinct!" do
@@ -135,6 +149,13 @@ module ActiveRecord
     test "skip_preloading!" do
       relation.skip_preloading!
       assert relation.skip_preloading_value
+    end
+
+    test "#regroup!" do
+      @relation = relation.group("foo")
+
+      assert relation.regroup!("bar").equal?(relation)
+      assert_equal ["bar"], relation.group_values
     end
 
     private

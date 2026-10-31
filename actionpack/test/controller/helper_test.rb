@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "abstract_unit"
+require "active_support/testing/ractors_assertions"
 
 ActionController::Base.helpers_path = File.expand_path("../fixtures/helpers", __dir__)
 
@@ -37,7 +38,7 @@ class JustMeController < ActionController::Base
   clear_helpers
 
   def flash
-    render inline: "<h1><%= notice %></h1>"
+    render inline: "<h1><%= request.flash[:notice] %></h1>"
   end
 
   def lib
@@ -87,17 +88,22 @@ end
 class HelpersTypoControllerTest < ActiveSupport::TestCase
   def test_helper_typo_error_message
     e = assert_raise(NameError) { HelpersTypoController.helper "admin/users" }
-    # This message is better if autoloading.
-    assert_equal "uninitialized constant Admin::UsersHelper\nDid you mean?  Admin::UsersHelpeR", e.message
+    assert_includes e.message, "uninitialized constant Admin::UsersHelper"
+    assert_includes e.detailed_message, "Did you mean?  Admin::UsersHelpeR"
   end
 end
 
 class HelperTest < ActiveSupport::TestCase
+  include ActiveSupport::Testing::RactorsAssertions
+
   class TestController < ActionController::Base
     attr_accessor :delegate_attr
     def delegate_method() end
     def delegate_method_arg(arg); arg; end
     def delegate_method_kwarg(hi:); hi; end
+    def method_that_raises
+      raise "an error occurred"
+    end
   end
 
   def setup
@@ -143,6 +149,16 @@ class HelperTest < ActiveSupport::TestCase
     assert_nothing_raised { @controller_class.helper_method :delegate_method_kwarg }
 
     assert_equal(:there, @controller_class.new.helpers.delegate_method_kwarg(hi: :there))
+  end
+
+  def test_helper_method_with_error_has_correct_backgrace
+    @controller_class.helper_method :method_that_raises
+    expected_backtrace_pattern = "#{__FILE__}:#{__LINE__ - 1}"
+
+    error = assert_raises(RuntimeError) do
+      @controller_class.new.helpers.method_that_raises
+    end
+    assert_not_nil error.backtrace.find { |line| line.include?(expected_backtrace_pattern) }
   end
 
   def test_helper_attr
@@ -245,6 +261,14 @@ class HelperTest < ActiveSupport::TestCase
     AllHelpersController.config.my_var = "smth"
 
     assert_equal "smth", AllHelpersController.helpers.config.my_var
+  end
+
+  def test_helper_methods_are_ractor_safe
+    controller = Class.new(ActionController::Base) do
+      helper_method :foo
+    end
+
+    assert_ractor_shareable controller._helper_methods
   end
 
   private

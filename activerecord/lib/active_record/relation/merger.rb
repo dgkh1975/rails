@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+# :markup: markdown
 require "active_support/core_ext/hash/keys"
 
 module ActiveRecord
@@ -7,16 +8,15 @@ module ActiveRecord
     class HashMerger # :nodoc:
       attr_reader :relation, :hash
 
-      def initialize(relation, hash, rewhere = nil)
+      def initialize(relation, hash)
         hash.assert_valid_keys(*Relation::VALUE_METHODS)
 
         @relation = relation
         @hash     = hash
-        @rewhere  = rewhere
       end
 
       def merge
-        Merger.new(relation, other, @rewhere).merge
+        Merger.new(relation, other).merge
       end
 
       # Applying values to a relation has some side effects. E.g.
@@ -25,7 +25,7 @@ module ActiveRecord
       # the values.
       def other
         other = Relation.create(
-          relation.klass,
+          relation.model,
           table: relation.table,
           predicate_builder: relation.predicate_builder
         )
@@ -44,37 +44,33 @@ module ActiveRecord
     class Merger # :nodoc:
       attr_reader :relation, :values, :other
 
-      def initialize(relation, other, rewhere = nil)
+      def initialize(relation, other)
         @relation = relation
         @values   = other.values
         @other    = other
-        @rewhere  = rewhere
       end
 
-      NORMAL_VALUES = Relation::VALUE_METHODS -
-                      Relation::CLAUSE_METHODS -
-                      [:includes, :preload, :joins, :left_outer_joins, :order, :reverse_order, :lock, :create_with, :reordering] # :nodoc:
-
-      def normal_values
-        NORMAL_VALUES
-      end
+      NORMAL_VALUES = (Relation::VALUE_METHODS - Relation::CLAUSE_METHODS -
+                      [
+                        :select, :includes, :preload, :joins, :left_outer_joins,
+                        :order, :reverse_order, :lock, :create_with, :reordering
+                      ]).freeze
 
       def merge
-        normal_values.each do |name|
+        NORMAL_VALUES.each do |name|
           value = values[name]
           # The unless clause is here mostly for performance reasons (since the `send` call might be moderately
           # expensive), most of the time the value is going to be `nil` or `.blank?`, the only catch is that
           # `false.blank?` returns `true`, so there needs to be an extra check so that explicit `false` values
           # don't fall through the cracks.
           unless value.nil? || (value.blank? && false != value)
-            if name == :select
-              relation._select!(*value)
-            else
-              relation.public_send("#{name}!", *value)
-            end
+            relation.public_send(:"#{name}!", *value)
           end
         end
 
+        relation.none! if other.null_relation?
+
+        merge_select_values
         merge_multi_values
         merge_single_values
         merge_clauses
@@ -86,15 +82,27 @@ module ActiveRecord
       end
 
       private
+        def merge_select_values
+          return if other.select_values.empty?
+
+          if other.model == relation.model
+            relation.select_values |= other.select_values
+          else
+            relation.select_values |= other.instance_eval do
+              arel_columns(select_values)
+            end
+          end
+        end
+
         def merge_preloads
           return if other.preload_values.empty? && other.includes_values.empty?
 
-          if other.klass == relation.klass
+          if other.model == relation.model
             relation.preload_values |= other.preload_values unless other.preload_values.empty?
             relation.includes_values |= other.includes_values unless other.includes_values.empty?
           else
-            reflection = relation.klass.reflect_on_all_associations.find do |r|
-              r.class_name == other.klass.name
+            reflection = relation.model.reflect_on_all_associations.find do |r|
+              r.class_name == other.model.name
             end || return
 
             unless other.preload_values.empty?
@@ -110,7 +118,7 @@ module ActiveRecord
         def merge_joins
           return if other.joins_values.empty?
 
-          if other.klass == relation.klass
+          if other.model == relation.model
             relation.joins_values |= other.joins_values
           else
             associations, others = other.joins_values.partition do |join|
@@ -129,7 +137,7 @@ module ActiveRecord
         def merge_outer_joins
           return if other.left_outer_joins_values.empty?
 
-          if other.klass == relation.klass
+          if other.model == relation.model
             relation.left_outer_joins_values |= other.left_outer_joins_values
           else
             associations, others = other.left_outer_joins_values.partition do |join|
@@ -154,8 +162,7 @@ module ActiveRecord
             relation.order!(*other.order_values)
           end
 
-          extensions = other.extensions - relation.extensions
-          relation.extending!(*extensions) if extensions.any?
+          relation.extending!(*other.extensions)
         end
 
         def merge_single_values
@@ -169,7 +176,7 @@ module ActiveRecord
         def merge_clauses
           relation.from_clause = other.from_clause if replace_from_clause?
 
-          where_clause = relation.where_clause.merge(other.where_clause, @rewhere)
+          where_clause = relation.where_clause.merge(other.where_clause)
           relation.where_clause = where_clause unless where_clause.empty?
 
           having_clause = relation.having_clause.merge(other.having_clause)
@@ -178,7 +185,7 @@ module ActiveRecord
 
         def replace_from_clause?
           relation.from_clause.empty? && !other.from_clause.empty? &&
-            relation.klass.base_class == other.klass.base_class
+            relation.model.base_class == other.model.base_class
         end
     end
   end
